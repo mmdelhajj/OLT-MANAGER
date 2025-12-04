@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OLT Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-blue-700 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-6">
+            <h1 class="text-2xl font-bold">EPON OLT Manager</h1>
+            <p class="text-blue-200">Dashboard for VSOL EPON OLT/ONU Management</p>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Stats Cards -->
+        <div id="stats" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white rounded-lg shadow p-6">
+                <p class="text-sm text-gray-500 uppercase">Total OLTs</p>
+                <p class="text-2xl font-semibold text-gray-700" id="stat-total-olts">-</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <p class="text-sm text-gray-500 uppercase">Online OLTs</p>
+                <p class="text-2xl font-semibold text-green-600" id="stat-online-olts">-</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <p class="text-sm text-gray-500 uppercase">Total ONUs</p>
+                <p class="text-2xl font-semibold text-gray-700" id="stat-total-onus">-</p>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <p class="text-sm text-gray-500 uppercase">Offline ONUs</p>
+                <p class="text-2xl font-semibold text-red-600" id="stat-offline-onus">-</p>
+            </div>
+        </div>
+
+        <!-- OLTs Section -->
+        <div class="mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold text-gray-800">OLTs</h2>
+                <button onclick="showAddOLTModal()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                    + Add OLT
+                </button>
+            </div>
+            <div id="olts-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <p class="text-gray-500">Loading...</p>
+            </div>
+        </div>
+
+        <!-- ONUs Section -->
+        <div>
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-800">ONUs</h2>
+                    <p class="text-sm text-gray-500" id="onu-count">Loading...</p>
+                </div>
+                <div class="flex gap-2">
+                    <input type="text" id="search-input" placeholder="Search by name or MAC..."
+                           class="px-4 py-2 border rounded-md w-64" onkeypress="if(event.key==='Enter')searchONUs()">
+                    <button onclick="searchONUs()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300">Search</button>
+                    <button onclick="clearSearch()" class="px-4 py-2 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200">Clear</button>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">OLT</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">PON/ONU</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">MAC Address</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Seen</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="onus-table" class="bg-white divide-y divide-gray-200">
+                            <tr><td colspan="7" class="px-6 py-4 text-center text-gray-500">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add OLT Modal -->
+    <div id="add-olt-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+            <h2 class="text-xl font-bold mb-4">Add New OLT</h2>
+            <form id="add-olt-form" onsubmit="addOLT(event)">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Name</label>
+                        <input type="text" name="name" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2" placeholder="OLT-1">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">IP Address</label>
+                        <input type="text" name="ip_address" required pattern="^(\d{1,3}\.){3}\d{1,3}$" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2" placeholder="10.10.10.1">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Username</label>
+                            <input type="text" name="username" required value="admin" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Password</label>
+                            <input type="password" name="password" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Model</label>
+                            <select name="model" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2">
+                                <option value="">Select Model</option>
+                                <option value="V1600D8">V1600D8</option>
+                                <option value="V1601E04">V1601E04</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">PON Ports</label>
+                            <input type="number" name="pon_ports" min="1" max="16" value="4" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm border p-2">
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-6 flex justify-end space-x-3">
+                    <button type="button" onclick="hideAddOLTModal()" class="px-4 py-2 border rounded-md text-gray-700 hover:bg-gray-50">Cancel</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">Add OLT</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-gray-400 py-4 mt-8">
+        <div class="max-w-7xl mx-auto px-4 text-center text-sm">
+            EPON OLT Manager - Polling interval: 5 minutes
+        </div>
+    </footer>
+
+    <script>
+        const API_BASE = '';
+        let selectedOLT = null;
+
+        // Load data on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadOLTs();
+            loadONUs();
+            // Refresh every 30 seconds
+            setInterval(() => {
+                loadStats();
+                loadOLTs();
+            }, 30000);
+        });
+
+        async function loadStats() {
+            try {
+                const res = await axios.get(API_BASE + '/api/dashboard');
+                document.getElementById('stat-total-olts').textContent = res.data.total_olts;
+                document.getElementById('stat-online-olts').textContent = res.data.online_olts;
+                document.getElementById('stat-total-onus').textContent = res.data.total_onus;
+                document.getElementById('stat-offline-onus').textContent = res.data.offline_onus;
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        async function loadOLTs() {
+            try {
+                const res = await axios.get(API_BASE + '/api/olts');
+                const container = document.getElementById('olts-container');
+                if (res.data.olts.length === 0) {
+                    container.innerHTML = '<div class="bg-white rounded-lg shadow p-8 text-center text-gray-500 col-span-3">No OLTs configured. Add your first OLT to get started.</div>';
+                    return;
+                }
+                container.innerHTML = res.data.olts.map(olt => `
+                    <div class="bg-white rounded-lg shadow p-4 cursor-pointer hover:shadow-lg ${selectedOLT === olt.id ? 'ring-2 ring-blue-500' : ''}" onclick="selectOLT(${olt.id})">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <h3 class="font-semibold text-lg">${olt.name}</h3>
+                                <p class="text-sm text-gray-500">${olt.ip_address}</p>
+                                ${olt.model ? `<p class="text-xs text-gray-400">${olt.model}</p>` : ''}
+                            </div>
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full ${olt.is_online ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                                ${olt.is_online ? 'Online' : 'Offline'}
+                            </span>
+                        </div>
+                        <div class="mt-4 grid grid-cols-2 gap-2 text-sm">
+                            <div><span class="text-gray-500">ONUs:</span> <span class="font-semibold">${olt.onu_count}</span></div>
+                            <div><span class="text-gray-500">Online:</span> <span class="font-semibold text-green-600">${olt.online_onu_count}</span></div>
+                        </div>
+                        ${olt.last_poll ? `<p class="mt-2 text-xs text-gray-400">Last poll: ${new Date(olt.last_poll).toLocaleString()}</p>` : ''}
+                        ${olt.last_error ? `<p class="mt-1 text-xs text-red-500 truncate" title="${olt.last_error}">Error: ${olt.last_error}</p>` : ''}
+                        <div class="mt-4 flex justify-end space-x-2">
+                            <button onclick="event.stopPropagation(); pollOLT(${olt.id})" class="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200">Poll Now</button>
+                            <button onclick="event.stopPropagation(); deleteOLT(${olt.id}, '${olt.name}')" class="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200">Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load OLTs:', e);
+            }
+        }
+
+        async function loadONUs(query = '') {
+            try {
+                let url = API_BASE + '/api/onus';
+                if (query) {
+                    url = API_BASE + '/api/onus/search?q=' + encodeURIComponent(query);
+                } else if (selectedOLT) {
+                    url = API_BASE + '/api/olts/' + selectedOLT + '/onus';
+                }
+                const res = await axios.get(url);
+                document.getElementById('onu-count').textContent = res.data.total + ' ONUs shown';
+                const tbody = document.getElementById('onus-table');
+                if (res.data.onus.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500">No ONUs found</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = res.data.onus.map(onu => `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${onu.olt_name}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">0/${onu.pon_port}:${onu.onu_id}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">${onu.mac_address}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${onu.description || '-'}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full ${onu.is_online ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                                ${onu.is_online ? 'Online' : 'Offline'}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${new Date(onu.last_seen).toLocaleString()}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm">
+                            <button onclick="deleteONU(${onu.id})" class="text-red-600 hover:text-red-900">Delete</button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load ONUs:', e);
+            }
+        }
+
+        function selectOLT(id) {
+            selectedOLT = selectedOLT === id ? null : id;
+            loadOLTs();
+            loadONUs();
+        }
+
+        function searchONUs() {
+            const query = document.getElementById('search-input').value;
+            selectedOLT = null;
+            loadOLTs();
+            loadONUs(query);
+        }
+
+        function clearSearch() {
+            document.getElementById('search-input').value = '';
+            selectedOLT = null;
+            loadOLTs();
+            loadONUs();
+        }
+
+        function showAddOLTModal() {
+            document.getElementById('add-olt-modal').classList.remove('hidden');
+        }
+
+        function hideAddOLTModal() {
+            document.getElementById('add-olt-modal').classList.add('hidden');
+            document.getElementById('add-olt-form').reset();
+        }
+
+        async function addOLT(e) {
+            e.preventDefault();
+            const form = e.target;
+            const data = {
+                name: form.name.value,
+                ip_address: form.ip_address.value,
+                username: form.username.value,
+                password: form.password.value,
+                model: form.model.value || null,
+                pon_ports: parseInt(form.pon_ports.value)
+            };
+            try {
+                await axios.post(API_BASE + '/api/olts', data);
+                hideAddOLTModal();
+                loadStats();
+                loadOLTs();
+            } catch (e) {
+                alert('Failed to add OLT: ' + (e.response?.data?.detail || e.message));
+            }
+        }
+
+        async function pollOLT(id) {
+            try {
+                const res = await axios.post(API_BASE + '/api/olts/' + id + '/poll');
+                alert(res.data.message);
+                loadStats();
+                loadOLTs();
+                loadONUs();
+            } catch (e) {
+                alert('Poll failed: ' + (e.response?.data?.detail || e.message));
+            }
+        }
+
+        async function deleteOLT(id, name) {
+            if (!confirm(`Delete OLT "${name}" and all its ONUs?`)) return;
+            try {
+                await axios.delete(API_BASE + '/api/olts/' + id);
+                if (selectedOLT === id) selectedOLT = null;
+                loadStats();
+                loadOLTs();
+                loadONUs();
+            } catch (e) {
+                alert('Failed to delete OLT: ' + (e.response?.data?.detail || e.message));
+            }
+        }
+
+        async function deleteONU(id) {
+            if (!confirm('Delete this ONU record?')) return;
+            try {
+                await axios.delete(API_BASE + '/api/onus/' + id);
+                loadStats();
+                loadONUs();
+            } catch (e) {
+                alert('Failed to delete ONU: ' + (e.response?.data?.detail || e.message));
+            }
+        }
+    </script>
+</body>
+</html>
