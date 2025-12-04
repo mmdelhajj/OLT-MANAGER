@@ -2858,9 +2858,9 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       type: 'olt',
       name: selectedOlt.name,
       x: 50,
-      y: 250,
-      width: 120,
-      height: 60 + selectedOlt.pon_ports * 22,
+      y: 200,
+      width: 130,
+      height: 50 + selectedOlt.pon_ports * 12,
       ponPorts: selectedOlt.pon_ports || 8,
       power: oltPower,
       oltId: selectedOlt.id,
@@ -2878,10 +2878,10 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       type: 'splitter',
       name: type,
       splitterType: type,
-      x: 300 + nodes.filter(n => n.type === 'splitter').length * 180,
-      y: 250,
-      width: 140,
-      height: 40 + splitterDef.ports * 20,
+      x: 220 + nodes.filter(n => n.type === 'splitter').length * 100,
+      y: 200,
+      width: 65,
+      height: 35 + splitterDef.ports * 10,
       inputPorts: 1,
       outputPorts: splitterDef.ports,
       category: splitterDef.category,
@@ -2907,10 +2907,10 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       id: `onu-${Date.now()}`,
       type: 'onu',
       name: onu.description || onu.mac_address,
-      x: 750 + (onuCount % 3) * 120,
-      y: 100 + Math.floor(onuCount / 3) * 90,
-      width: 110,
-      height: 70,
+      x: 450 + (onuCount % 4) * 100,
+      y: 80 + Math.floor(onuCount / 4) * 70,
+      width: 85,
+      height: 55,
       onuId: onu.id,
       mac: onu.mac_address,
       distance: onu.distance || 0,
@@ -2925,16 +2925,16 @@ function SplitterSimulator({ olts = [], onus = [] }) {
 
   // Add generic ONU (not from list)
   const addGenericONU = () => {
-    
+
     const onuCount = nodes.filter(n => n.type === 'onu').length;
     const newNode = {
       id: `onu-${Date.now()}`,
       type: 'onu',
       name: `ONU ${onuCount + 1}`,
-      x: 750 + (onuCount % 3) * 120,
-      y: 100 + Math.floor(onuCount / 3) * 90,
-      width: 110,
-      height: 70,
+      x: 450 + (onuCount % 4) * 100,
+      y: 80 + Math.floor(onuCount / 4) * 70,
+      width: 85,
+      height: 55,
       onuId: null,
       mac: '',
       distance: 500,
@@ -2943,6 +2943,48 @@ function SplitterSimulator({ olts = [], onus = [] }) {
     };
     setNodes([...nodes, newNode]);
     setShowOnuPicker(false);
+  };
+
+  // Add Layer 2 Switch with multiple output ports
+  const addSwitch = (ports) => {
+    const switchCount = nodes.filter(n => n.type === 'switch').length;
+    const newNode = {
+      id: `switch-${Date.now()}`,
+      type: 'switch',
+      name: `Switch ${switchCount + 1}`,
+      x: 600 + (switchCount % 3) * 150,
+      y: 100 + Math.floor(switchCount / 3) * 250,
+      width: 120,
+      height: 30 + ports * 22, // Height based on number of ports
+      ports: ports,
+      uplinkPort: 1,
+    };
+    setNodes([...nodes, newNode]);
+  };
+
+  // Add Building with 12 floors and 2 homes per floor
+  const addBuilding = () => {
+    const buildingCount = nodes.filter(n => n.type === 'building').length;
+    // Create 12 floors with 2 homes each (24 units total)
+    const floors = {};
+    for (let f = 1; f <= 12; f++) {
+      floors[f] = {
+        home1: { customer: '', unit: `${f}A` },
+        home2: { customer: '', unit: `${f}B` },
+      };
+    }
+    const newNode = {
+      id: `building-${Date.now()}`,
+      type: 'building',
+      name: `Building ${buildingCount + 1}`,
+      floors: floors,
+      totalFloors: 12,
+      x: 800 + (buildingCount % 3) * 180,
+      y: 100 + Math.floor(buildingCount / 3) * 350,
+      width: 160,
+      height: 320,
+    };
+    setNodes([...nodes, newNode]);
   };
 
   // Delete node
@@ -2972,7 +3014,34 @@ function SplitterSimulator({ olts = [], onus = [] }) {
         };
       }
     } else if (node.type === 'onu') {
-      return { x: node.x, y: node.y + node.height / 2 };
+      if (portType === 'input') {
+        return { x: node.x, y: node.y + node.height / 2 };
+      } else {
+        // Output port on right side for connecting to switch
+        return { x: node.x + node.width, y: node.y + node.height / 2 };
+      }
+    } else if (node.type === 'switch') {
+      if (portType === 'input') {
+        // Uplink port on left side at top
+        return { x: node.x, y: node.y + 20 };
+      } else {
+        // Output ports on right side - one for each port
+        const portSpacing = 22;
+        return {
+          x: node.x + node.width,
+          y: node.y + 30 + portIndex * portSpacing + portSpacing / 2,
+        };
+      }
+    } else if (node.type === 'building') {
+      // Input ports on left side for each floor
+      const totalFloors = node.totalFloors || 12;
+      const floorHeight = (node.height - 50) / totalFloors;
+      // portIndex is the floor number (1-based), convert to position from top
+      const floorFromTop = totalFloors - portIndex;
+      return {
+        x: node.x,
+        y: node.y + 30 + floorFromTop * floorHeight + floorHeight / 2,
+      };
     }
     return { x: node.x, y: node.y };
   };
@@ -2991,13 +3060,21 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       const fromNode = nodes.find(n => n.id === connecting.nodeId);
       const toNode = node;
 
-      // Valid: OLT output -> Splitter input, Splitter output -> Splitter input, Splitter output -> ONU
+      // Valid connections:
+      // OLT output -> Splitter input
+      // Splitter output -> Splitter input, ONU input
+      // ONU output -> Switch input
+      // Switch output -> Building input
       let isValid = false;
       if (fromNode.type === 'olt' && toNode.type === 'splitter' && portType === 'input') {
         isValid = true;
       } else if (fromNode.type === 'splitter' && connecting.portType === 'output') {
         if (toNode.type === 'splitter' && portType === 'input') isValid = true;
-        if (toNode.type === 'onu') isValid = true;
+        if (toNode.type === 'onu' && portType === 'input') isValid = true;
+      } else if (fromNode.type === 'onu' && connecting.portType === 'output') {
+        if (toNode.type === 'switch' && portType === 'input') isValid = true;
+      } else if (fromNode.type === 'switch' && connecting.portType === 'output') {
+        if (toNode.type === 'building' && portType === 'input') isValid = true;
       }
 
       if (isValid) {
@@ -3019,15 +3096,11 @@ function SplitterSimulator({ olts = [], onus = [] }) {
         // Allow connection if: not duplicate AND destination input is free
         // OLT/Splitter output ports can have multiple cables (to different destinations)
         if (!duplicateConn && !destHasConnection) {
-          // Get default cable length from toolbar input
-          const defaultCableLengthInput = document.getElementById('defaultCableLength');
-          const defaultCableLength = defaultCableLengthInput ? parseInt(defaultCableLengthInput.value) || 500 : 500;
-
           setConnections([...connections, {
             id: `conn-${Date.now()}`,
             from: { nodeId: connecting.nodeId, portType: connecting.portType, portIndex: connecting.portIndex },
             to: { nodeId: node.id, portType: portType, portIndex: portIndex },
-            cableLength: defaultCableLength,
+            cableLength: 500,
             connectors: 2,
           }]);
         }
@@ -3357,22 +3430,38 @@ function SplitterSimulator({ olts = [], onus = [] }) {
 
           <div className="border-l border-gray-300 h-8 mx-2"></div>
 
-          {/* Default Cable Length */}
-          <div className="flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-lg px-3 py-1.5">
-            <svg className="w-4 h-4 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-            <label className="text-sm text-orange-700 font-medium">Cable:</label>
-            <input
-              type="number"
-              id="defaultCableLength"
-              defaultValue={500}
-              className="w-20 px-2 py-1 border border-orange-300 rounded text-sm text-center font-bold"
-              step="50"
-              min="0"
-            />
-            <span className="text-sm text-orange-600">m</span>
+          {/* Switch buttons */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => addSwitch(8)}
+              className="px-3 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 flex items-center gap-1 transition-colors text-sm"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              SW-8
+            </button>
+            <button
+              onClick={() => addSwitch(16)}
+              className="px-3 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 flex items-center gap-1 transition-colors text-sm"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              SW-16
+            </button>
           </div>
+
+          {/* Building button */}
+          <button
+            onClick={addBuilding}
+            className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-1 transition-colors text-sm"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+            Building
+          </button>
 
           <div className="border-l border-gray-300 h-8 mx-2"></div>
 
@@ -3531,10 +3620,10 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                         id: `onu-${Date.now()}`,
                         type: 'onu',
                         name: `ONU ${onuCount + 1}`,
-                        x: 750 + (onuCount % 3) * 120,
-                        y: 100 + Math.floor(onuCount / 3) * 90,
-                        width: 110,
-                        height: 70,
+                        x: 450 + (onuCount % 4) * 100,
+                        y: 80 + Math.floor(onuCount / 4) * 70,
+                        width: 85,
+                        height: 55,
                         onuId: null,
                         mac: '',
                         distance: distance,
@@ -3641,16 +3730,34 @@ function SplitterSimulator({ olts = [], onus = [] }) {
               const fromPos = getPortPosition(fromNode, conn.from.portType, conn.from.portIndex);
               const toPos = getPortPosition(toNode, conn.to.portType, conn.to.portIndex);
 
-              // Calculate power at destination
-              const destPower = powerMap[`${toNode.id}-${toNode.type === 'onu' ? 'rx' : 'input'}`];
-              const status = getPowerStatus(destPower);
+              // Check if this is an ethernet cable (ONU->Switch or Switch->Building)
+              const isEthernetCable = (fromNode.type === 'onu' && toNode.type === 'switch') ||
+                                      (fromNode.type === 'switch' && toNode.type === 'building');
 
-              // Bezier curve
-              const midX = (fromPos.x + toPos.x) / 2;
-              const midY = (fromPos.y + toPos.y) / 2;
-              const path = `M ${fromPos.x} ${fromPos.y} C ${midX} ${fromPos.y}, ${midX} ${toPos.y}, ${toPos.x} ${toPos.y}`;
+              // Calculate power at destination (only for fiber cables)
+              const destPower = !isEthernetCable ? powerMap[`${toNode.id}-${toNode.type === 'onu' ? 'rx' : 'input'}`] : undefined;
+              const status = isEthernetCable ? { color: '#F59E0B' } : getPowerStatus(destPower); // Yellow for ethernet
+
+              // Label position with offset - the control point for the curve
+              const defaultMidX = (fromPos.x + toPos.x) / 2;
+              const defaultMidY = (fromPos.y + toPos.y) / 2;
+              const labelOffsetX = conn.labelOffsetX || 0;
+              const labelOffsetY = conn.labelOffsetY || 0;
+
+              // Control point (where user drags to)
+              const controlX = defaultMidX + labelOffsetX * 2; // Double the offset for control point
+              const controlY = defaultMidY + labelOffsetY * 2;
+
+              // The actual point on quadratic bezier at t=0.5 (middle of curve)
+              // B(0.5) = 0.25*P0 + 0.5*P1 + 0.25*P2
+              const labelX = 0.25 * fromPos.x + 0.5 * controlX + 0.25 * toPos.x;
+              const labelY = 0.25 * fromPos.y + 0.5 * controlY + 0.25 * toPos.y;
+
+              // Cable path with control point
+              const path = `M ${fromPos.x} ${fromPos.y} Q ${controlX} ${controlY}, ${toPos.x} ${toPos.y}`;
+
               const isSelected = selectedNode?.type === 'connection' && selectedNode?.id === conn.id;
-              const cableLengthMeters = (conn.cableLength || 500); // Default 500m
+              const cableLengthMeters = (conn.cableLength || (isEthernetCable ? 50 : 500)); // Default 50m for ethernet, 500m for fiber
               const cableLoss = (cableLengthMeters / 1000) * fiberLossPerKm;
 
               return (
@@ -3670,20 +3777,53 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                     fill="none"
                     stroke={isSelected ? '#3B82F6' : status.color}
                     strokeWidth={isSelected ? 4 : 3}
+                    strokeDasharray={isEthernetCable ? '8,4' : 'none'}
                     className="pointer-events-none"
                   />
-                  {/* Cable info box with editable distance */}
+                  {/* Cable info box with editable distance - DRAGGABLE */}
                   <foreignObject
-                    x={midX - 45}
-                    y={midY - 28}
+                    x={labelX - 45}
+                    y={labelY - (isEthernetCable ? 18 : 28)}
                     width="90"
-                    height="56"
+                    height={isEthernetCable ? 36 : 56}
+                    style={{ overflow: 'visible' }}
                   >
                     <div
                       className={`flex flex-col items-center justify-center p-1 rounded-lg border-2 shadow-md ${
-                        isSelected ? 'bg-blue-500 border-blue-600' : 'bg-white border-gray-300'
+                        isSelected ? 'bg-blue-500 border-blue-600' : isEthernetCable ? 'bg-yellow-50 border-yellow-400' : 'bg-white border-gray-300'
                       }`}
-                      style={{ height: '52px' }}
+                      style={{ height: isEthernetCable ? '32px' : '52px', cursor: 'grab' }}
+                      draggable={false}
+                      onMouseDown={(e) => {
+                        if (e.target.tagName === 'INPUT') return;
+                        e.preventDefault();
+                        e.stopPropagation();
+
+                        const startX = e.clientX;
+                        const startY = e.clientY;
+                        const startOffsetX = conn.labelOffsetX || 0;
+                        const startOffsetY = conn.labelOffsetY || 0;
+
+                        e.target.style.cursor = 'grabbing';
+
+                        const handleMouseMove = (moveE) => {
+                          moveE.preventDefault();
+                          const dx = moveE.clientX - startX;
+                          const dy = moveE.clientY - startY;
+                          updateConnection(conn.id, 'labelOffsetX', startOffsetX + dx);
+                          updateConnection(conn.id, 'labelOffsetY', startOffsetY + dy);
+                        };
+
+                        const handleMouseUp = (upE) => {
+                          upE.target.style.cursor = 'grab';
+                          document.removeEventListener('mousemove', handleMouseMove);
+                          document.removeEventListener('mouseup', handleMouseUp);
+                        };
+
+                        document.addEventListener('mousemove', handleMouseMove);
+                        document.addEventListener('mouseup', handleMouseUp);
+                      }}
+                      title="Drag to move"
                     >
                       <div className="flex items-center gap-0.5">
                         <input
@@ -3701,20 +3841,22 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                               : 'bg-gray-50 border-gray-300 text-gray-800'
                           }`}
                           style={{ fontSize: '11px' }}
-                          step="50"
+                          step={isEthernetCable ? 10 : 50}
                           min="0"
                         />
                         <span className={`text-xs font-medium ${isSelected ? 'text-white' : 'text-gray-600'}`}>m</span>
                       </div>
-                      <div className={`text-xs mt-0.5 font-medium ${isSelected ? 'text-blue-100' : 'text-orange-600'}`}>
-                        -{cableLoss.toFixed(2)} dB
-                      </div>
+                      {!isEthernetCable && (
+                        <div className={`text-xs mt-0.5 font-medium ${isSelected ? 'text-blue-100' : 'text-orange-600'}`}>
+                          -{cableLoss.toFixed(2)} dB
+                        </div>
+                      )}
                     </div>
                   </foreignObject>
                   {/* Delete button - using foreignObject for HTML button */}
                   <foreignObject
-                    x={midX + 40}
-                    y={midY - 15}
+                    x={labelX + 40}
+                    y={labelY - 15}
                     width="28"
                     height="28"
                   >
@@ -3758,12 +3900,8 @@ function SplitterSimulator({ olts = [], onus = [] }) {
           {nodes.map(node => (
             <div
               key={node.id}
-              className={`absolute rounded-lg shadow-lg border-2 cursor-move select-none transition-shadow ${
-                selectedNode?.id === node.id ? 'ring-2 ring-blue-500 ring-offset-2' : ''
-              } ${
-                node.type === 'olt' ? 'bg-blue-500 border-blue-600' :
-                node.type === 'splitter' ? 'bg-purple-500 border-purple-600' :
-                'bg-green-500 border-green-600'
+              className={`absolute cursor-move select-none transition-all ${
+                selectedNode?.id === node.id ? 'z-10' : ''
               }`}
               style={{
                 left: node.x,
@@ -3773,90 +3911,374 @@ function SplitterSimulator({ olts = [], onus = [] }) {
               }}
               onMouseDown={(e) => handleNodeMouseDown(e, node)}
             >
-              {/* Node content */}
-              <div className="p-2 text-white text-center">
-                <div className="font-bold text-sm truncate">{node.name}</div>
-                {node.type === 'splitter' && (
-                  <div className="text-xs opacity-80">{node.category}</div>
-                )}
-                {node.type === 'onu' && powerMap[`${node.id}-rx`] !== undefined && (
-                  <div className={`text-xs mt-1 px-2 py-0.5 rounded ${getPowerStatus(powerMap[`${node.id}-rx`]).status === 'GOOD' ? 'bg-green-400' : getPowerStatus(powerMap[`${node.id}-rx`]).status === 'MARGINAL' ? 'bg-yellow-400 text-gray-800' : 'bg-red-400'}`}>
-                    {powerMap[`${node.id}-rx`].toFixed(1)} dBm
-                  </div>
-                )}
-              </div>
-
-              {/* OLT PON Ports */}
+              {/* OLT - VSOL Style 1U Rack Mount */}
               {node.type === 'olt' && (
-                <div className="absolute right-0 top-6 bottom-2 flex flex-col justify-around">
-                  {Array.from({ length: node.ponPorts }, (_, i) => {
-                    const power = powerMap[`${node.id}-output-${i}`];
-                    return (
-                      <div
-                        key={i}
-                        className="port relative flex items-center"
-                        style={{ height: `${100 / node.ponPorts}%` }}
-                      >
-                        <span className="text-[10px] text-white mr-1">P{i + 1}</span>
-                        <div
-                          className="port w-4 h-4 rounded-full bg-yellow-400 border-2 border-yellow-500 cursor-crosshair hover:scale-125 transition-transform"
-                          style={{ marginRight: -8 }}
-                          onMouseDown={(e) => handlePortMouseDown(e, node, 'output', i)}
-                          onMouseUp={(e) => handlePortMouseUp(e, node, 'output', i)}
-                          title={`PON ${i + 1}: ${power?.toFixed(1) || oltPower} dBm`}
-                        />
+                <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-cyan-400 ring-offset-1' : ''}`}>
+                  {/* Main chassis - Black metal body */}
+                  <div className="absolute inset-0 bg-[#1a1a1a] rounded-sm shadow-xl" style={{boxShadow: '0 4px 12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1)'}}>
+                    {/* Top metal edge */}
+                    <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-b from-[#3a3a3a] to-[#1a1a1a]"></div>
+                    {/* Bottom metal edge */}
+                    <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-t from-[#0a0a0a] to-[#1a1a1a]"></div>
+
+                    {/* Left section - Logo & Status */}
+                    <div className="absolute left-1 top-0 bottom-0 w-20 flex flex-col justify-center">
+                      {/* VSOL Logo area */}
+                      <div className="bg-[#2a2a2a] rounded-sm px-1.5 py-1 mx-0.5">
+                        <div className="text-[8px] font-bold text-cyan-400 tracking-wide">VSOL</div>
+                        <div className="text-[9px] font-bold text-white truncate">{node.name}</div>
                       </div>
-                    );
-                  })}
+                      {/* Status LEDs row */}
+                      <div className="flex gap-1 mt-1 px-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-lg" style={{boxShadow: '0 0 4px #22c55e'}}></div>
+                        <div className="w-1.5 h-1.5 rounded-full bg-cyan-500 shadow-lg" style={{boxShadow: '0 0 4px #06b6d4'}}></div>
+                        <div className="w-1.5 h-1.5 rounded-full bg-orange-500 shadow-lg" style={{boxShadow: '0 0 4px #f97316'}}></div>
+                      </div>
+                    </div>
+
+                    {/* PON Ports Section */}
+                    <div className="absolute right-1 top-1 bottom-1 flex flex-col justify-around" style={{width: '24px'}}>
+                      <div className="text-[5px] text-gray-500 text-center mb-0.5">PON</div>
+                      {Array.from({ length: node.ponPorts }, (_, i) => {
+                        const power = powerMap[`${node.id}-output-${i}`];
+                        return (
+                          <div key={i} className="flex items-center justify-end gap-0.5">
+                            <span className="text-[5px] text-gray-500">{i + 1}</span>
+                            <div
+                              className="port w-3 h-2.5 bg-[#0d0d0d] border border-[#3a3a3a] cursor-crosshair hover:border-cyan-400 transition-all flex items-center justify-center"
+                              style={{ marginRight: -6, borderRadius: '1px' }}
+                              onMouseDown={(e) => handlePortMouseDown(e, node, 'output', i)}
+                              onMouseUp={(e) => handlePortMouseUp(e, node, 'output', i)}
+                              title={`PON ${i + 1}: ${power?.toFixed(1) || oltPower} dBm`}
+                            >
+                              <div className="w-1.5 h-1 bg-green-500 rounded-sm" style={{boxShadow: '0 0 3px #22c55e'}}></div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {/* Splitter ports */}
+              {/* Splitter - Fiber Optic PLC Splitter Box */}
               {node.type === 'splitter' && (
-                <>
-                  {/* Input port */}
+                <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-purple-400 ring-offset-1' : ''}`}>
+                  {/* Splitter enclosure */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-[#f8f8f8] to-[#e8e8e8] rounded shadow-md border border-[#ccc]" style={{boxShadow: '0 2px 8px rgba(0,0,0,0.15)'}}>
+                    {/* Top label strip */}
+                    <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-[#4a5568] to-[#2d3748] flex items-center justify-center rounded-t">
+                      <span className="text-[6px] font-bold text-white tracking-wide">{node.splitterType || node.name}</span>
+                    </div>
+
+                    {/* Input fiber entry - Blue SC/APC */}
+                    <div className="absolute left-0 top-1/2 -translate-y-1/2 flex items-center">
+                      <div className="w-2 h-4 bg-blue-600 rounded-r-sm border-r border-t border-b border-blue-700" style={{marginLeft: '-2px'}}></div>
+                    </div>
+
+                    {/* Center - Splitter info */}
+                    <div className="absolute inset-0 flex items-center justify-center pt-3">
+                      <div className="text-[5px] text-gray-500 font-medium">{node.category}</div>
+                    </div>
+
+                    {/* Output fiber entries - Orange SC/APC */}
+                    <div className="absolute right-0 top-3 bottom-1 flex flex-col justify-around">
+                      {Array.from({ length: node.outputPorts }, (_, i) => {
+                        const power = powerMap[`${node.id}-output-${i}`];
+                        const loss = node.portLosses ? node.portLosses[i] : node.loss;
+                        return (
+                          <div key={i} className="flex items-center">
+                            <div
+                              className="port w-2 h-2.5 bg-orange-500 rounded-l-sm border-l border-t border-b border-orange-600 cursor-crosshair hover:bg-orange-400 transition-all"
+                              style={{ marginRight: -4 }}
+                              onMouseDown={(e) => handlePortMouseDown(e, node, 'output', i)}
+                              onMouseUp={(e) => handlePortMouseUp(e, node, 'output', i)}
+                              title={`Port ${i + 1}: ${power?.toFixed(1) || '?'} dBm (${loss} dB loss)`}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Input port hitbox */}
                   <div
-                    className="port absolute left-0 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-blue-400 border-2 border-blue-500 cursor-crosshair hover:scale-125 transition-transform"
-                    style={{ marginLeft: -8 }}
+                    className="port absolute left-0 top-1/2 -translate-y-1/2 w-3 h-5 cursor-crosshair opacity-0"
+                    style={{ marginLeft: -6 }}
                     onMouseDown={(e) => handlePortMouseDown(e, node, 'input', 0)}
                     onMouseUp={(e) => handlePortMouseUp(e, node, 'input', 0)}
                     title={`Input: ${powerMap[`${node.id}-input`]?.toFixed(1) || '?'} dBm`}
                   />
-
-                  {/* Output ports */}
-                  <div className="absolute right-0 top-2 bottom-2 flex flex-col justify-around">
-                    {Array.from({ length: node.outputPorts }, (_, i) => {
-                      const power = powerMap[`${node.id}-output-${i}`];
-                      const loss = node.portLosses ? node.portLosses[i] : node.loss;
-                      return (
-                        <div
-                          key={i}
-                          className="port relative flex items-center justify-end"
-                        >
-                          <span className="text-[10px] text-white mr-1">{i + 1}</span>
-                          <div
-                            className="port w-3 h-3 rounded-full bg-orange-400 border-2 border-orange-500 cursor-crosshair hover:scale-125 transition-transform"
-                            style={{ marginRight: -6 }}
-                            onMouseDown={(e) => handlePortMouseDown(e, node, 'output', i)}
-                            onMouseUp={(e) => handlePortMouseUp(e, node, 'output', i)}
-                            title={`Port ${i + 1}: ${power?.toFixed(1) || '?'} dBm (${loss} dB loss)`}
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
+                </div>
               )}
 
-              {/* ONU input port */}
+              {/* ONU - VSOL Style CPE Device */}
               {node.type === 'onu' && (
-                <div
-                  className="port absolute left-0 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-blue-400 border-2 border-blue-500 cursor-crosshair hover:scale-125 transition-transform"
-                  style={{ marginLeft: -8 }}
-                  onMouseDown={(e) => handlePortMouseDown(e, node, 'input', 0)}
-                  onMouseUp={(e) => handlePortMouseUp(e, node, 'input', 0)}
-                  title={`RX: ${powerMap[`${node.id}-rx`]?.toFixed(1) || '?'} dBm`}
-                />
+                <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-green-400 ring-offset-1' : ''}`}>
+                  {/* ONU body - White plastic casing */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-[#fefefe] to-[#f0f0f0] rounded shadow-md border border-[#ddd]" style={{boxShadow: '0 2px 6px rgba(0,0,0,0.1)'}}>
+                    {/* Top brand strip */}
+                    <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-r from-[#1e3a5f] via-[#2563eb] to-[#1e3a5f] rounded-t flex items-center px-1.5">
+                      <span className="text-[7px] font-bold text-white">ONU</span>
+                    </div>
+
+                    {/* Status LEDs */}
+                    <div className="absolute top-4 right-1.5 flex gap-1">
+                      <div className={`w-1.5 h-1.5 rounded-full ${powerMap[`${node.id}-rx`] !== undefined ? 'bg-green-500' : 'bg-gray-300'}`} style={powerMap[`${node.id}-rx`] !== undefined ? {boxShadow: '0 0 4px #22c55e'} : {}}></div>
+                      <div className="w-1.5 h-1.5 rounded-full bg-blue-500" style={{boxShadow: '0 0 4px #3b82f6'}}></div>
+                    </div>
+
+                    {/* Device name */}
+                    <div className="absolute top-4 left-1.5 right-6">
+                      <div className="text-[8px] font-medium text-gray-700 truncate">{node.name}</div>
+                    </div>
+
+                    {/* Power level indicator - BIGGER */}
+                    {powerMap[`${node.id}-rx`] !== undefined && (
+                      <div className="absolute bottom-1 left-1 right-1">
+                        <div className={`text-[10px] text-center font-bold py-1 rounded ${
+                          getPowerStatus(powerMap[`${node.id}-rx`]).status === 'GOOD' ? 'bg-green-500 text-white' :
+                          getPowerStatus(powerMap[`${node.id}-rx`]).status === 'MARGINAL' ? 'bg-yellow-500 text-white' :
+                          'bg-red-500 text-white'
+                        }`} style={{textShadow: '0 1px 2px rgba(0,0,0,0.3)'}}>
+                          {powerMap[`${node.id}-rx`].toFixed(1)} dBm
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Fiber input port - Green SC connector - VISIBLE & CLICKABLE */}
+                  <div
+                    className="port absolute left-0 top-1/2 -translate-y-1/2 w-3 h-5 bg-green-600 rounded-r-sm border-r border-t border-b border-green-700 cursor-crosshair hover:bg-green-500 hover:scale-110 transition-all"
+                    style={{ marginLeft: -6 }}
+                    onMouseDown={(e) => handlePortMouseDown(e, node, 'input', 0)}
+                    onMouseUp={(e) => handlePortMouseUp(e, node, 'input', 0)}
+                    title={`RX: ${powerMap[`${node.id}-rx`]?.toFixed(1) || '?'} dBm`}
+                  />
+
+                  {/* Ethernet output port - Yellow RJ45 - for connecting to switch */}
+                  <div
+                    className="port absolute right-0 top-1/2 -translate-y-1/2 w-3 h-4 bg-yellow-500 rounded-l-sm border-l border-t border-b border-yellow-600 cursor-crosshair hover:bg-yellow-400 hover:scale-110 transition-all"
+                    style={{ marginRight: -6 }}
+                    onMouseDown={(e) => handlePortMouseDown(e, node, 'output', 0)}
+                    onMouseUp={(e) => handlePortMouseUp(e, node, 'output', 0)}
+                    title="Ethernet output (to Switch)"
+                  />
+                </div>
+              )}
+
+              {/* Switch - Layer 2 Network Switch with multiple ports */}
+              {node.type === 'switch' && (
+                <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-orange-400 ring-offset-1' : ''}`}>
+                  {/* Switch body - Dark metal casing */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-[#2a2a2a] to-[#1a1a1a] rounded-lg shadow-lg border border-[#3a3a3a]" style={{boxShadow: '0 3px 10px rgba(0,0,0,0.4)'}}>
+                    {/* Top label strip */}
+                    <div className="absolute top-0 left-0 right-0 h-6 bg-gradient-to-r from-orange-600 via-orange-500 to-orange-600 rounded-t-lg flex items-center justify-between px-2">
+                      <span className="text-[8px] font-bold text-white">L2 SWITCH</span>
+                      <span className="text-[8px] font-bold text-orange-200">{node.ports} PORT</span>
+                    </div>
+
+                    {/* Switch name - clickable */}
+                    <div
+                      className="absolute top-7 left-1 right-1 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const newName = prompt('Switch name:', node.name || '');
+                        if (newName !== null && newName.trim()) {
+                          updateNode(node.id, 'name', newName.trim());
+                        }
+                      }}
+                      title="Click to rename switch"
+                    >
+                      <div className="text-[9px] font-bold text-white truncate text-center bg-gray-700/50 rounded px-1 py-0.5">{node.name}</div>
+                    </div>
+
+                    {/* Port rows - each port with number */}
+                    <div className="absolute top-14 left-1 right-1 bottom-1">
+                      {Array.from({ length: node.ports }, (_, i) => (
+                        <div key={i} className="flex items-center h-[22px] border-b border-gray-700 last:border-b-0">
+                          <div className="w-6 text-[9px] font-bold text-orange-400 text-center">{i + 1}</div>
+                          <div className="flex-1 h-3 bg-gray-700 rounded mx-1">
+                            <div className="h-full w-1/3 bg-green-500 rounded" style={{boxShadow: '0 0 3px #22c55e'}}></div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Input port (from ONU) - Yellow RJ45 - at top left */}
+                  <div
+                    className="port absolute left-0 w-4 h-5 bg-yellow-500 rounded-r-sm border-r border-t border-b border-yellow-600 cursor-crosshair hover:bg-yellow-400 hover:scale-110 transition-all"
+                    style={{ marginLeft: -8, top: 12 }}
+                    onMouseDown={(e) => handlePortMouseDown(e, node, 'input', 0)}
+                    onMouseUp={(e) => handlePortMouseUp(e, node, 'input', 0)}
+                    title="Uplink (from ONU)"
+                  />
+
+                  {/* Output ports (to Building floors) - Blue RJ45 - one for each port */}
+                  {Array.from({ length: node.ports }, (_, i) => (
+                    <div
+                      key={i}
+                      className="port absolute right-0 w-4 h-4 bg-blue-500 rounded-l-sm border-l border-t border-b border-blue-600 cursor-crosshair hover:bg-blue-400 hover:scale-110 transition-all flex items-center justify-center"
+                      style={{ marginRight: -8, top: 30 + i * 22 + 5 }}
+                      onMouseDown={(e) => handlePortMouseDown(e, node, 'output', i)}
+                      onMouseUp={(e) => handlePortMouseUp(e, node, 'output', i)}
+                      title={`Port ${i + 1} → Floor`}
+                    >
+                      <span className="text-[6px] font-bold text-white">{i + 1}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Building with floors and 2 homes per floor */}
+              {node.type === 'building' && (
+                <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-indigo-400 ring-offset-1' : ''}`}>
+                  {/* Building body */}
+                  <div className="absolute inset-0 bg-gradient-to-b from-[#4a5568] to-[#2d3748] rounded-lg shadow-lg border-2 border-gray-600" style={{boxShadow: '0 4px 15px rgba(0,0,0,0.4)'}}>
+                    {/* Roof */}
+                    <div className="absolute -top-2 left-2 right-2 h-3 bg-gradient-to-b from-[#718096] to-[#4a5568] rounded-t-lg border-t-2 border-l-2 border-r-2 border-gray-500"></div>
+
+                    {/* Building name header - clickable to edit */}
+                    <div className="absolute top-1 left-0 right-0 flex items-center justify-center">
+                      <div
+                        className="px-2 py-0.5 bg-indigo-600 rounded text-[10px] font-bold text-white shadow cursor-pointer hover:bg-indigo-500 transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const newName = prompt('Building name:', node.name || '');
+                          if (newName !== null && newName.trim()) {
+                            updateNode(node.id, 'name', newName.trim());
+                          }
+                        }}
+                        title="Click to change building name"
+                      >
+                        {node.name}
+                      </div>
+                    </div>
+
+                    {/* Floors container */}
+                    <div className="absolute top-7 left-1 right-1 bottom-6 overflow-hidden rounded">
+                      {/* Render floors from top to bottom */}
+                      {Array.from({ length: node.totalFloors || 12 }, (_, i) => (node.totalFloors || 12) - i).map(floorNum => {
+                        const defaultFloor = { home1: { customer: '', unit: `${floorNum}A` }, home2: { customer: '', unit: `${floorNum}B` } };
+                        const floorData = node.floors?.[floorNum] || defaultFloor;
+                        const home1 = floorData.home1 || { customer: '', unit: `${floorNum}A` };
+                        const home2 = floorData.home2 || { customer: '', unit: `${floorNum}B` };
+                        return (
+                          <div key={floorNum} className="flex h-[24px] border-b border-gray-600 last:border-b-0">
+                            {/* Floor number - bigger */}
+                            <div className="w-7 bg-gray-700 flex items-center justify-center border-r border-gray-600">
+                              <span className="text-[10px] font-bold text-yellow-300">{floorNum}</span>
+                            </div>
+                            {/* Home 1 */}
+                            <div
+                              className="flex-1 bg-gradient-to-b from-amber-100 to-amber-200 border-r border-gray-500 flex flex-col items-center justify-center cursor-pointer hover:from-amber-200 hover:to-amber-300 transition-colors"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newName = prompt(`Customer name for ${home1.unit || `${floorNum}A`}:`, home1.customer || '');
+                                if (newName !== null) {
+                                  const newFloors = { ...(node.floors || {}) };
+                                  newFloors[floorNum] = {
+                                    home1: { customer: newName, unit: home1.unit || `${floorNum}A` },
+                                    home2: home2
+                                  };
+                                  updateNode(node.id, 'floors', newFloors);
+                                }
+                              }}
+                              title={`${home1.unit || `${floorNum}A`}: ${home1.customer || 'Click to add customer'}`}
+                            >
+                              <div className="text-[7px] font-bold text-gray-700">{home1.unit || `${floorNum}A`}</div>
+                              <div className="text-[6px] text-gray-600 truncate w-full px-0.5 text-center">
+                                {home1.customer || '---'}
+                              </div>
+                            </div>
+                            {/* Home 2 */}
+                            <div
+                              className="flex-1 bg-gradient-to-b from-blue-100 to-blue-200 flex flex-col items-center justify-center cursor-pointer hover:from-blue-200 hover:to-blue-300 transition-colors"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newName = prompt(`Customer name for ${home2.unit || `${floorNum}B`}:`, home2.customer || '');
+                                if (newName !== null) {
+                                  const newFloors = { ...(node.floors || {}) };
+                                  newFloors[floorNum] = {
+                                    home1: home1,
+                                    home2: { customer: newName, unit: home2.unit || `${floorNum}B` }
+                                  };
+                                  updateNode(node.id, 'floors', newFloors);
+                                }
+                              }}
+                              title={`${home2.unit || `${floorNum}B`}: ${home2.customer || 'Click to add customer'}`}
+                            >
+                              <div className="text-[7px] font-bold text-gray-700">{home2.unit || `${floorNum}B`}</div>
+                              <div className="text-[6px] text-gray-600 truncate w-full px-0.5 text-center">
+                                {home2.customer || '---'}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Add/Remove floor buttons at bottom */}
+                    <div className="absolute bottom-1 left-1 right-1 flex justify-center gap-1">
+                      <button
+                        className="px-2 py-0.5 bg-red-500 hover:bg-red-600 text-white text-[9px] font-bold rounded shadow transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const currentFloors = node.totalFloors || 12;
+                          if (currentFloors > 1) {
+                            const newTotal = currentFloors - 1;
+                            const newFloors = { ...(node.floors || {}) };
+                            delete newFloors[currentFloors]; // Remove top floor
+                            updateNode(node.id, 'totalFloors', newTotal);
+                            updateNode(node.id, 'floors', newFloors);
+                            updateNode(node.id, 'height', 50 + newTotal * 24);
+                          }
+                        }}
+                        title="Remove top floor"
+                      >
+                        − Floor
+                      </button>
+                      <button
+                        className="px-2 py-0.5 bg-green-500 hover:bg-green-600 text-white text-[9px] font-bold rounded shadow transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const currentFloors = node.totalFloors || 12;
+                          const newTotal = currentFloors + 1;
+                          const newFloors = { ...(node.floors || {}) };
+                          newFloors[newTotal] = {
+                            home1: { customer: '', unit: `${newTotal}A` },
+                            home2: { customer: '', unit: `${newTotal}B` }
+                          };
+                          updateNode(node.id, 'totalFloors', newTotal);
+                          updateNode(node.id, 'floors', newFloors);
+                          updateNode(node.id, 'height', 50 + newTotal * 24);
+                        }}
+                        title="Add new floor"
+                      >
+                        + Floor
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Input ports for each floor (from Switch) - Blue RJ45 */}
+                  {Array.from({ length: node.totalFloors || 12 }, (_, i) => {
+                    const floorNum = (node.totalFloors || 12) - i; // Top floor first
+                    const floorHeight = 24;
+                    return (
+                      <div
+                        key={floorNum}
+                        className="port absolute left-0 w-4 h-4 bg-blue-500 rounded-r-sm border-r border-t border-b border-blue-600 cursor-crosshair hover:bg-blue-400 hover:scale-110 transition-all flex items-center justify-center"
+                        style={{ marginLeft: -8, top: 30 + i * floorHeight + 4 }}
+                        onMouseDown={(e) => handlePortMouseDown(e, node, 'input', floorNum)}
+                        onMouseUp={(e) => handlePortMouseUp(e, node, 'input', floorNum)}
+                        title={`Floor ${floorNum} input`}
+                      >
+                        <span className="text-[5px] font-bold text-white">{floorNum}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           ))}
@@ -3904,7 +4326,7 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                       updateNode(selectedNode.id, 'outputPorts', def.ports);
                       updateNode(selectedNode.id, 'loss', def.loss);
                       updateNode(selectedNode.id, 'portLosses', def.portLosses);
-                      updateNode(selectedNode.id, 'height', 40 + def.ports * 20);
+                      updateNode(selectedNode.id, 'height', 35 + def.ports * 10);
                     }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                   >
@@ -3934,6 +4356,59 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                 />
               </div>
+            )}
+            {selectedNode.type === 'switch' && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Ports</label>
+                <select
+                  value={selectedNode.ports}
+                  onChange={(e) => updateNode(selectedNode.id, 'ports', parseInt(e.target.value))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                >
+                  <option value={8}>8 Ports</option>
+                  <option value={16}>16 Ports</option>
+                  <option value={24}>24 Ports</option>
+                  <option value={48}>48 Ports</option>
+                </select>
+              </div>
+            )}
+            {selectedNode.type === 'building' && (
+              <>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Total Floors</label>
+                  <select
+                    value={selectedNode.totalFloors || 12}
+                    onChange={(e) => {
+                      const newTotal = parseInt(e.target.value);
+                      const newFloors = {};
+                      for (let f = 1; f <= newTotal; f++) {
+                        newFloors[f] = selectedNode.floors?.[f] || {
+                          home1: { customer: '', unit: `${f}A` },
+                          home2: { customer: '', unit: `${f}B` },
+                        };
+                      }
+                      updateNode(selectedNode.id, 'totalFloors', newTotal);
+                      updateNode(selectedNode.id, 'floors', newFloors);
+                      updateNode(selectedNode.id, 'height', 30 + newTotal * 24);
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  >
+                    {[4, 6, 8, 10, 12, 14, 16, 18, 20].map(n => (
+                      <option key={n} value={n}>{n} Floors</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Click on any home in the building to set customer name
+                  </label>
+                  <div className="text-xs text-indigo-600 font-medium">
+                    {Object.values(selectedNode.floors || {}).reduce((count, floor) => {
+                      return count + (floor.home1?.customer ? 1 : 0) + (floor.home2?.customer ? 1 : 0);
+                    }, 0)} / {(selectedNode.totalFloors || 12) * 2} homes assigned
+                  </div>
+                </div>
+              </>
             )}
           </div>
         </div>
