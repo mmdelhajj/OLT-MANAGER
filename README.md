@@ -1,80 +1,89 @@
-# EPON OLT/ONU Management Dashboard
+# OLT Manager
 
-A web-based dashboard for managing VSOL EPON OLTs and ONUs. Designed for ISPs to monitor and manage their fiber network equipment.
+A web-based dashboard for managing EPON/GPON OLTs and ONUs. Designed for ISPs to monitor and manage their fiber network equipment.
+
+## Quick Install (One Command)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/install.sh | sudo bash
+```
+
+Or download and run:
+
+```bash
+wget https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+### Update Existing Installation
+
+```bash
+sudo /opt/olt-manager/install.sh --update
+```
+
+### Uninstall
+
+```bash
+sudo /opt/olt-manager/install.sh --uninstall
+```
 
 ## Features
 
-- **Dashboard Overview**: Total OLTs, ONUs, online/offline counts
-- **OLT Management**: Add, edit, delete OLTs with SSH credentials
-- **ONU Monitoring**: View all ONUs with MAC, customer name, status
-- **Search**: Find customers by name or MAC address
-- **Auto-Polling**: Automatic polling every 5 minutes
-- **Manual Poll**: Trigger immediate poll for any OLT
+- **Dashboard Overview**: Total OLTs, ONUs, online/offline counts with statistics
+- **OLT Management**: Add, edit, delete OLTs with SSH/SNMP credentials
+- **ONU Monitoring**: View all ONUs with serial number, description, optical power, distance
+- **Region Management**: Group ONUs by region with color coding
+- **User Management**: Admin and Operator roles with OLT access restrictions
+- **Live Traffic**: Real-time traffic monitoring via WebSocket
+- **SNMP Trap Receiver**: Automatic ONU status change detection
+- **WhatsApp Notifications**: Alerts via WhatsApp API
+- **Search**: Find customers by serial number, description, or MAC address
+- **Auto-Polling**: Configurable automatic polling interval
+- **Image Upload**: Attach photos to ONU records
+
+## Default Login
+
+- **Username**: `admin`
+- **Password**: `admin`
+
+> ⚠️ **Change the default password after first login!**
 
 ## Supported Equipment
 
 - VSOL V1600D8 (8 PON ports)
 - VSOL V1601E04 (4 PON ports)
-- Other VSOL EPON OLTs with similar CLI
+- Other VSOL EPON/GPON OLTs with similar CLI/SNMP
+
+## System Requirements
+
+- Ubuntu 20.04+ or Debian 11+
+- 1GB RAM minimum
+- 10GB disk space
+- Root access
 
 ## Tech Stack
 
-- **Backend**: Python FastAPI, SQLAlchemy, Paramiko
+- **Backend**: Python FastAPI, SQLAlchemy, Paramiko, pysnmp
 - **Frontend**: React, Tailwind CSS
-- **Database**: SQLite (default) or PostgreSQL
-- **Deployment**: Docker & Docker Compose
+- **Database**: SQLite
+- **Web Server**: Nginx
+- **Deployment**: Systemd service
 
-## Quick Start
+## Service Management
 
-### Using Docker Compose (Recommended)
-
-1. Clone or copy the project:
 ```bash
-cd /path/to/olt-manager
-```
+# Check status
+systemctl status olt-backend
 
-2. Start the containers:
-```bash
-docker-compose up -d --build
-```
+# View logs
+journalctl -u olt-backend -f
 
-3. Access the dashboard:
-- Frontend: http://localhost
-- API: http://localhost:8000
+# Restart service
+systemctl restart olt-backend
 
-4. Add your first OLT through the web interface
-
-### Network Configuration
-
-The backend container needs to reach your OLTs via SSH. Options:
-
-**Option 1: Bridge Network (Default)**
-- Works if Docker host can reach OLTs
-- OLT IPs must be routable from the Docker network
-
-**Option 2: Host Network**
-Uncomment in `docker-compose.yml`:
-```yaml
-backend:
-  network_mode: host
-```
-
-### Manual Installation (Development)
-
-**Backend:**
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -r requirements.txt
-python main.py
-```
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm start
+# Stop service
+systemctl stop olt-backend
 ```
 
 ## API Endpoints
@@ -89,54 +98,59 @@ npm start
 - `PUT /api/olts/{id}` - Update OLT
 - `DELETE /api/olts/{id}` - Delete OLT
 - `POST /api/olts/{id}/poll` - Manual poll
+- `GET /api/olts/{id}/traffic` - Get traffic data
 
 ### ONUs
 - `GET /api/onus` - List all ONUs (supports filters)
-- `GET /api/olts/{id}/onus` - List ONUs for specific OLT
-- `GET /api/onus/search?q=query` - Search by name/MAC
-- `DELETE /api/onus/{id}` - Delete ONU record
+- `GET /api/onus/search?q=query` - Search ONUs
+- `GET /api/onus/{id}` - Get specific ONU
+- `PUT /api/onus/{id}` - Update ONU
+- `DELETE /api/onus/{id}` - Delete ONU
+- `POST /api/onus/{id}/image` - Upload image
+- `DELETE /api/onus/{id}/image` - Delete image
+
+### Regions
+- `GET /api/regions` - List all regions
+- `POST /api/regions` - Create region
+- `PUT /api/regions/{id}` - Update region
+- `DELETE /api/regions/{id}` - Delete region
+
+### Users
+- `GET /api/users` - List all users
+- `POST /api/users` - Create user
+- `PUT /api/users/{id}` - Update user
+- `DELETE /api/users/{id}` - Delete user
+
+### Authentication
+- `POST /api/auth/login` - Login
+- `GET /api/auth/me` - Get current user
+- `POST /api/auth/change-password` - Change password
+
+### Settings
+- `GET /api/settings` - Get settings
+- `PUT /api/settings` - Update settings
+
+### Traffic & Monitoring
+- `GET /api/traffic/all` - All OLTs traffic
+- `WS /ws/traffic/{olt_id}` - Live traffic WebSocket
+- `GET /api/traffic/history/olt/{id}` - Traffic history
+
+### Health & Status
+- `GET /api/health` - Health check
+- `GET /api/trap/status` - SNMP trap receiver status
 
 ## Configuration
 
-Environment variables:
+Settings can be modified via the web interface under Settings page:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| DATABASE_URL | sqlite:///./olt_manager.db | Database connection string |
-| POLL_INTERVAL | 300 | Polling interval in seconds |
-| SSH_TIMEOUT | 30 | SSH connection timeout |
-| SSH_PORT | 22 | Default SSH port |
-
-## OLT CLI Commands Used
-
-The system connects via SSH and runs:
-- `show running-config` - Get ONU MAC bindings and descriptions
-
-Expected config format:
-```
-interface epon 0/1
-confirm onu mac 4c:d7:c8:f9:91:00 onuid 1
-onu 1 description CUSTOMER-NAME
-exit
-```
-
-## Troubleshooting
-
-### OLT shows offline
-- Check network connectivity from Docker host to OLT
-- Verify SSH credentials
-- Check OLT IP address
-- View error in dashboard (hover over error indicator)
-
-### ONUs not appearing
-- Verify OLT config format matches expected patterns
-- Check poll logs in database
-- Try manual poll and check response
-
-### SSH Connection Issues
-- Ensure OLT allows SSH connections
-- Check firewall rules
-- Verify SSH is enabled on OLT
+| Setting | Description |
+|---------|-------------|
+| System Name | Display name for the system |
+| Refresh Interval | Dashboard auto-refresh (seconds) |
+| Polling Interval | OLT polling interval (seconds) |
+| WhatsApp Enabled | Enable WhatsApp notifications |
+| WhatsApp Recipients | Phone numbers for alerts |
+| SNMP Trap Port | Port for SNMP trap receiver (default: 162) |
 
 ## Project Structure
 
@@ -146,30 +160,70 @@ olt-manager/
 │   ├── main.py           # FastAPI app & endpoints
 │   ├── models.py         # Database models
 │   ├── schemas.py        # Pydantic schemas
-│   ├── olt_connector.py  # SSH connection & parsing
+│   ├── olt_connector.py  # SSH/SNMP connection & parsing
+│   ├── trap_receiver.py  # SNMP trap handler
+│   ├── auth.py           # Authentication
 │   ├── config.py         # Configuration
 │   ├── requirements.txt
-│   └── Dockerfile
+│   └── uploads/          # ONU images
 ├── frontend/
 │   ├── src/
 │   │   ├── App.js        # Main React component
 │   │   ├── api.js        # API client
 │   │   └── index.js      # Entry point
 │   ├── public/
-│   │   └── index.html
-│   ├── nginx.conf
-│   ├── package.json
-│   └── Dockerfile
-├── docker-compose.yml
+│   └── package.json
+├── install.sh            # One-click installer
+├── docker-compose.yml    # Docker deployment
 └── README.md
+```
+
+## Troubleshooting
+
+### OLT shows offline
+- Check network connectivity to OLT
+- Verify SSH/SNMP credentials
+- Check OLT IP address is reachable
+- View error details in dashboard
+
+### Backend won't start
+```bash
+journalctl -u olt-backend -n 100
+```
+
+### Port 162 in use (SNMP traps)
+```bash
+lsof -i :162
+# Stop conflicting service or change trap port in settings
+```
+
+### Reset admin password
+```bash
+cd /opt/olt-manager/backend
+source venv/bin/activate
+python3 -c "
+from models import init_db, get_db, User
+from auth import get_password_hash
+db = next(get_db())
+user = db.query(User).filter(User.username == 'admin').first()
+user.password_hash = get_password_hash('admin')
+db.commit()
+print('Password reset to: admin')
+"
 ```
 
 ## Security Notes
 
-- OLT passwords are stored in the database (consider encrypting in production)
-- The API has no authentication (add auth for production deployment)
-- Use HTTPS in production (configure nginx with SSL certificates)
+- Change default admin password immediately
+- Use HTTPS in production (configure nginx with SSL)
+- Restrict network access to management interface
+- OLT credentials are stored in the database
 
 ## License
 
 MIT License
+
+## Support
+
+For issues and feature requests, please visit:
+https://github.com/mmdelhajj/OLT-MANAGER/issues
