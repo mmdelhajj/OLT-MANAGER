@@ -1,6 +1,68 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as api from './api';
 
+// VSOL OLT Models with PON port counts
+const VSOL_OLT_MODELS = {
+  // GPON (1 PON)
+  'V1600GS': 1,
+  'V1600GS-F': 1,
+  'V1600GS-ZF': 1,
+  'V1600GS-O32': 1,
+
+  // GPON (2 PON)
+  'V1600GT': 2,
+
+  // GPON (4 PON)
+  'V1600G0': 4,
+  'V1600G0-B': 4,
+
+  // GPON (8 PON)
+  'V1600G1': 8,
+  'V1600G1-B': 8,
+  'V1600G1-R': 8,
+  'V1600G1WEO': 8,
+  'V1600G1WEO-B': 8,
+
+  // GPON (16 PON)
+  'V1600G2': 16,
+  'V1600G2-B': 16,
+  'V1600G2-R': 16,
+
+  // EPON (2 PON)
+  'V1601E02-DP': 2,
+  'V1600D2': 2,
+  'V1600D2-L': 2,
+
+  // EPON (4 PON)
+  'V1600D-MINI': 4,
+  'V1601E04-DP': 4,
+  'V1600D4': 4,
+  'V1600D4-L': 4,
+  'V1600D4-DP': 4,
+
+  // EPON (8 PON)
+  'V1600D8': 8,
+
+  // EPON (16 PON)
+  'V1600D16': 16,
+
+  // XGS-PON / 10G (2 PON)
+  'V1600XG02': 2,
+  'V1600XG02-W': 2,
+
+  // XGS-PON / 10G (8 PON)
+  'V3600G1': 8,
+  'V3600G1-C': 8,
+  'V3600D8': 8,
+
+  // Chassis (32+ PON)
+  'V5600X2': 32,
+  'V5600X7': 112,
+
+  // Other (manual entry)
+  'Other': 0,
+};
+
 // Build v4 - Professional Material Design UI
 // Login Page Component - Premium Enterprise Design
 function LoginPage({ onLogin, pageName }) {
@@ -396,6 +458,17 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
     region_id: '',
   });
   const [loading, setLoading] = useState(false);
+  const [ponPortsReadOnly, setPonPortsReadOnly] = useState(false);
+
+  const handleModelChange = (model) => {
+    if (model && model !== 'Other' && VSOL_OLT_MODELS[model]) {
+      setFormData({ ...formData, model, pon_ports: VSOL_OLT_MODELS[model] });
+      setPonPortsReadOnly(true);
+    } else {
+      setFormData({ ...formData, model, pon_ports: model === 'Other' ? '' : 8 });
+      setPonPortsReadOnly(false);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -406,6 +479,7 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
       else data.region_id = parseInt(data.region_id);
       await onSubmit(data);
       setFormData({ name: '', ip_address: '', username: 'admin', password: '', snmp_community: 'public', model: '', pon_ports: 8, region_id: '' });
+      setPonPortsReadOnly(false);
       onClose();
     } catch (error) {
       alert('Failed to add OLT: ' + (error.response?.data?.detail || error.message));
@@ -481,12 +555,68 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
               <select
                 className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
                 value={formData.model}
-                onChange={(e) => setFormData({ ...formData, model: e.target.value })}
+                onChange={(e) => handleModelChange(e.target.value)}
               >
                 <option value="">Select Model</option>
-                <option value="V1600D8">V1600D8</option>
-                <option value="V1601E04">V1601E04</option>
-                <option value="Other">Other</option>
+                <optgroup label="GPON - 1 PON">
+                  <option value="V1600GS">V1600GS</option>
+                  <option value="V1600GS-F">V1600GS-F</option>
+                  <option value="V1600GS-ZF">V1600GS-ZF</option>
+                  <option value="V1600GS-O32">V1600GS-O32</option>
+                </optgroup>
+                <optgroup label="GPON - 2 PON">
+                  <option value="V1600GT">V1600GT</option>
+                </optgroup>
+                <optgroup label="GPON - 4 PON">
+                  <option value="V1600G0">V1600G0</option>
+                  <option value="V1600G0-B">V1600G0-B</option>
+                </optgroup>
+                <optgroup label="GPON - 8 PON">
+                  <option value="V1600G1">V1600G1</option>
+                  <option value="V1600G1-B">V1600G1-B</option>
+                  <option value="V1600G1-R">V1600G1-R</option>
+                  <option value="V1600G1WEO">V1600G1WEO</option>
+                  <option value="V1600G1WEO-B">V1600G1WEO-B</option>
+                </optgroup>
+                <optgroup label="GPON - 16 PON">
+                  <option value="V1600G2">V1600G2</option>
+                  <option value="V1600G2-B">V1600G2-B</option>
+                  <option value="V1600G2-R">V1600G2-R</option>
+                </optgroup>
+                <optgroup label="EPON - 2 PON">
+                  <option value="V1601E02-DP">V1601E02-DP</option>
+                  <option value="V1600D2">V1600D2</option>
+                  <option value="V1600D2-L">V1600D2-L</option>
+                </optgroup>
+                <optgroup label="EPON - 4 PON">
+                  <option value="V1600D-MINI">V1600D-MINI</option>
+                  <option value="V1601E04-DP">V1601E04-DP</option>
+                  <option value="V1600D4">V1600D4</option>
+                  <option value="V1600D4-L">V1600D4-L</option>
+                  <option value="V1600D4-DP">V1600D4-DP</option>
+                </optgroup>
+                <optgroup label="EPON - 8 PON">
+                  <option value="V1600D8">V1600D8</option>
+                </optgroup>
+                <optgroup label="EPON - 16 PON">
+                  <option value="V1600D16">V1600D16</option>
+                </optgroup>
+                <optgroup label="XGS-PON 10G - 2 PON">
+                  <option value="V1600XG02">V1600XG02</option>
+                  <option value="V1600XG02-W">V1600XG02-W</option>
+                </optgroup>
+                <optgroup label="XGS-PON 10G - 8 PON">
+                  <option value="V3600G1">V3600G1</option>
+                  <option value="V3600G1-C">V3600G1-C</option>
+                  <option value="V3600D8">V3600D8</option>
+                </optgroup>
+                <optgroup label="Chassis">
+                  <option value="V5600X2">V5600X2 (32 PON)</option>
+                  <option value="V5600X7">V5600X7 (112 PON)</option>
+                </optgroup>
+                <optgroup label="Custom">
+                  <option value="Other">Other</option>
+                </optgroup>
               </select>
             </div>
             <div>
@@ -494,11 +624,14 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
               <input
                 type="number"
                 min="1"
-                max="16"
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                max="128"
+                required
+                className={`w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${ponPortsReadOnly ? 'bg-gray-100 text-gray-600' : ''}`}
                 value={formData.pon_ports}
-                onChange={(e) => setFormData({ ...formData, pon_ports: parseInt(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, pon_ports: parseInt(e.target.value) || '' })}
+                readOnly={ponPortsReadOnly}
               />
+              {ponPortsReadOnly && <p className="text-xs text-gray-500 mt-1">Auto-filled from model</p>}
             </div>
           </div>
           <div>
