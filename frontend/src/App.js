@@ -2669,35 +2669,93 @@ function SplitterSimulator({ olts = [], onus = [] }) {
   const canvasRef = useRef(null);
   const [canvasSize, setCanvasSize] = useState({ width: 1200, height: 700 });
 
-  // Multiple diagrams support
-  const [diagrams, setDiagrams] = useState(() => {
-    try {
-      const saved = localStorage.getItem('splitterDiagrams');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {}
-    return [{ id: 'default', name: 'Diagram 1', nodes: [], connections: [], settings: { oltPower: 5, onuSensitivity: -28 } }];
-  });
+  // Loading state for API
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
-  const [currentDiagramId, setCurrentDiagramId] = useState(() => {
-    try {
-      const saved = localStorage.getItem('currentDiagramId');
-      return saved || 'default';
-    } catch (e) {}
-    return 'default';
-  });
+  // Multiple diagrams support - now loaded from API
+  const [diagrams, setDiagrams] = useState([]);
+  const [currentDiagramId, setCurrentDiagramId] = useState(null);
+
+  // Debounce ref for auto-save
+  const saveTimeoutRef = useRef(null);
+  const pendingSaveRef = useRef(false);
+
+  // Load diagrams from API on mount
+  useEffect(() => {
+    const loadDiagrams = async () => {
+      try {
+        setLoading(true);
+        setLoadError(null);
+        const response = await api.getDiagrams();
+        const apiDiagrams = response.data.diagrams || [];
+
+        if (apiDiagrams.length === 0) {
+          // No diagrams exist, create a default one
+          const newDiagramResp = await api.createDiagram({
+            name: 'Diagram 1',
+            nodes: '[]',
+            connections: '[]',
+            settings: JSON.stringify({ oltPower: 5, onuSensitivity: -28 }),
+            is_shared: false
+          });
+          const newDiagram = newDiagramResp.data;
+          setDiagrams([{
+            id: newDiagram.id,
+            name: newDiagram.name,
+            nodes: JSON.parse(newDiagram.nodes || '[]'),
+            connections: JSON.parse(newDiagram.connections || '[]'),
+            settings: JSON.parse(newDiagram.settings || '{}'),
+            is_shared: newDiagram.is_shared,
+            owner_id: newDiagram.owner_id,
+            owner_name: newDiagram.owner_name
+          }]);
+          setCurrentDiagramId(newDiagram.id);
+        } else {
+          // Parse JSON fields from API response
+          const parsedDiagrams = apiDiagrams.map(d => ({
+            id: d.id,
+            name: d.name,
+            nodes: JSON.parse(d.nodes || '[]'),
+            connections: JSON.parse(d.connections || '[]'),
+            settings: JSON.parse(d.settings || '{}'),
+            is_shared: d.is_shared,
+            owner_id: d.owner_id,
+            owner_name: d.owner_name
+          }));
+          setDiagrams(parsedDiagrams);
+          // Set current diagram to the first one (most recently updated)
+          setCurrentDiagramId(parsedDiagrams[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to load diagrams:', err);
+        setLoadError('Failed to load diagrams. Please refresh the page.');
+        // Fallback to localStorage for offline support
+        try {
+          const saved = localStorage.getItem('splitterDiagrams');
+          if (saved) {
+            const localDiagrams = JSON.parse(saved);
+            setDiagrams(localDiagrams);
+            setCurrentDiagramId(localDiagrams[0]?.id || 'default');
+          }
+        } catch (e) {}
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadDiagrams();
+  }, []);
 
   const [showDiagramMenu, setShowDiagramMenu] = useState(false);
   const [editingDiagramName, setEditingDiagramName] = useState(null);
   const [newDiagramName, setNewDiagramName] = useState('');
 
   // Get current diagram
-  const currentDiagram = diagrams.find(d => d.id === currentDiagramId) || diagrams[0];
+  const currentDiagram = diagrams.find(d => d.id === currentDiagramId) || diagrams[0] || null;
 
   // Nodes and connections from current diagram
-  const [nodes, setNodes] = useState(currentDiagram?.nodes || []);
-  const [connections, setConnections] = useState(currentDiagram?.connections || []);
+  const [nodes, setNodes] = useState([]);
+  const [connections, setConnections] = useState([]);
 
   // Update nodes/connections when switching diagrams
   useEffect(() => {
@@ -2708,8 +2766,7 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       setOltPower(diagram.settings?.oltPower || 5);
       setOnuSensitivity(diagram.settings?.onuSensitivity || -28);
     }
-    localStorage.setItem('currentDiagramId', currentDiagramId);
-  }, [currentDiagramId]);
+  }, [currentDiagramId, diagrams]);
 
   const [selectedNode, setSelectedNode] = useState(null);
   const [draggingNode, setDraggingNode] = useState(null);
@@ -2730,46 +2787,88 @@ function SplitterSimulator({ olts = [], onus = [] }) {
   const [saveStatus, setSaveStatus] = useState('idle'); // 'idle', 'saving', 'saved'
 
   // Create new diagram
-  const createNewDiagram = () => {
-    const newId = `diagram-${Date.now()}`;
-    const newDiagram = {
-      id: newId,
-      name: `Diagram ${diagrams.length + 1}`,
-      nodes: [],
-      connections: [],
-      settings: { oltPower: 5, onuSensitivity: -28 }
-    };
-    setDiagrams([...diagrams, newDiagram]);
-    setCurrentDiagramId(newId);
-    setNodes([]);
-    setConnections([]);
-    setShowDiagramMenu(false);
+  const createNewDiagram = async () => {
+    try {
+      setSaveStatus('saving');
+      const response = await api.createDiagram({
+        name: `Diagram ${diagrams.length + 1}`,
+        nodes: '[]',
+        connections: '[]',
+        settings: JSON.stringify({ oltPower: 5, onuSensitivity: -28 }),
+        is_shared: false
+      });
+      const newDiagram = response.data;
+      const parsedDiagram = {
+        id: newDiagram.id,
+        name: newDiagram.name,
+        nodes: JSON.parse(newDiagram.nodes || '[]'),
+        connections: JSON.parse(newDiagram.connections || '[]'),
+        settings: JSON.parse(newDiagram.settings || '{}'),
+        is_shared: newDiagram.is_shared,
+        owner_id: newDiagram.owner_id,
+        owner_name: newDiagram.owner_name
+      };
+      setDiagrams([...diagrams, parsedDiagram]);
+      setCurrentDiagramId(newDiagram.id);
+      setNodes([]);
+      setConnections([]);
+      setShowDiagramMenu(false);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    } catch (err) {
+      console.error('Failed to create diagram:', err);
+      setSaveStatus('error');
+      alert('Failed to create diagram');
+    }
   };
 
   // Rename diagram
-  const renameDiagram = (id, newName) => {
-    setDiagrams(diagrams.map(d => d.id === id ? { ...d, name: newName } : d));
-    setEditingDiagramName(null);
+  const renameDiagram = async (id, newName) => {
+    try {
+      await api.updateDiagram(id, { name: newName });
+      setDiagrams(diagrams.map(d => d.id === id ? { ...d, name: newName } : d));
+      setEditingDiagramName(null);
+    } catch (err) {
+      console.error('Failed to rename diagram:', err);
+      alert('Failed to rename diagram');
+    }
   };
 
   // Delete diagram
-  const deleteDiagram = (id) => {
+  const handleDeleteDiagram = async (id) => {
     if (diagrams.length <= 1) {
       alert('Cannot delete the last diagram');
       return;
     }
     if (window.confirm('Delete this diagram?')) {
-      const newDiagrams = diagrams.filter(d => d.id !== id);
-      setDiagrams(newDiagrams);
-      if (currentDiagramId === id) {
-        setCurrentDiagramId(newDiagrams[0].id);
+      try {
+        await api.deleteDiagram(id);
+        const newDiagrams = diagrams.filter(d => d.id !== id);
+        setDiagrams(newDiagrams);
+        if (currentDiagramId === id) {
+          setCurrentDiagramId(newDiagrams[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to delete diagram:', err);
+        alert('Failed to delete diagram');
       }
     }
   };
 
   // Switch diagram
-  const switchDiagram = (id) => {
+  const switchDiagram = async (id) => {
     // Save current diagram first
+    if (currentDiagramId && currentDiagram) {
+      try {
+        await api.updateDiagram(currentDiagramId, {
+          nodes: JSON.stringify(nodes),
+          connections: JSON.stringify(connections),
+          settings: JSON.stringify({ oltPower, onuSensitivity })
+        });
+      } catch (err) {
+        console.error('Failed to save current diagram:', err);
+      }
+    }
     const updatedDiagrams = diagrams.map(d =>
       d.id === currentDiagramId
         ? { ...d, nodes, connections, settings: { oltPower, onuSensitivity } }
@@ -2780,52 +2879,65 @@ function SplitterSimulator({ olts = [], onus = [] }) {
     setShowDiagramMenu(false);
   };
 
+  // Auto-save to API with debouncing whenever nodes, connections, or settings change
   useEffect(() => {
-    // Save current diagram to diagrams array
-    if (nodes.length > 0 || connections.length > 0) {
-      setSaveStatus('saving');
-      const updatedDiagrams = diagrams.map(d =>
-        d.id === currentDiagramId
-          ? { ...d, nodes, connections, settings: { oltPower, onuSensitivity }, savedAt: new Date().toISOString() }
-          : d
-      );
-      setDiagrams(updatedDiagrams);
-      localStorage.setItem('splitterDiagrams', JSON.stringify(updatedDiagrams));
-      setLastSaved(new Date());
-      setSaveStatus('saved');
-      const timer = setTimeout(() => setSaveStatus('idle'), 2000);
-      return () => clearTimeout(timer);
+    // Skip if loading or no diagram selected
+    if (loading || !currentDiagramId) return;
+
+    // Clear any pending save timeout
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
     }
-  }, [nodes, connections, oltPower, onuSensitivity]);
 
-  // Also save diagrams when they change
-  useEffect(() => {
-    localStorage.setItem('splitterDiagrams', JSON.stringify(diagrams));
-  }, [diagrams]);
+    // Mark that we have pending changes
+    pendingSaveRef.current = true;
+    setSaveStatus('saving');
 
-  // Legacy: migrate old single diagram to new format
-  useEffect(() => {
-    try {
-      const oldSaved = localStorage.getItem('splitterDiagram');
-      if (oldSaved && !localStorage.getItem('splitterDiagrams')) {
-        const oldData = JSON.parse(oldSaved);
-        if (oldData.nodes?.length > 0) {
-          const migratedDiagram = {
-            id: 'migrated',
-            name: 'Migrated Diagram',
-            nodes: oldData.nodes,
-            connections: oldData.connections,
-            settings: oldData.settings || { oltPower: 5, onuSensitivity: -28 }
-          };
-          setDiagrams([migratedDiagram]);
-          setCurrentDiagramId('migrated');
-          setNodes(oldData.nodes);
-          setConnections(oldData.connections);
-          localStorage.removeItem('splitterDiagram');
-        }
+    // Debounce API save (500ms delay)
+    saveTimeoutRef.current = setTimeout(async () => {
+      if (!pendingSaveRef.current) return;
+
+      try {
+        await api.updateDiagram(currentDiagramId, {
+          nodes: JSON.stringify(nodes),
+          connections: JSON.stringify(connections),
+          settings: JSON.stringify({ oltPower, onuSensitivity })
+        });
+
+        // Also update local state
+        const updatedDiagrams = diagrams.map(d =>
+          d.id === currentDiagramId
+            ? { ...d, nodes, connections, settings: { oltPower, onuSensitivity } }
+            : d
+        );
+        setDiagrams(updatedDiagrams);
+
+        // Also save to localStorage as backup
+        localStorage.setItem('splitterDiagrams', JSON.stringify(updatedDiagrams));
+
+        setLastSaved(new Date());
+        setSaveStatus('saved');
+        pendingSaveRef.current = false;
+        setTimeout(() => setSaveStatus('idle'), 2000);
+      } catch (err) {
+        console.error('Failed to auto-save diagram:', err);
+        setSaveStatus('error');
+        // Still save to localStorage as fallback
+        const updatedDiagrams = diagrams.map(d =>
+          d.id === currentDiagramId
+            ? { ...d, nodes, connections, settings: { oltPower, onuSensitivity } }
+            : d
+        );
+        localStorage.setItem('splitterDiagrams', JSON.stringify(updatedDiagrams));
       }
-    } catch (e) {}
-  }, []);
+    }, 500);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [nodes, connections, oltPower, onuSensitivity, currentDiagramId, loading]);
 
   // Clear diagram function
   const clearDiagram = () => {
@@ -2837,9 +2949,16 @@ function SplitterSimulator({ olts = [], onus = [] }) {
   };
 
   // OLT and PON selection
-  const [selectedOltId, setSelectedOltId] = useState(olts[0]?.id || null);
+  const [selectedOltId, setSelectedOltId] = useState(null);
   const [selectedPonPort, setSelectedPonPort] = useState(1);
   const [showOnuPicker, setShowOnuPicker] = useState(false);
+
+  // Set default OLT when olts data loads
+  useEffect(() => {
+    if (olts.length > 0 && !selectedOltId) {
+      setSelectedOltId(olts[0].id);
+    }
+  }, [olts, selectedOltId]);
 
   // Get selected OLT
   const selectedOlt = olts.find(o => o.id === selectedOltId);
@@ -2918,6 +3037,7 @@ function SplitterSimulator({ olts = [], onus = [] }) {
       sensitivity: onuSensitivity,
       ponPort: onu.pon_port,
       onuNumber: onu.onu_id,
+      isOnline: onu.is_online,
     };
     setNodes([...nodes, newNode]);
     setShowOnuPicker(false);
@@ -3232,6 +3352,36 @@ function SplitterSimulator({ olts = [], onus = [] }) {
     setNodes(nodes.map(n => n.id === nodeId ? { ...n, [field]: value } : n));
   };
 
+  // Show loading state
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading diagrams...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show error state
+  if (loadError && diagrams.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="text-red-500 text-4xl mb-4">!</div>
+          <p className="text-red-600">{loadError}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
       {/* Click outside to close menu */}
@@ -3302,7 +3452,7 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                             </svg>
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); deleteDiagram(diagram.id); }}
+                            onClick={(e) => { e.stopPropagation(); handleDeleteDiagram(diagram.id); }}
                             className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
                             title="Delete"
                           >
@@ -3508,6 +3658,7 @@ function SplitterSimulator({ olts = [], onus = [] }) {
           <div className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-300 ${
             saveStatus === 'saving' ? 'bg-yellow-100 border border-yellow-300' :
             saveStatus === 'saved' ? 'bg-green-100 border border-green-300' :
+            saveStatus === 'error' ? 'bg-red-100 border border-red-300' :
             'bg-gray-100 border border-gray-200'
           }`}>
             {saveStatus === 'saving' ? (
@@ -3516,21 +3667,28 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
-                <span className="text-sm font-medium text-yellow-700">Saving...</span>
+                <span className="text-sm font-medium text-yellow-700">Saving to server...</span>
               </>
             ) : saveStatus === 'saved' ? (
               <>
                 <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                <span className="text-sm font-medium text-green-700">Auto-saved!</span>
+                <span className="text-sm font-medium text-green-700">Saved to server!</span>
+              </>
+            ) : saveStatus === 'error' ? (
+              <>
+                <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-sm font-medium text-red-700">Save failed (local backup)</span>
               </>
             ) : (
               <>
                 <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
                 </svg>
-                <span className="text-sm font-medium text-gray-600">Auto-save enabled</span>
+                <span className="text-sm font-medium text-gray-600">Cloud sync enabled</span>
               </>
             )}
           </div>
@@ -4013,19 +4171,25 @@ function SplitterSimulator({ olts = [], onus = [] }) {
               )}
 
               {/* ONU - VSOL Style CPE Device */}
-              {node.type === 'onu' && (
+              {node.type === 'onu' && (() => {
+                // Get real-time online status from onus data
+                const realOnu = node.onuId ? onus.find(o => o.id === node.onuId) : null;
+                const isOnline = realOnu ? realOnu.is_online : (node.isOnline !== false);
+
+                return (
                 <div className={`relative h-full ${selectedNode?.id === node.id ? 'ring-2 ring-green-400 ring-offset-1' : ''}`}>
                   {/* ONU body - White plastic casing */}
-                  <div className="absolute inset-0 bg-gradient-to-b from-[#fefefe] to-[#f0f0f0] rounded shadow-md border border-[#ddd]" style={{boxShadow: '0 2px 6px rgba(0,0,0,0.1)'}}>
-                    {/* Top brand strip */}
-                    <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-r from-[#1e3a5f] via-[#2563eb] to-[#1e3a5f] rounded-t flex items-center px-1.5">
+                  <div className={`absolute inset-0 bg-gradient-to-b from-[#fefefe] to-[#f0f0f0] rounded shadow-md border ${!isOnline ? 'border-red-400' : 'border-[#ddd]'}`} style={{boxShadow: !isOnline ? '0 2px 8px rgba(239,68,68,0.3)' : '0 2px 6px rgba(0,0,0,0.1)'}}>
+                    {/* Top brand strip - Red if offline, Blue if online */}
+                    <div className={`absolute top-0 left-0 right-0 h-3 rounded-t flex items-center px-1.5 ${!isOnline ? 'bg-gradient-to-r from-red-700 via-red-500 to-red-700' : 'bg-gradient-to-r from-[#1e3a5f] via-[#2563eb] to-[#1e3a5f]'}`}>
                       <span className="text-[7px] font-bold text-white">ONU</span>
+                      {!isOnline && <span className="text-[6px] text-red-200 ml-auto">OFFLINE</span>}
                     </div>
 
-                    {/* Status LEDs */}
+                    {/* Status LEDs - show online/offline status */}
                     <div className="absolute top-4 right-1.5 flex gap-1">
-                      <div className={`w-1.5 h-1.5 rounded-full ${powerMap[`${node.id}-rx`] !== undefined ? 'bg-green-500' : 'bg-gray-300'}`} style={powerMap[`${node.id}-rx`] !== undefined ? {boxShadow: '0 0 4px #22c55e'} : {}}></div>
-                      <div className="w-1.5 h-1.5 rounded-full bg-blue-500" style={{boxShadow: '0 0 4px #3b82f6'}}></div>
+                      <div className={`w-1.5 h-1.5 rounded-full ${!isOnline ? 'bg-red-500' : powerMap[`${node.id}-rx`] !== undefined ? 'bg-green-500' : 'bg-gray-300'}`} style={!isOnline ? {boxShadow: '0 0 4px #ef4444'} : powerMap[`${node.id}-rx`] !== undefined ? {boxShadow: '0 0 4px #22c55e'} : {}}></div>
+                      <div className={`w-1.5 h-1.5 rounded-full ${!isOnline ? 'bg-gray-400' : 'bg-blue-500'}`} style={isOnline ? {boxShadow: '0 0 4px #3b82f6'} : {}}></div>
                     </div>
 
                     {/* Device name */}
@@ -4065,7 +4229,8 @@ function SplitterSimulator({ olts = [], onus = [] }) {
                     title="Ethernet output (to Switch)"
                   />
                 </div>
-              )}
+                );
+              })()}
 
               {/* Switch - Layer 2 Network Switch with multiple ports */}
               {node.type === 'switch' && (

@@ -88,6 +88,13 @@ export const getOnuTrafficHistory = (onuId, range) => api.get(`/api/traffic/hist
 export const getPonTrafficHistory = (oltId, ponPort, range) => api.get(`/api/traffic/history/pon/${oltId}/${ponPort}?range=${range}`);
 export const getOltTrafficHistory = (oltId, range) => api.get(`/api/traffic/history/olt/${oltId}?range=${range}`);
 
+// Diagrams (Splitter Simulator)
+export const getDiagrams = () => api.get('/api/diagrams');
+export const getDiagram = (id) => api.get(`/api/diagrams/${id}`);
+export const createDiagram = (data) => api.post('/api/diagrams', data);
+export const updateDiagram = (id, data) => api.put(`/api/diagrams/${id}`, data);
+export const deleteDiagram = (id) => api.delete(`/api/diagrams/${id}`);
+
 // Generic get function
 export const get = (url) => api.get(url);
 

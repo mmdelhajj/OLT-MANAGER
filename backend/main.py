@@ -19,12 +19,13 @@ from typing import Dict, Set
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
-from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory
+from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram
 from schemas import (
     OLTCreate, OLTUpdate, OLTResponse, OLTListResponse,
     ONUResponse, ONUListResponse, DashboardStats, PollResult,
     RegionCreate, RegionUpdate, RegionResponse, RegionListResponse,
-    UserLogin, UserCreate, UserUpdate, UserResponse, UserListResponse, LoginResponse
+    UserLogin, UserCreate, UserUpdate, UserResponse, UserListResponse, LoginResponse,
+    DiagramCreate, DiagramUpdate, DiagramResponse, DiagramListResponse
 )
 from olt_connector import poll_olt, poll_olt_snmp, get_opm_data_via_ssh, get_traffic_counters_snmp, ONUData, OLTConnector
 from trap_receiver import SimpleTrapReceiver, TrapEvent
@@ -2908,6 +2909,177 @@ async def cleanup_traffic_history(
         "message": f"Deleted {deleted} records older than {days} days",
         "cutoff_time": cutoff_time.isoformat()
     }
+
+
+# ============ Diagram Endpoints ============
+
+@app.get("/api/diagrams", response_model=DiagramListResponse)
+async def list_diagrams(
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """
+    List all diagrams accessible by the current user.
+    Returns user's own diagrams plus shared diagrams.
+    """
+    # Get user's own diagrams and shared diagrams
+    diagrams = db.query(Diagram).filter(
+        or_(
+            Diagram.owner_id == user.id,
+            Diagram.is_shared == True
+        )
+    ).order_by(Diagram.updated_at.desc()).all()
+
+    result = []
+    for d in diagrams:
+        owner = db.query(User).filter(User.id == d.owner_id).first()
+        result.append(DiagramResponse(
+            id=d.id,
+            owner_id=d.owner_id,
+            owner_name=owner.username if owner else None,
+            name=d.name,
+            nodes=d.nodes,
+            connections=d.connections,
+            settings=d.settings,
+            is_shared=d.is_shared,
+            created_at=d.created_at,
+            updated_at=d.updated_at
+        ))
+
+    return DiagramListResponse(diagrams=result, total=len(result))
+
+
+@app.post("/api/diagrams", response_model=DiagramResponse)
+async def create_diagram(
+    diagram: DiagramCreate,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Create a new diagram"""
+    db_diagram = Diagram(
+        owner_id=user.id,
+        name=diagram.name,
+        nodes=diagram.nodes,
+        connections=diagram.connections,
+        settings=diagram.settings,
+        is_shared=diagram.is_shared
+    )
+    db.add(db_diagram)
+    db.commit()
+    db.refresh(db_diagram)
+
+    return DiagramResponse(
+        id=db_diagram.id,
+        owner_id=db_diagram.owner_id,
+        owner_name=user.username,
+        name=db_diagram.name,
+        nodes=db_diagram.nodes,
+        connections=db_diagram.connections,
+        settings=db_diagram.settings,
+        is_shared=db_diagram.is_shared,
+        created_at=db_diagram.created_at,
+        updated_at=db_diagram.updated_at
+    )
+
+
+@app.get("/api/diagrams/{diagram_id}", response_model=DiagramResponse)
+async def get_diagram(
+    diagram_id: int,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Get a specific diagram by ID"""
+    diagram = db.query(Diagram).filter(Diagram.id == diagram_id).first()
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    # Check access: owner or shared
+    if diagram.owner_id != user.id and not diagram.is_shared:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    owner = db.query(User).filter(User.id == diagram.owner_id).first()
+
+    return DiagramResponse(
+        id=diagram.id,
+        owner_id=diagram.owner_id,
+        owner_name=owner.username if owner else None,
+        name=diagram.name,
+        nodes=diagram.nodes,
+        connections=diagram.connections,
+        settings=diagram.settings,
+        is_shared=diagram.is_shared,
+        created_at=diagram.created_at,
+        updated_at=diagram.updated_at
+    )
+
+
+@app.put("/api/diagrams/{diagram_id}", response_model=DiagramResponse)
+async def update_diagram(
+    diagram_id: int,
+    update: DiagramUpdate,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Update a diagram (owner only)"""
+    diagram = db.query(Diagram).filter(Diagram.id == diagram_id).first()
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    # Only owner can update
+    if diagram.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the owner can update this diagram")
+
+    # Update fields if provided
+    if update.name is not None:
+        diagram.name = update.name
+    if update.nodes is not None:
+        diagram.nodes = update.nodes
+    if update.connections is not None:
+        diagram.connections = update.connections
+    if update.settings is not None:
+        diagram.settings = update.settings
+    if update.is_shared is not None:
+        diagram.is_shared = update.is_shared
+
+    diagram.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(diagram)
+
+    owner = db.query(User).filter(User.id == diagram.owner_id).first()
+
+    return DiagramResponse(
+        id=diagram.id,
+        owner_id=diagram.owner_id,
+        owner_name=owner.username if owner else None,
+        name=diagram.name,
+        nodes=diagram.nodes,
+        connections=diagram.connections,
+        settings=diagram.settings,
+        is_shared=diagram.is_shared,
+        created_at=diagram.created_at,
+        updated_at=diagram.updated_at
+    )
+
+
+@app.delete("/api/diagrams/{diagram_id}")
+async def delete_diagram(
+    diagram_id: int,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Delete a diagram (owner only)"""
+    diagram = db.query(Diagram).filter(Diagram.id == diagram_id).first()
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+
+    # Only owner can delete
+    if diagram.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the owner can delete this diagram")
+
+    db.delete(diagram)
+    db.commit()
+
+    return {"message": "Diagram deleted successfully"}
 
 
 # ============ Health Check ============

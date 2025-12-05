@@ -196,3 +196,41 @@ class UserListResponse(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     user: UserResponse
+
+
+# Diagram Schemas
+class DiagramCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    nodes: str = Field(default="[]")  # JSON string of nodes
+    connections: str = Field(default="[]")  # JSON string of connections
+    settings: str = Field(default="{}")  # JSON string of settings
+    is_shared: bool = Field(default=False)
+
+
+class DiagramUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    nodes: Optional[str] = None  # JSON string of nodes
+    connections: Optional[str] = None  # JSON string of connections
+    settings: Optional[str] = None  # JSON string of settings
+    is_shared: Optional[bool] = None
+
+
+class DiagramResponse(BaseModel):
+    id: int
+    owner_id: int
+    owner_name: Optional[str] = None
+    name: str
+    nodes: str  # JSON string
+    connections: str  # JSON string
+    settings: str  # JSON string
+    is_shared: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DiagramListResponse(BaseModel):
+    diagrams: List[DiagramResponse]
+    total: int

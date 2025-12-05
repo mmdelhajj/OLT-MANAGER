@@ -156,6 +156,24 @@ class Settings(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class Diagram(Base):
+    """Splitter simulator diagram model for storing network topology designs"""
+    __tablename__ = "diagrams"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    nodes = Column(Text, nullable=False, default="[]")  # JSON string of nodes
+    connections = Column(Text, nullable=False, default="[]")  # JSON string of connections
+    settings = Column(Text, nullable=False, default="{}")  # JSON string of settings (oltPower, onuSensitivity)
+    is_shared = Column(Boolean, default=False)  # If true, all users can view
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    owner = relationship("User", back_populates="diagrams")
+
+
 class User(Base):
     """User model for authentication and authorization"""
     __tablename__ = "users"
@@ -173,6 +191,8 @@ class User(Base):
     assigned_olts = relationship("OLT", secondary="user_olts", back_populates="assigned_users")
     # Regions owned by this user
     owned_regions = relationship("Region", back_populates="owner")
+    # Diagrams owned by this user
+    diagrams = relationship("Diagram", back_populates="owner")
 
 
 def init_db():
