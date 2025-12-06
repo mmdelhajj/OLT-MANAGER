@@ -293,6 +293,13 @@ async def collect_traffic_history(olt, db):
                     rx_kbps = round((rx_diff * 8) / time_diff / 1000, 2)
                     tx_kbps = round((tx_diff * 8) / time_diff / 1000, 2)
 
+                    # Sanity check: cap at 1 Gbps (1,000,000 Kbps) - reject impossible values
+                    MAX_VALID_KBPS = 1000000  # 1 Gbps
+                    if rx_kbps > MAX_VALID_KBPS or tx_kbps > MAX_VALID_KBPS:
+                        logger.warning(f"Traffic value exceeds 1 Gbps, ignoring: RX={rx_kbps}, TX={tx_kbps}")
+                        rx_kbps = 0
+                        tx_kbps = 0
+
                 prev.rx_bytes = rx_bytes
                 prev.tx_bytes = tx_bytes
                 prev.timestamp = current_time
@@ -784,6 +791,19 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     global polling_task, trap_task, trap_receiver
 
+    # Validate license first (but don't crash - allow read-only mode)
+    from license_manager import validate_license_on_startup, license_manager, LicenseError, license_check_loop
+    license_valid = validate_license_on_startup()
+
+    if license_valid:
+        license_info = license_manager.get_license_info()
+        logger.info(f"License valid: {license_info.get('customer_name')} | Max OLTs: {license_info.get('max_olts')} | Max ONUs: {license_info.get('max_onus')}")
+    else:
+        logger.warning("=" * 50)
+        logger.warning("LICENSE INVALID - Running in READ-ONLY mode")
+        logger.warning(f"Reason: {license_manager.error_message}")
+        logger.warning("=" * 50)
+
     # Initialize database
     init_db()
     logger.info("Database initialized")
@@ -802,6 +822,10 @@ async def lifespan(app: FastAPI):
 
     # Start SNMP trap receiver
     trap_task = asyncio.create_task(start_trap_receiver(SessionLocal))
+
+    # Start periodic license check
+    license_task = asyncio.create_task(license_check_loop())
+    logger.info("Started periodic license check (every 5 minutes)")
 
     yield
 
@@ -2291,6 +2315,12 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
                     rx_kbps = round((rx_diff * 8) / time_diff / 1000, 2)
                     tx_kbps = round((tx_diff * 8) / time_diff / 1000, 2)
 
+                    # Sanity check: cap at 1 Gbps (1,000,000 Kbps)
+                    MAX_VALID_KBPS = 1000000
+                    if rx_kbps > MAX_VALID_KBPS or tx_kbps > MAX_VALID_KBPS:
+                        rx_kbps = 0
+                        tx_kbps = 0
+
                 # Update snapshot
                 prev.rx_bytes = rx_bytes
                 prev.tx_bytes = tx_bytes
@@ -2457,6 +2487,12 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
                         rx_kbps = round((rx_diff * 8) / time_diff / 1000, 2)
                         tx_kbps = round((tx_diff * 8) / time_diff / 1000, 2)
 
+                        # Sanity check: cap at 1 Gbps (1,000,000 Kbps)
+                        MAX_VALID_KBPS = 1000000
+                        if rx_kbps > MAX_VALID_KBPS or tx_kbps > MAX_VALID_KBPS:
+                            rx_kbps = 0
+                            tx_kbps = 0
+
                     prev.rx_bytes = rx_bytes
                     prev.tx_bytes = tx_bytes
                     prev.timestamp = current_time
@@ -2589,6 +2625,12 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                             # Calculate instant rate
                             instant_rx = (rx_diff * 8) / time_diff / 1000
                             instant_tx = (tx_diff * 8) / time_diff / 1000
+
+                            # Sanity check: cap at 1 Gbps (1,000,000 Kbps)
+                            MAX_VALID_KBPS = 1000000
+                            if instant_rx > MAX_VALID_KBPS or instant_tx > MAX_VALID_KBPS:
+                                instant_rx = 0
+                                instant_tx = 0
 
                             # Apply exponential moving average for smooth transition
                             # New value = SMOOTHING * instant + (1 - SMOOTHING) * previous
@@ -3080,6 +3122,36 @@ async def delete_diagram(
     db.commit()
 
     return {"message": "Diagram deleted successfully"}
+
+
+# ============ License Info ============
+
+@app.get("/api/license")
+async def get_license_info(user: User = Depends(require_auth)):
+    """Get current license information"""
+    from license_manager import license_manager
+    info = license_manager.get_license_info()
+
+    # Add status for frontend
+    if not info.get('valid'):
+        error_msg = info.get('error_message', '').lower()
+        if 'suspended' in error_msg:
+            info['status'] = 'suspended'
+            info['status_message'] = 'License has been suspended. Please contact support.'
+        elif 'expired' in error_msg:
+            info['status'] = 'expired'
+            info['status_message'] = 'License has expired. Please renew your subscription.'
+        elif 'revoked' in error_msg:
+            info['status'] = 'revoked'
+            info['status_message'] = 'License has been revoked. Please contact support.'
+        else:
+            info['status'] = 'invalid'
+            info['status_message'] = info.get('error_message', 'License is invalid')
+    else:
+        info['status'] = 'active'
+        info['status_message'] = None
+
+    return info
 
 
 # ============ Health Check ============

@@ -4750,6 +4750,55 @@ function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pag
   );
 }
 
+// License Overlay Component
+function LicenseOverlay({ status, message }) {
+  const getIcon = () => {
+    switch (status) {
+      case 'suspended': return '⚠️';
+      case 'expired': return '⏰';
+      case 'revoked': return '🚫';
+      default: return '❌';
+    }
+  };
+
+  const getTitle = () => {
+    switch (status) {
+      case 'suspended': return 'License Suspended';
+      case 'expired': return 'License Expired';
+      case 'revoked': return 'License Revoked';
+      default: return 'License Invalid';
+    }
+  };
+
+  const getBgColor = () => {
+    switch (status) {
+      case 'suspended': return 'from-yellow-600 to-orange-600';
+      case 'expired': return 'from-red-600 to-red-800';
+      case 'revoked': return 'from-gray-700 to-gray-900';
+      default: return 'from-red-600 to-red-800';
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm pointer-events-auto"></div>
+      <div className={`relative bg-gradient-to-br ${getBgColor()} p-8 rounded-2xl shadow-2xl max-w-md mx-4 text-center pointer-events-auto`}>
+        <div className="text-6xl mb-4">{getIcon()}</div>
+        <h2 className="text-2xl font-bold text-white mb-4">{getTitle()}</h2>
+        <p className="text-white/90 text-lg mb-6">{message}</p>
+        <div className="bg-white/20 rounded-lg p-4">
+          <p className="text-white/80 text-sm">
+            Please contact your system administrator or support to resolve this issue.
+          </p>
+        </div>
+        <div className="mt-6 text-white/60 text-xs">
+          You can view the dashboard but all actions are disabled.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Dashboard Component
 function Dashboard({ user, onLogout, pageName }) {
   // Load saved page from localStorage, default to dashboard
@@ -4757,6 +4806,36 @@ function Dashboard({ user, onLogout, pageName }) {
     const savedPage = localStorage.getItem('currentPage');
     return savedPage || 'dashboard';
   });
+
+  // License status
+  const [licenseStatus, setLicenseStatus] = useState({ status: 'active', message: null });
+  const licenseCheckRef = useRef(null);
+
+  // Fetch license status
+  const fetchLicenseStatus = useCallback(async () => {
+    try {
+      const response = await api.getLicenseInfo();
+      setLicenseStatus({
+        status: response.data.status || 'active',
+        message: response.data.status_message
+      });
+    } catch (error) {
+      console.error('Failed to fetch license status:', error);
+    }
+  }, []);
+
+  // Check license on mount and every 60 seconds
+  useEffect(() => {
+    fetchLicenseStatus();
+    licenseCheckRef.current = setInterval(fetchLicenseStatus, 60000);
+    return () => {
+      if (licenseCheckRef.current) {
+        clearInterval(licenseCheckRef.current);
+      }
+    };
+  }, [fetchLicenseStatus]);
+
+  const isLicenseValid = licenseStatus.status === 'active';
 
   // Save current page to localStorage whenever it changes
   useEffect(() => {
@@ -5145,6 +5224,11 @@ function Dashboard({ user, onLogout, pageName }) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50 flex">
+      {/* License Status Overlay */}
+      {!isLicenseValid && (
+        <LicenseOverlay status={licenseStatus.status} message={licenseStatus.message} />
+      )}
+
       <Sidebar
         currentPage={currentPage}
         onNavigate={setCurrentPage}

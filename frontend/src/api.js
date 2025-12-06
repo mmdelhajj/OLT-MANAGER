@@ -79,6 +79,9 @@ export const changePassword = (data) => api.post('/api/auth/change-password', da
 export const getSettings = () => api.get('/api/settings');
 export const updateSettings = (data) => api.put('/api/settings', data);
 
+// License
+export const getLicenseInfo = () => api.get('/api/license');
+
 // Traffic
 export const getOltTraffic = (oltId) => api.get(`/api/olts/${oltId}/traffic`);
 export const getAllTraffic = () => api.get('/api/traffic/all');
