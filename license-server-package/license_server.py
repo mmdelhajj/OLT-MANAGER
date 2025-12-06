@@ -746,6 +746,60 @@ def validate_license():
         'package_type': license_data.get('package_type', 'standard')
     })
 
+@app.route('/api/trial', methods=['POST'])
+def register_trial():
+    """Auto-register a 7-day trial license for new installations"""
+    data = request.json or {}
+    hardware_id = data.get('hardware_id')
+    hostname = data.get('hostname', 'Unknown')
+    ip_address = request.remote_addr
+
+    if not hardware_id:
+        return jsonify({'error': 'Hardware ID required'}), 400
+
+    licenses = load_licenses()
+
+    # Check if this hardware already has a license (trial or paid)
+    for key, lic_data in licenses.items():
+        if lic_data.get('hardware_id') == hardware_id:
+            # Already has a license, return it
+            return jsonify({
+                'exists': True,
+                'license_key': key,
+                'message': 'License already exists for this hardware'
+            })
+
+    # Create new 7-day trial license
+    license_key = generate_license_key()
+    license_data = {
+        'customer_name': f'Trial - {hostname}',
+        'customer_email': '',
+        'max_olts': 2,  # Limited for trial
+        'max_onus': 50,  # Limited for trial
+        'max_users': 2,  # Limited for trial
+        'features': ['basic', 'traffic'],  # Limited features for trial
+        'license_type': 'trial',
+        'package_type': 'trial',
+        'expires_at': (datetime.now() + timedelta(days=7)).isoformat(),
+        'created_at': datetime.now().isoformat(),
+        'active': True,
+        'suspended': False,
+        'hardware_id': hardware_id,
+        'activated_at': datetime.now().isoformat(),
+        'activation_ip': ip_address,
+        'notes': f'Auto-registered trial from {ip_address}'
+    }
+
+    licenses[license_key] = license_data
+    save_licenses(licenses)
+
+    return jsonify({
+        'success': True,
+        'license_key': license_key,
+        'expires_at': license_data['expires_at'],
+        'message': 'Trial license created successfully (7 days)'
+    })
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
