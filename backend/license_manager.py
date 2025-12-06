@@ -249,8 +249,11 @@ class LicenseManager:
             'customer_name': self.license_data.get('customer_name', 'Unknown'),
             'max_olts': self.license_data.get('max_olts', 1),
             'max_onus': self.license_data.get('max_onus', 100),
+            'max_users': self.license_data.get('max_users', 5),
             'expires_at': self.license_data.get('expires_at'),
             'features': self.license_data.get('features', []),
+            'license_type': self.license_data.get('license_type', 'standard'),
+            'package_type': self.license_data.get('package_type', 'standard'),
             'hardware_id': self.hardware_id,
             'error_message': self.error_message
         }

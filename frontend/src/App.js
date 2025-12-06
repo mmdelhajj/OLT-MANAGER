@@ -1178,7 +1178,7 @@ function UserModal({ isOpen, onClose, user, onSubmit, olts }) {
 }
 
 // Settings Modal
-function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword }) {
+function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, licenseInfo }) {
   const [formData, setFormData] = useState({
     system_name: 'OLT Manager',
     page_name: '',
@@ -1332,6 +1332,12 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword }
           onClick={() => setActiveTab('password')}
         >
           Password
+        </button>
+        <button
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'license' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          onClick={() => setActiveTab('license')}
+        >
+          License
         </button>
       </div>
 
@@ -1665,6 +1671,171 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword }
             </button>
           </div>
         </form>
+      )}
+
+      {activeTab === 'license' && (
+        <div className="space-y-4">
+          {/* License Status Card */}
+          <div className={`p-4 rounded-xl border ${
+            licenseInfo?.status === 'active' ? 'bg-green-50 border-green-200' :
+            licenseInfo?.status === 'suspended' ? 'bg-yellow-50 border-yellow-200' :
+            licenseInfo?.status === 'expired' ? 'bg-red-50 border-red-200' :
+            'bg-gray-50 border-gray-200'
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <div className={`w-12 h-12 rounded-full flex items-center justify-center mr-3 ${
+                  licenseInfo?.status === 'active' ? 'bg-green-500' :
+                  licenseInfo?.status === 'suspended' ? 'bg-yellow-500' :
+                  licenseInfo?.status === 'expired' ? 'bg-red-500' :
+                  'bg-gray-500'
+                }`}>
+                  {licenseInfo?.status === 'active' ? (
+                    <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  ) : licenseInfo?.status === 'suspended' ? (
+                    <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  )}
+                </div>
+                <div>
+                  <h3 className={`font-semibold text-lg ${
+                    licenseInfo?.status === 'active' ? 'text-green-800' :
+                    licenseInfo?.status === 'suspended' ? 'text-yellow-800' :
+                    licenseInfo?.status === 'expired' ? 'text-red-800' :
+                    'text-gray-800'
+                  }`}>
+                    {licenseInfo?.status === 'active' ? 'License Active' :
+                     licenseInfo?.status === 'suspended' ? 'License Suspended' :
+                     licenseInfo?.status === 'expired' ? 'License Expired' :
+                     'License Invalid'}
+                  </h3>
+                  <p className={`text-sm ${
+                    licenseInfo?.status === 'active' ? 'text-green-600' :
+                    licenseInfo?.status === 'suspended' ? 'text-yellow-600' :
+                    licenseInfo?.status === 'expired' ? 'text-red-600' :
+                    'text-gray-600'
+                  }`}>
+                    {licenseInfo?.customer_name || 'Unknown'}
+                  </p>
+                </div>
+              </div>
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                licenseInfo?.status === 'active' ? 'bg-green-200 text-green-800' :
+                licenseInfo?.status === 'suspended' ? 'bg-yellow-200 text-yellow-800' :
+                licenseInfo?.status === 'expired' ? 'bg-red-200 text-red-800' :
+                'bg-gray-200 text-gray-800'
+              }`}>
+                {licenseInfo?.license_type?.toUpperCase() || licenseInfo?.package_type?.toUpperCase() || 'STANDARD'}
+              </span>
+            </div>
+          </div>
+
+          {/* License Details */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              License Details
+            </h4>
+            <div className="space-y-3">
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-gray-600">License Key</span>
+                <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded">
+                  {licenseInfo?.license_key || 'N/A'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-gray-600">Status</span>
+                <span className={`font-medium ${
+                  licenseInfo?.status === 'active' ? 'text-green-600' :
+                  licenseInfo?.status === 'suspended' ? 'text-yellow-600' :
+                  'text-red-600'
+                }`}>
+                  {licenseInfo?.status?.charAt(0).toUpperCase() + licenseInfo?.status?.slice(1) || 'Unknown'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-gray-600">Expires</span>
+                <span className="font-medium">
+                  {licenseInfo?.expires_at ? new Date(licenseInfo.expires_at).toLocaleDateString() : 'Never'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                <span className="text-gray-600">Days Remaining</span>
+                <span className={`font-bold text-lg ${
+                  licenseInfo?.days_remaining <= 7 ? 'text-red-600' :
+                  licenseInfo?.days_remaining <= 30 ? 'text-yellow-600' :
+                  'text-green-600'
+                }`}>
+                  {licenseInfo?.days_remaining !== undefined ?
+                    (licenseInfo.days_remaining < 0 ? 'Expired' :
+                     licenseInfo.days_remaining === 0 ? 'Expires Today' :
+                     `${licenseInfo.days_remaining} days`) :
+                    'Unlimited'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* License Limits */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              License Limits
+            </h4>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center p-3 bg-blue-50 rounded-lg">
+                <div className="text-2xl font-bold text-blue-600">{licenseInfo?.max_olts || 0}</div>
+                <div className="text-sm text-blue-700">Max OLTs</div>
+              </div>
+              <div className="text-center p-3 bg-purple-50 rounded-lg">
+                <div className="text-2xl font-bold text-purple-600">{licenseInfo?.max_onus || 0}</div>
+                <div className="text-sm text-purple-700">Max ONUs</div>
+              </div>
+              <div className="text-center p-3 bg-teal-50 rounded-lg">
+                <div className="text-2xl font-bold text-teal-600">{licenseInfo?.max_users || 0}</div>
+                <div className="text-sm text-teal-700">Max Users</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Features */}
+          {licenseInfo?.features && licenseInfo.features.length > 0 && (
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <h4 className="font-medium text-gray-700 mb-3 flex items-center">
+                <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Included Features
+              </h4>
+              <div className="flex flex-wrap gap-2">
+                {licenseInfo.features.map((feature, idx) => (
+                  <span key={idx} className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+                    {feature.charAt(0).toUpperCase() + feature.slice(1)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Hardware ID */}
+          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600 text-sm">Hardware ID</span>
+              <span className="font-mono text-xs text-gray-500">{licenseInfo?.hardware_id || 'N/A'}</span>
+            </div>
+          </div>
+        </div>
       )}
     </Modal>
   );
@@ -4809,16 +4980,20 @@ function Dashboard({ user, onLogout, pageName }) {
 
   // License status
   const [licenseStatus, setLicenseStatus] = useState({ status: 'active', message: null });
+  const [licenseInfo, setLicenseInfo] = useState(null);
   const licenseCheckRef = useRef(null);
 
   // Fetch license status
   const fetchLicenseStatus = useCallback(async () => {
     try {
       const response = await api.getLicenseInfo();
+      const data = response.data;
       setLicenseStatus({
-        status: response.data.status || 'active',
-        message: response.data.status_message
+        status: data.status || 'active',
+        message: data.status_message
       });
+      // Store full license info for Settings modal
+      setLicenseInfo(data);
     } catch (error) {
       console.error('Failed to fetch license status:', error);
     }
@@ -5757,6 +5932,7 @@ function Dashboard({ user, onLogout, pageName }) {
         settings={settings}
         onSubmit={handleSaveSettings}
         onChangePassword={handleChangePassword}
+        licenseInfo={licenseInfo}
       />
       <TrafficGraphModal
         isOpen={showTrafficGraphModal}

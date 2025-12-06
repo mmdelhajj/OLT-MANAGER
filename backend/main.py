@@ -3132,6 +3132,30 @@ async def get_license_info(user: User = Depends(require_auth)):
     from license_manager import license_manager
     info = license_manager.get_license_info()
 
+    # Add license key from file
+    license_key = None
+    try:
+        license_file = Path('/etc/olt-manager/license.key')
+        if license_file.exists():
+            license_key = license_file.read_text().strip()
+    except:
+        pass
+    info['license_key'] = license_key or os.getenv('OLT_LICENSE_KEY', 'N/A')
+
+    # Calculate days remaining
+    expires_at = info.get('expires_at')
+    if expires_at:
+        try:
+            exp_date = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            if exp_date.tzinfo:
+                exp_date = exp_date.replace(tzinfo=None)
+            days_remaining = (exp_date - datetime.now()).days
+            info['days_remaining'] = max(0, days_remaining)
+        except:
+            info['days_remaining'] = None
+    else:
+        info['days_remaining'] = None
+
     # Add status for frontend
     if not info.get('valid'):
         error_msg = info.get('error_message', '').lower()
