@@ -2262,6 +2262,22 @@ def delete_user(user_id: int, user: User = Depends(require_admin), db: Session =
     return None
 
 
+# ============ Update Check API ============
+
+@app.get("/api/update-check")
+def check_for_updates(current_user: dict = Depends(get_current_user)):
+    """Check if software update is available"""
+    from license_manager import license_manager, SOFTWARE_VERSION
+
+    update_info = license_manager.update_info
+
+    return {
+        "current_version": SOFTWARE_VERSION,
+        "update_available": update_info is not None,
+        "update": update_info
+    }
+
+
 # ============ Settings API ============
 
 @app.get("/api/settings")

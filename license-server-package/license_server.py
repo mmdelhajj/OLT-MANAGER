@@ -8,12 +8,21 @@ import os
 import json
 import secrets
 import hashlib
+import subprocess
+import pty
+import select
+import struct
+import fcntl
+import termios
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+from flask_sockets import Sockets
+from geventwebsocket import WebSocketError
 
 app = Flask(__name__)
+sockets = Sockets(app)
 app.secret_key = os.getenv("FLASK_SECRET", secrets.token_hex(32))
 
 # Configuration
@@ -261,7 +270,10 @@ DASHBOARD_HTML = '''
 <body>
     <div class="header">
         <h1>🔐 License Server</h1>
-        <a href="/logout">Logout</a>
+        <div>
+            <a href="/tunnels" style="margin-right: 20px;">🖥️ Customer Tunnels</a>
+            <a href="/logout">Logout</a>
+        </div>
     </div>
 
     <div class="container">
@@ -353,6 +365,7 @@ DASHBOARD_HTML = '''
                         </td>
                         <td class="actions-cell">
                             {% if lic.suspended %}
+                            <a href="/dashboard/edit/{{ lic.license_key }}" class="btn btn-info btn-sm" style="text-decoration:none;">Edit</a>
                             <button class="btn btn-success btn-sm" onclick="resumeLicense('{{ lic.license_key }}')">Resume</button>
                             {% elif lic.active and not lic.is_expired %}
                             <button class="btn btn-warning btn-sm" onclick="suspendLicense('{{ lic.license_key }}')">Suspend</button>
@@ -685,6 +698,165 @@ def dashboard_revoke(license_key):
         save_licenses(licenses)
     return redirect(url_for('dashboard'))
 
+
+# License Edit Page and Handler
+@app.route('/dashboard/edit/<license_key>')
+@login_required
+def dashboard_edit(license_key):
+    licenses = load_licenses()
+    if license_key not in licenses:
+        return redirect(url_for('dashboard'))
+    
+    lic = licenses[license_key]
+    
+    edit_html = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Edit License</title>
+    <meta name=viewport content=width=device-width, initial-scale=1>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; min-height: 100vh; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+        .header h1 { font-size: 24px; }
+        .back { color: #3498db; text-decoration: none; }
+        .card { background: #16213e; border-radius: 10px; padding: 25px; margin-bottom: 20px; }
+        .card h2 { margin-bottom: 20px; font-size: 18px; border-bottom: 1px solid #0f3460; padding-bottom: 10px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; margin-bottom: 8px; color: #aaa; font-size: 14px; }
+        .form-group input, .form-group select, .form-group textarea { 
+            width: 100%; padding: 12px; border: 1px solid #0f3460; border-radius: 5px; 
+            background: #1a1a2e; color: white; font-size: 14px; 
+        }
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus { 
+            outline: none; border-color: #3498db; 
+        }
+        .form-row { display: flex; gap: 15px; }
+        .form-row .form-group { flex: 1; }
+        .btn { padding: 12px 25px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-secondary { background: #666; color: white; }
+        .btn:hover { opacity: 0.9; }
+        .info-box { background: #0f3460; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .info-box p { margin: 5px 0; font-size: 13px; color: #aaa; }
+        .info-box strong { color: white; }
+        .actions { display: flex; gap: 10px; margin-top: 20px; }
+        .success-msg { background: #27ae60; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class=container>
+        <div class=header>
+            <h1>Edit License</h1>
+            <a href=/dashboard class=back>&larr; Back to Dashboard</a>
+        </div>
+        
+        {% if success %}
+        <div class=success-msg>License updated successfully!</div>
+        {% endif %}
+        
+        <div class=info-box>
+            <p><strong>License Key:</strong> {{ license_key }}</p>
+            <p><strong>Type:</strong> {{ lic.license_type }}</p>
+            <p><strong>Status:</strong> {{ 'Active' if lic.active else 'Inactive' }} {{ '(Suspended)' if lic.suspended else '' }}</p>
+        </div>
+        
+        <form method=POST action=/dashboard/edit/{{ license_key }}>
+            <div class=card>
+                <h2>Customer Information</h2>
+                <div class=form-group>
+                    <label>Customer Name</label>
+                    <input type=text name=customer_name value={{ lic.customer_name }}>
+                </div>
+                <div class=form-group>
+                    <label>Customer Email</label>
+                    <input type=email name=customer_email value={{ lic.customer_email }}>
+                </div>
+                <div class=form-group>
+                    <label>Notes</label>
+                    <textarea name=notes rows=3>{{ lic.notes or '' }}</textarea>
+                </div>
+            </div>
+            
+            <div class=card>
+                <h2>SSH Remote Access</h2>
+                <div class=form-row>
+                    <div class=form-group>
+                        <label>Tunnel Port</label>
+                        <input type=number name=tunnel_port value={{ lic.tunnel_port or  }} placeholder=e.g. 30003>
+                    </div>
+                    <div class=form-group>
+                        <label>SSH Username</label>
+                        <input type=text name=ssh_user value={{ lic.ssh_user or root }}>
+                    </div>
+                </div>
+                <div class=form-group>
+                    <label>SSH Password</label>
+                    <input type=text name=ssh_password value={{ lic.ssh_password or  }} placeholder=Enter SSH password>
+                </div>
+            </div>
+            
+            <div class=card>
+                <h2>License Limits</h2>
+                <div class=form-row>
+                    <div class=form-group>
+                        <label>Max OLTs</label>
+                        <input type=number name=max_olts value={{ lic.max_olts }}>
+                    </div>
+                    <div class=form-group>
+                        <label>Max ONUs</label>
+                        <input type=number name=max_onus value={{ lic.max_onus }}>
+                    </div>
+                    <div class=form-group>
+                        <label>Max Users</label>
+                        <input type=number name=max_users value={{ lic.max_users }}>
+                    </div>
+                </div>
+            </div>
+            
+            <div class=actions>
+                <button type=submit class=btn btn-success>Save Changes</button>
+                <a href=/dashboard class=btn btn-secondary>Cancel</a>
+            </div>
+        </form>
+    </div>
+</body>
+</html>
+'''
+    return render_template_string(edit_html, license_key=license_key, lic=lic, success=request.args.get('success'))
+
+
+@app.route('/dashboard/edit/<license_key>', methods=['POST'])
+@login_required  
+def dashboard_edit_save(license_key):
+    licenses = load_licenses()
+    if license_key not in licenses:
+        return redirect(url_for('dashboard'))
+    
+    # Update license fields
+    licenses[license_key]['customer_name'] = request.form.get('customer_name', '')
+    licenses[license_key]['customer_email'] = request.form.get('customer_email', '')
+    licenses[license_key]['notes'] = request.form.get('notes', '')
+    
+    # SSH credentials
+    tunnel_port = request.form.get('tunnel_port', '')
+    licenses[license_key]['tunnel_port'] = int(tunnel_port) if tunnel_port else None
+    licenses[license_key]['ssh_user'] = request.form.get('ssh_user', 'root')
+    licenses[license_key]['ssh_password'] = request.form.get('ssh_password', '')
+    
+    # License limits
+    licenses[license_key]['max_olts'] = int(request.form.get('max_olts', 1))
+    licenses[license_key]['max_onus'] = int(request.form.get('max_onus', 50))
+    licenses[license_key]['max_users'] = int(request.form.get('max_users', 2))
+    
+    save_licenses(licenses)
+    
+    return redirect(f'/dashboard/edit/{license_key}?success=1')
+
+
 # ============ API Endpoints ============
 
 @app.route('/api/validate', methods=['POST'])
@@ -840,6 +1012,527 @@ def api_create_license():
     save_licenses(licenses)
 
     return jsonify({'license_key': license_key, **license_data})
+
+
+# ============ Tunnel Management ============
+
+TUNNELS_FILE = Path("tunnels.json")
+
+def load_tunnels():
+    if TUNNELS_FILE.exists():
+        with open(TUNNELS_FILE, 'r') as f:
+            return json.load(f)
+    return {"tunnels": [], "next_port": 30001}
+
+def save_tunnels(data):
+    with open(TUNNELS_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+@app.route('/api/next-port')
+def get_next_port():
+    """Get next available tunnel port"""
+    data = load_tunnels()
+    port = data.get('next_port', 30001)
+    data['next_port'] = port + 1
+    save_tunnels(data)
+    return jsonify({'port': port})
+
+@app.route('/api/register-tunnel', methods=['POST'])
+def register_tunnel():
+    """Register a customer tunnel"""
+    req_data = request.json or {}
+    port = req_data.get('port')
+    license_key = req_data.get('license_key', '')
+    hostname = req_data.get('hostname', 'Unknown')
+
+    if not port:
+        return jsonify({'error': 'Port required'}), 400
+
+    data = load_tunnels()
+
+    # Check if port already registered
+    for t in data['tunnels']:
+        if t['port'] == port:
+            t['last_seen'] = datetime.now().isoformat()
+            t['hostname'] = hostname
+            save_tunnels(data)
+            return jsonify({'status': 'updated'})
+
+    # Add new tunnel
+    data['tunnels'].append({
+        'port': port,
+        'license_key': license_key,
+        'hostname': hostname,
+        'registered_at': datetime.now().isoformat(),
+        'last_seen': datetime.now().isoformat(),
+        'ip': request.remote_addr
+    })
+    save_tunnels(data)
+
+    return jsonify({'status': 'registered', 'port': port})
+
+@app.route('/api/tunnels')
+@login_required
+def list_tunnels():
+    """List all registered tunnels"""
+    data = load_tunnels()
+    return jsonify(data['tunnels'])
+
+@app.route('/tunnels')
+@login_required
+def tunnels_page():
+    """Tunnels management page with web terminal"""
+    data = load_tunnels()
+    licenses = load_licenses()
+    
+    # Add SSH credentials from licenses to each tunnel
+    for tunnel in data.get('tunnels', []):
+        tunnel['ssh_user'] = 'root'
+        tunnel['ssh_password'] = ''
+        # Find matching license by tunnel port
+        for lic_key, lic_data in licenses.items():
+            if lic_data.get('tunnel_port') == tunnel.get('port'):
+                tunnel['ssh_user'] = lic_data.get('ssh_user', 'root')
+                tunnel['ssh_password'] = lic_data.get('ssh_password', '')
+                break
+
+    tunnels_html = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Customer Tunnels</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; min-height: 100vh; }
+        .header { background: #0f3460; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 20px; }
+        .back { color: #3498db; text-decoration: none; }
+        .container { display: flex; height: calc(100vh - 60px); }
+        .sidebar { width: 350px; background: #16213e; border-right: 1px solid #0f3460; overflow-y: auto; }
+        .tunnel-item { padding: 15px; border-bottom: 1px solid #0f3460; cursor: pointer; transition: background 0.2s; }
+        .tunnel-item:hover { background: #0f3460; }
+        .tunnel-item.active { background: #3498db; }
+        .tunnel-item .name { font-weight: bold; font-size: 16px; margin-bottom: 5px; }
+        .tunnel-item .info { font-size: 12px; color: #aaa; }
+        .tunnel-item.active .info { color: #ddd; }
+        .tunnel-item .status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+        .tunnel-item .status.online { background: #2ecc71; }
+        .tunnel-item .status.offline { background: #e74c3c; }
+        .terminal-container { flex: 1; display: flex; flex-direction: column; background: #000; }
+        .terminal-header { background: #16213e; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #0f3460; }
+        .terminal-header .title { font-size: 14px; }
+        .terminal-header .btn { padding: 5px 15px; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+        .terminal-header .btn-connect { background: #27ae60; color: white; }
+        .terminal-header .btn-disconnect { background: #e74c3c; color: white; }
+        .terminal-header .btn:disabled { background: #555; cursor: not-allowed; }
+        #terminal { flex: 1; padding: 10px; }
+        .no-selection { flex: 1; display: flex; align-items: center; justify-content: center; color: #666; font-size: 18px; }
+        .connection-form { padding: 20px; background: #16213e; margin: 10px; border-radius: 5px; }
+        .connection-form label { display: block; margin-bottom: 5px; color: #aaa; font-size: 12px; }
+        .connection-form input { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #0f3460; border-radius: 3px; background: #1a1a2e; color: white; }
+        .empty-state { padding: 40px; text-align: center; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🖥️ Customer Tunnels</h1>
+        <a href="/dashboard" class="back">&larr; Back to Dashboard</a>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            {% if tunnels %}
+            {% for tunnel in tunnels %}
+            <div class="tunnel-item" data-port="{{ tunnel.port }}" data-hostname="{{ tunnel.hostname }}" data-sshuser="{{ tunnel.ssh_user }}" data-sshpass="{{ tunnel.ssh_password }}" onclick="selectTunnel(this)">
+                <div class="name">
+                    <span class="status" id="status-{{ tunnel.port }}"></span>
+                    {{ tunnel.hostname }}
+                </div>
+                <div class="info">
+                    Port: {{ tunnel.port }} | IP: {{ tunnel.ip }}<br>
+                    Last seen: {{ tunnel.last_seen[:16] }}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="empty-state">
+                No tunnels registered yet.<br><br>
+                Customer servers will appear here<br>after running secure-install.sh
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="terminal-container">
+            <div class="terminal-header">
+                <span class="title" id="terminalTitle">Select a customer to connect</span>
+                <div>
+                    <button class="btn btn-connect" id="connectBtn" onclick="connect()" disabled>Connect</button>
+                    <button class="btn btn-disconnect" id="disconnectBtn" onclick="disconnect()" style="display:none;">Disconnect</button>
+                </div>
+            </div>
+            <div id="terminal"></div>
+
+        </div>
+    </div>
+
+    <!-- Connection Modal -->
+    <div class="modal" id="connectModal">
+        <div class="modal-content">
+            <h2>Connect to Customer</h2>
+            <p id="modalCustomerName" style="color:#aaa; margin-bottom:20px;"></p>
+            <div class="form-group">
+                <label>SSH Username</label>
+                <input type="text" id="sshUser" value="root">
+            </div>
+            <div class="form-group">
+                <label>SSH Password</label>
+                <input type="password" id="sshPass" placeholder="Enter password">
+            </div>
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button class="btn btn-connect" onclick="doConnect()" style="flex:1;">Connect</button>
+                <button class="btn" onclick="closeConnectModal()" style="flex:1; background:#666;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); align-items:center; justify-content:center; z-index:1000; }
+        .modal.active { display:flex; }
+        .modal-content { background:#16213e; padding:30px; border-radius:10px; width:350px; }
+        .modal-content h2 { margin-bottom:10px; }
+        .form-group { margin-bottom:15px; }
+        .form-group label { display:block; margin-bottom:5px; color:#aaa; }
+        .form-group input { width:100%; padding:10px; border:1px solid #0f3460; border-radius:5px; background:#1a1a2e; color:white; font-size:14px; }
+    </style>
+
+    <script>
+        let term = null;
+        let socket = null;
+        let selectedPort = null;
+        let selectedHostname = null;
+        let selectedSshUser = "root";
+        let selectedSshPass = "";
+        let fitAddon = null;
+
+        // Initialize terminal
+        function initTerminal() {
+            if (term) {
+                term.dispose();
+            }
+            term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                theme: {
+                    background: '#000000',
+                    foreground: '#ffffff',
+                    cursor: '#ffffff'
+                }
+            });
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(document.getElementById('terminal'));
+            fitAddon.fit();
+
+            term.writeln('\\x1b[1;34m╔══════════════════════════════════════════════════════════╗\\x1b[0m');
+            term.writeln('\\x1b[1;34m║\\x1b[0m       OLT Manager - Customer Remote Access              \\x1b[1;34m║\\x1b[0m');
+            term.writeln('\\x1b[1;34m╚══════════════════════════════════════════════════════════╝\\x1b[0m');
+            term.writeln('');
+            term.writeln('Select a customer from the left sidebar and click Connect.');
+            term.writeln('');
+        }
+
+        // Select tunnel from sidebar
+        function selectTunnel(element) {
+            document.querySelectorAll('.tunnel-item').forEach(el => el.classList.remove('active'));
+            element.classList.add('active');
+
+            selectedPort = element.dataset.port;
+            selectedHostname = element.dataset.hostname;
+            selectedSshUser = element.dataset.sshuser || 'root';
+            selectedSshPass = element.dataset.sshpass || '';
+
+            document.getElementById('terminalTitle').textContent = `Terminal: ${selectedHostname} (Port ${selectedPort})`;
+            document.getElementById('connectBtn').disabled = false;
+
+            if (term) {
+                term.clear();
+                term.writeln(`\\x1b[1;32mSelected: ${selectedHostname}\\x1b[0m`);
+                term.writeln(`Port: ${selectedPort}`);
+                term.writeln('');
+                term.writeln('Click \\x1b[1;32mConnect\\x1b[0m to start SSH session.');
+            }
+        }
+
+        // Show connect modal
+        function connect() {
+            if (!selectedPort) return;
+            document.getElementById('modalCustomerName').textContent = selectedHostname + ' (Port ' + selectedPort + ')';
+            document.getElementById('connectModal').classList.add('active');
+            // Auto-fill saved credentials
+            if (selectedSshUser) document.getElementById('sshUser').value = selectedSshUser;
+            if (selectedSshPass) document.getElementById('sshPass').value = selectedSshPass;
+            document.getElementById('sshPass').focus();
+        }
+
+        function closeConnectModal() {
+            document.getElementById('connectModal').classList.remove('active');
+        }
+
+        // Actually connect via WebSocket
+        function doConnect() {
+            closeConnectModal();
+
+            const user = document.getElementById('sshUser').value || 'root';
+            const pass = document.getElementById('sshPass').value || '';
+
+            document.getElementById('connectBtn').style.display = 'none';
+            document.getElementById('disconnectBtn').style.display = 'inline-block';
+
+            term.clear();
+            term.writeln(`\\x1b[1;33mConnecting to ${selectedHostname}...\\x1b[0m`);
+            term.writeln('');
+
+            // WebSocket connection
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/ws/terminal/${selectedPort}?user=${user}&pass=${encodeURIComponent(pass)}`);
+
+            socket.onopen = function() {
+                term.writeln('\\x1b[1;32mConnected!\\x1b[0m');
+                term.writeln('');
+
+                // Send terminal size
+                const dims = fitAddon.proposeDimensions();
+                socket.send(JSON.stringify({type: 'resize', cols: dims.cols, rows: dims.rows}));
+            };
+
+            socket.onmessage = function(event) {
+                term.write(event.data);
+            };
+
+            socket.onclose = function() {
+                term.writeln('');
+                term.writeln('\\x1b[1;31mConnection closed.\\x1b[0m');
+                document.getElementById('connectBtn').style.display = 'inline-block';
+                document.getElementById('disconnectBtn').style.display = 'none';
+                document.getElementById('connectionForm').style.display = 'block';
+            };
+
+            socket.onerror = function(error) {
+                term.writeln('\\x1b[1;31mConnection error!\\x1b[0m');
+                console.error('WebSocket error:', error);
+            };
+
+            // Send input to server
+            term.onData(function(data) {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({type: 'input', data: data}));
+                }
+            });
+        }
+
+        // Disconnect
+        function disconnect() {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+        }
+
+        // Check tunnel status
+        function checkTunnelStatus() {
+            {% for tunnel in tunnels %}
+            fetch('/api/tunnel-status/{{ tunnel.port }}')
+                .then(r => r.json())
+                .then(data => {
+                    const el = document.getElementById('status-{{ tunnel.port }}');
+                    if (el) {
+                        el.className = 'status ' + (data.online ? 'online' : 'offline');
+                    }
+                });
+            {% endfor %}
+        }
+
+        // Window resize
+        window.addEventListener('resize', function() {
+            if (fitAddon) {
+                fitAddon.fit();
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    const dims = fitAddon.proposeDimensions();
+                    socket.send(JSON.stringify({type: 'resize', cols: dims.cols, rows: dims.rows}));
+                }
+            }
+        });
+
+        // Initialize
+        initTerminal();
+        checkTunnelStatus();
+        setInterval(checkTunnelStatus, 10000);
+    </script>
+</body>
+</html>
+'''
+    return render_template_string(tunnels_html, tunnels=data['tunnels'])
+
+
+# ============ Tunnel Status API ============
+
+@app.route('/api/tunnel-status/<int:port>')
+def tunnel_status(port):
+    """Check if a tunnel port is online"""
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('127.0.0.1', port))
+        sock.close()
+        return jsonify({'online': result == 0, 'port': port})
+    except:
+        return jsonify({'online': False, 'port': port})
+
+
+# ============ WebSocket Terminal ============
+
+@app.route('/ws/terminal/<int:port>')
+def terminal_ws(port):
+    """WebSocket handler for terminal connection using gevent greenlets"""
+    import sys
+    print(f'>>> terminal_ws called with port={port}', file=sys.stderr)
+    import socket as sock_lib
+    
+    ws = request.environ.get('wsgi.websocket')
+    if not ws:
+        return jsonify({'error': 'WebSocket required'}), 400
+    from gevent import spawn, sleep as gsleep
+    import signal
+
+    user = request.args.get('user', 'root')
+    password = request.args.get('pass', '')
+
+    # Check tunnel accessibility
+    try:
+        sock = sock_lib.socket(sock_lib.AF_INET, sock_lib.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex(('127.0.0.1', port))
+        sock.close()
+        if result != 0:
+            ws.send("\r\n\x1b[31mError: Tunnel port {} not accessible\x1b[0m\r\n".format(port))
+            ws.close()
+            return ''
+    except Exception as e:
+        ws.send("\r\n\x1b[31mError checking tunnel: {}\x1b[0m\r\n".format(str(e)))
+        ws.close()
+        return ''
+
+    ws.send("\r\n\x1b[32mConnecting to SSH on port {}...\x1b[0m\r\n".format(port))
+
+    # Build SSH command
+    if password:
+        cmd = "sshpass -p '{}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {} {}@127.0.0.1".format(password, port, user)
+    else:
+        cmd = "ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {} {}@127.0.0.1".format(port, user)
+
+    # Create PTY
+    master_fd, slave_fd = pty.openpty()
+
+    # Set terminal size
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+
+    # Start SSH process
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        preexec_fn=os.setsid,
+        close_fds=True
+    )
+    os.close(slave_fd)
+
+    # Set master to non-blocking
+    flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+    fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+    running = [True]  # Use list for mutable reference in closures
+
+    def read_pty():
+        """Read from PTY and send to WebSocket"""
+        while running[0] and proc.poll() is None:
+            try:
+                rlist, _, _ = select.select([master_fd], [], [], 0.1)
+                if master_fd in rlist:
+                    try:
+                        data = os.read(master_fd, 4096)
+                        if data:
+                            ws.send(data.decode('utf-8', errors='replace'))
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+            gsleep(0.01)
+
+    def read_ws():
+        """Read from WebSocket and send to PTY"""
+        while running[0] and proc.poll() is None:
+            try:
+                msg = ws.receive()
+                if msg is None:
+                    running[0] = False
+                    break
+                if msg:
+                    try:
+                        data = json.loads(msg)
+                        if data.get('type') == 'input':
+                            os.write(master_fd, data['data'].encode())
+                        elif data.get('type') == 'resize':
+                            rows = data.get('rows', 24)
+                            cols = data.get('cols', 80)
+                            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+                    except json.JSONDecodeError:
+                        os.write(master_fd, msg.encode())
+            except WebSocketError:
+                running[0] = False
+                break
+            except Exception:
+                pass
+            gsleep(0.01)
+
+    # Start greenlets
+    pty_reader = spawn(read_pty)
+    ws_reader = spawn(read_ws)
+
+    try:
+        # Wait for either to finish
+        while running[0] and proc.poll() is None:
+            gsleep(0.1)
+    except Exception as e:
+        pass
+    finally:
+        running[0] = False
+        # Cleanup
+        try:
+            pty_reader.kill()
+        except:
+            pass
+        try:
+            ws_reader.kill()
+        except:
+            pass
+        try:
+            os.close(master_fd)
+        except:
+            pass
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except:
+            pass
+
+    return ''
+
 
 # ============ Main ============
 

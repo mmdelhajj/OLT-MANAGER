@@ -29,6 +29,9 @@ OFFLINE_GRACE_DAYS = 7
 # How often to check license (seconds) - 5 minutes
 LICENSE_CHECK_INTERVAL = 300
 
+# Current software version
+SOFTWARE_VERSION = "1.0.0"
+
 
 class LicenseError(Exception):
     """License validation error"""
@@ -43,6 +46,7 @@ class LicenseManager:
         self.last_check: Optional[datetime] = None
         self.is_valid: bool = False
         self.error_message: Optional[str] = None
+        self.update_info: Optional[Dict[str, Any]] = None  # Store update info from server
 
     def _generate_hardware_id(self) -> str:
         """Generate unique hardware fingerprint"""
@@ -135,14 +139,21 @@ class LicenseManager:
                     'license_key': license_key,
                     'hardware_id': self.hardware_id,
                     'product': 'olt-manager',
-                    'version': '1.0.0'
+                    'version': SOFTWARE_VERSION
                 },
                 timeout=10,
                 headers={'Content-Type': 'application/json'}
             )
 
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                # Extract and store update info if available
+                if 'update' in data:
+                    self.update_info = data['update']
+                    logger.info(f"Update available: v{data['update'].get('latest_version')}")
+                else:
+                    self.update_info = None
+                return data
             elif response.status_code == 403:
                 error_msg = response.json().get('error', 'License invalid or revoked')
                 raise LicenseError(error_msg)

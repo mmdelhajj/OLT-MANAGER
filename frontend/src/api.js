@@ -82,6 +82,7 @@ export const updateSettings = (data) => api.put('/api/settings', data);
 
 // License
 export const getLicenseInfo = () => api.get('/api/license');
+export const checkForUpdates = () => api.get('/api/update-check');
 
 // Traffic
 export const getOltTraffic = (oltId) => api.get(`/api/olts/${oltId}/traffic`);

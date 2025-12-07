@@ -5727,7 +5727,11 @@ function Dashboard({ user, onLogout, pageName }) {
   const [licenseInfo, setLicenseInfo] = useState(null);
   const licenseCheckRef = useRef(null);
 
-  // Fetch license status
+  // Update notification
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [showUpdateBanner, setShowUpdateBanner] = useState(true);
+
+  // Fetch license status and check for updates
   const fetchLicenseStatus = useCallback(async () => {
     try {
       const response = await api.getLicenseInfo();
@@ -5740,6 +5744,16 @@ function Dashboard({ user, onLogout, pageName }) {
       setLicenseInfo(data);
     } catch (error) {
       console.error('Failed to fetch license status:', error);
+    }
+
+    // Check for updates
+    try {
+      const updateResponse = await api.checkForUpdates();
+      if (updateResponse.data.update_available && updateResponse.data.update) {
+        setUpdateInfo(updateResponse.data);
+      }
+    } catch (error) {
+      // Silently fail update check
     }
   }, []);
 
@@ -6280,6 +6294,52 @@ function Dashboard({ user, onLogout, pageName }) {
       {/* License Status Overlay */}
       {!isLicenseValid && (
         <LicenseOverlay status={licenseStatus.status} message={licenseStatus.message} />
+      )}
+
+      {/* Update Available Banner */}
+      {updateInfo && updateInfo.update_available && showUpdateBanner && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2 px-4 shadow-lg">
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="flex items-center justify-center w-8 h-8 bg-white/20 rounded-full">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+              </span>
+              <div>
+                <span className="font-semibold">Update Available!</span>
+                <span className="ml-2 text-blue-100">
+                  Version {updateInfo.update?.latest_version} is now available (You have v{updateInfo.current_version})
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {updateInfo.update?.download_url && (
+                <a
+                  href={updateInfo.update.download_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1 bg-white text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-50 transition-colors"
+                >
+                  Download
+                </a>
+              )}
+              <button
+                onClick={() => setShowUpdateBanner(false)}
+                className="p-1 hover:bg-white/20 rounded transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          {updateInfo.update?.changelog && (
+            <div className="max-w-7xl mx-auto mt-1 text-sm text-blue-100 pl-11">
+              {updateInfo.update.changelog.split('\n')[0]}
+            </div>
+          )}
+        </div>
       )}
 
       <Sidebar
