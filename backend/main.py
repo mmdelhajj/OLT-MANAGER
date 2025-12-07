@@ -39,7 +39,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Thread pool for SSH operations (non-blocking)
-ssh_executor = ThreadPoolExecutor(max_workers=3)
+ssh_executor = ThreadPoolExecutor(max_workers=5)
+
+# Cleanup counter - run cleanup every N poll cycles
+cleanup_counter = 0
+CLEANUP_INTERVAL_CYCLES = 60  # Run cleanup every 60 poll cycles (once per hour if polling every minute)
 
 # Background polling task handle
 polling_task: Optional[asyncio.Task] = None
@@ -381,6 +385,45 @@ async def collect_traffic_history(olt, db):
         )
         db.add(olt_history)
 
+        # Collect uplink port traffic via SNMP
+        from models import PortTraffic
+        port_counters = await loop.run_in_executor(
+            ssh_executor,
+            poll_port_traffic_snmp,
+            olt.ip_address,
+            "public"
+        )
+
+        if port_counters:
+            port_rates = calculate_port_rates(olt.id, olt.ip_address, port_counters)
+
+            # V1600D8 port mapping: SFP=1-4, SFP+=5-8, ETH=9-16
+            model = olt.model or ''
+            if 'D8' in model:
+                port_mapping = {
+                    **{i: ('sfp', i) for i in range(1, 5)},      # GE1-4 = SFP
+                    **{i: ('xge', i) for i in range(5, 9)},      # GE5-8 = SFP+
+                    **{i: ('ge', i) for i in range(9, 17)}       # GE9-16 = ETH
+                }
+            else:
+                # Default: first ports are GE, then SFP, then XGE
+                port_mapping = {i: ('ge', i) for i in range(1, 17)}
+
+            for if_idx, rates in port_rates.items():
+                if if_idx in port_mapping and (rates['rx_kbps'] > 0 or rates['tx_kbps'] > 0):
+                    port_type, port_num = port_mapping[if_idx]
+                    port_traffic = PortTraffic(
+                        olt_id=olt.id,
+                        port_type=port_type,
+                        port_number=if_idx,  # Use actual interface index
+                        rx_kbps=rates['rx_kbps'],
+                        tx_kbps=rates['tx_kbps'],
+                        timestamp=current_time
+                    )
+                    db.add(port_traffic)
+
+            logger.info(f"Port traffic saved for {olt.name}: {len(port_rates)} ports with traffic")
+
         logger.info(f"Traffic history saved for {olt.name}: {len(traffic_data)} ONUs, total {total_rx:.0f}/{total_tx:.0f} kbps")
 
     except Exception as e:
@@ -662,8 +705,52 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
     logger.info("Completed OLT polling cycle")
 
 
+async def cleanup_old_data(db_session_factory, retention_days: int = 7):
+    """Clean up old data from traffic_history, poll_logs, and port_traffic tables.
+
+    This runs periodically to prevent database bloat.
+    Default retention is 7 days.
+    """
+    from models import PortTraffic
+
+    db = db_session_factory()
+    try:
+        cutoff_time = datetime.utcnow() - timedelta(days=retention_days)
+
+        # Clean traffic_history (largest table)
+        deleted_traffic = db.query(TrafficHistory).filter(
+            TrafficHistory.timestamp < cutoff_time
+        ).delete(synchronize_session=False)
+
+        # Clean poll_logs (uses polled_at column)
+        deleted_polls = db.query(PollLog).filter(
+            PollLog.polled_at < cutoff_time
+        ).delete(synchronize_session=False)
+
+        # Clean port_traffic
+        deleted_ports = db.query(PortTraffic).filter(
+            PortTraffic.timestamp < cutoff_time
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        total_deleted = deleted_traffic + deleted_polls + deleted_ports
+        if total_deleted > 0:
+            logger.info(f"Cleanup completed: deleted {deleted_traffic} traffic_history, "
+                       f"{deleted_polls} poll_logs, {deleted_ports} port_traffic records "
+                       f"older than {retention_days} days")
+
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 async def polling_loop(db_session_factory):
     """Background loop to poll OLTs periodically"""
+    global cleanup_counter
+
     logger.info("Background polling loop started")
     while True:
         try:
@@ -671,6 +758,14 @@ async def polling_loop(db_session_factory):
             await asyncio.sleep(POLL_INTERVAL)
             logger.info("Starting scheduled poll cycle")
             await poll_all_olts(db_session_factory)
+
+            # Run cleanup periodically (every CLEANUP_INTERVAL_CYCLES polls)
+            cleanup_counter += 1
+            if cleanup_counter >= CLEANUP_INTERVAL_CYCLES:
+                cleanup_counter = 0
+                logger.info("Running scheduled database cleanup...")
+                await cleanup_old_data(db_session_factory, retention_days=7)
+
         except asyncio.CancelledError:
             logger.info("Polling loop cancelled")
             break
@@ -937,13 +1032,32 @@ def list_olts(user: User = Depends(require_auth), db: Session = Depends(get_db))
 
     olts = query.all()
 
+    # Get ONU counts in a single query (fixes N+1 problem)
+    olt_ids = [olt.id for olt in olts]
+    counts_map = {}
+    if olt_ids:
+        # Get total counts per OLT
+        total_counts = db.query(
+            ONU.olt_id,
+            func.count(ONU.id).label('total')
+        ).filter(ONU.olt_id.in_(olt_ids)).group_by(ONU.olt_id).all()
+
+        # Get online counts per OLT
+        online_counts = db.query(
+            ONU.olt_id,
+            func.count(ONU.id).label('online')
+        ).filter(ONU.olt_id.in_(olt_ids), ONU.is_online == True).group_by(ONU.olt_id).all()
+
+        # Build lookup dictionary
+        for row in total_counts:
+            counts_map[row.olt_id] = {'total': row.total, 'online': 0}
+        for row in online_counts:
+            if row.olt_id in counts_map:
+                counts_map[row.olt_id]['online'] = row.online
+
     response_olts = []
     for olt in olts:
-        onu_count = db.query(ONU).filter(ONU.olt_id == olt.id).count()
-        online_onu_count = db.query(ONU).filter(
-            ONU.olt_id == olt.id,
-            ONU.is_online == True
-        ).count()
+        counts = counts_map.get(olt.id, {'total': 0, 'online': 0})
 
         response_olts.append(OLTResponse(
             id=olt.id,
@@ -954,8 +1068,8 @@ def list_olts(user: User = Depends(require_auth), db: Session = Depends(get_db))
             is_online=olt.is_online,
             last_poll=olt.last_poll,
             last_error=olt.last_error,
-            onu_count=onu_count,
-            online_onu_count=online_onu_count,
+            onu_count=counts['total'],
+            online_onu_count=counts['online'],
             created_at=olt.created_at,
             updated_at=olt.updated_at
         ))
@@ -1215,6 +1329,10 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
         # Send batched notification for all status changes
         send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
 
+        db.commit()
+
+        # Collect traffic history (including port traffic)
+        await collect_traffic_history(olt, db)
         db.commit()
 
         return PollResult(
@@ -1664,6 +1782,46 @@ def delete_onu(onu_id: int, user: User = Depends(require_admin), db: Session = D
     db.delete(onu)
     db.commit()
     return None
+
+
+@app.post("/api/onus/{onu_id}/reboot")
+def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    """Reboot an ONU via SSH CLI command"""
+    from olt_connector import OLTConnector
+
+    # Get the ONU
+    onu = db.query(ONU).filter(ONU.id == onu_id).first()
+    if not onu:
+        raise HTTPException(status_code=404, detail="ONU not found")
+
+    # Get the OLT
+    olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    # Check if OLT is online
+    if not olt.is_online:
+        raise HTTPException(status_code=503, detail="OLT is offline")
+
+    try:
+        # Connect to OLT and reboot ONU (use same credentials as SNMP)
+        connector = OLTConnector(
+            ip=olt.ip_address,
+            username=olt.username or 'admin',
+            password=olt.password or 'admin'
+        )
+
+        success = connector.reboot_onu(onu.pon_port, onu.onu_id)
+
+        if success:
+            logger.info(f"User {user.username} rebooted ONU {onu.id} (0/{onu.pon_port}:{onu.onu_id}) on OLT {olt.name}")
+            return {"success": True, "message": f"ONU {onu.description or onu.mac_address} reboot command sent"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send reboot command")
+
+    except Exception as e:
+        logger.error(f"Failed to reboot ONU {onu_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def get_google_maps_url(lat: float, lng: float) -> str:
@@ -2247,6 +2405,682 @@ def test_whatsapp(
         raise HTTPException(status_code=502, detail="Connection failed - check API URL")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============ OLT Port Endpoints ============
+
+# VSOL model to PON port count mapping
+VSOL_PON_COUNTS = {
+    'V1600GS': 1, 'V1600GS-F': 1, 'V1600GS-ZF': 1,
+    'V1600GT': 2,
+    'V1600G0': 4, 'V1600G0-B': 4,
+    'V1600D-MINI': 4, 'V1601E04': 4, 'V1600D4': 4,
+    'V1600G1': 8, 'V1600G1-B': 8, 'V1600G1-R': 8,
+    'V1600D8': 8, 'V1601E04-DP': 4,
+    'V1600G2': 16, 'V1600G2-B': 16, 'V1600G2-R': 16,
+    'V1600D16': 16,
+    'V3600G1': 8, 'V3600G1-C': 8,
+}
+
+
+def get_pon_port_count(model: str) -> int:
+    """Get PON port count based on OLT model"""
+    if not model:
+        return 8  # Default
+    model_upper = model.upper().strip()
+    for key, count in VSOL_PON_COUNTS.items():
+        if key.upper() in model_upper:
+            return count
+    return 8  # Default to 8 if unknown
+
+
+# Store previous port counters for rate calculation
+_port_counters_cache = {}
+
+def poll_port_traffic_snmp(ip: str, community: str = 'public') -> dict:
+    """Poll port traffic counters from OLT via SNMP.
+    Returns dict with interface index -> {'rx_bytes': int, 'tx_bytes': int}
+
+    Uses OIDs:
+    - 1.3.6.1.2.1.2.2.1.10 (ifInOctets) - input bytes
+    - 1.3.6.1.2.1.2.2.1.16 (ifOutOctets) - output bytes
+    """
+    import subprocess
+    import time
+
+    port_traffic = {}
+
+    try:
+        # Get input octets (ifInOctets)
+        result = subprocess.run(
+            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.10'],
+            capture_output=True, text=True, timeout=10
+        )
+        in_octets = result.stdout.strip().split('\n') if result.stdout else []
+
+        # Get output octets (ifOutOctets)
+        result = subprocess.run(
+            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.16'],
+            capture_output=True, text=True, timeout=10
+        )
+        out_octets = result.stdout.strip().split('\n') if result.stdout else []
+
+        timestamp = time.time()
+
+        # Parse results - ifIndex starts at 1
+        for i, (in_oct, out_oct) in enumerate(zip(in_octets, out_octets), start=1):
+            try:
+                rx_bytes = int(in_oct.strip().split(':')[-1].strip())
+                tx_bytes = int(out_oct.strip().split(':')[-1].strip())
+                port_traffic[i] = {
+                    'rx_bytes': rx_bytes,
+                    'tx_bytes': tx_bytes,
+                    'timestamp': timestamp
+                }
+            except (ValueError, IndexError):
+                continue
+
+    except Exception as e:
+        logger.warning(f"Failed to poll port traffic from {ip}: {e}")
+
+    return port_traffic
+
+
+def calculate_port_rates(olt_id: int, ip: str, current_counters: dict) -> dict:
+    """Calculate port traffic rates (kbps) from counter differences."""
+    global _port_counters_cache
+
+    cache_key = f"{olt_id}_{ip}"
+    rates = {}
+
+    if cache_key in _port_counters_cache:
+        prev = _port_counters_cache[cache_key]
+        prev_time = prev.get('timestamp', 0)
+        curr_time = current_counters.get(1, {}).get('timestamp', 0)
+
+        if curr_time > prev_time:
+            time_diff = curr_time - prev_time
+
+            for if_idx, curr in current_counters.items():
+                if if_idx in prev:
+                    prev_rx = prev[if_idx].get('rx_bytes', 0)
+                    prev_tx = prev[if_idx].get('tx_bytes', 0)
+                    curr_rx = curr.get('rx_bytes', 0)
+                    curr_tx = curr.get('tx_bytes', 0)
+
+                    # Handle counter wraparound (32-bit counters)
+                    if curr_rx < prev_rx:
+                        curr_rx += 2**32
+                    if curr_tx < prev_tx:
+                        curr_tx += 2**32
+
+                    # Calculate rates in kbps (bytes * 8 / 1000 / seconds)
+                    rx_kbps = ((curr_rx - prev_rx) * 8) / (1000 * time_diff)
+                    tx_kbps = ((curr_tx - prev_tx) * 8) / (1000 * time_diff)
+
+                    rates[if_idx] = {
+                        'rx_kbps': round(rx_kbps, 2),
+                        'tx_kbps': round(tx_kbps, 2)
+                    }
+
+    # Store current counters for next calculation
+    _port_counters_cache[cache_key] = current_counters
+    _port_counters_cache[cache_key]['timestamp'] = current_counters.get(1, {}).get('timestamp', 0)
+
+    return rates
+
+
+def poll_port_status_snmp(ip: str, community: str = 'public') -> dict:
+    """Poll port status from OLT via SNMP.
+    Returns dict with interface index -> {'status': 'up'/'down', 'descr': '...', 'name': '...'}
+
+    V1600D8 interface mapping (from SNMP):
+    - ifIndex 1-16: GE uplink ports (GE0/1 to GE0/16)
+    - ifIndex 17-24: PON ports (EPON0/1 to EPON0/8)
+    - ifIndex 25: Management interface
+    - ifIndex 26+: ONU virtual interfaces
+    """
+    import subprocess
+
+    port_info = {}
+
+    try:
+        # Get interface names (ifName - e.g., "GE0/7 MIKRO")
+        result = subprocess.run(
+            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.1'],
+            capture_output=True, text=True, timeout=10
+        )
+        names = result.stdout.strip().split('\n') if result.stdout else []
+
+        # Get interface operational status (1=up, 2=down)
+        result = subprocess.run(
+            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.8'],
+            capture_output=True, text=True, timeout=10
+        )
+        statuses = result.stdout.strip().split('\n') if result.stdout else []
+
+        # Parse results - ifIndex starts at 1
+        for i, (name, status) in enumerate(zip(names, statuses), start=1):
+            name = name.strip().strip('"')
+            status_val = status.strip()
+
+            # Parse interface name - format is "GE0/7 MIKRO" or "GE0/1 "
+            parts = name.split(' ', 1)
+            if_name = parts[0] if parts else f"IF{i}"
+            descr = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+
+            port_info[i] = {
+                'status': 'up' if status_val == '1' else 'down',
+                'name': if_name,
+                'descr': descr
+            }
+    except Exception as e:
+        logger.warning(f"Failed to poll port status from {ip}: {e}")
+
+    return port_info
+
+
+@app.get("/api/olts/{olt_id}/ports")
+def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    """
+    Get all ports for an OLT with their status.
+    Returns PON ports with ONU counts and SFP uplink ports.
+    """
+    from models import OLTPort
+
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    # Poll live port status from OLT via SNMP
+    snmp_ports = poll_port_status_snmp(olt.ip_address)
+
+    # Get PON port count based on model
+    pon_count = get_pon_port_count(olt.model)
+
+    # Get existing port data from database
+    port_data = db.query(OLTPort).filter(OLTPort.olt_id == olt_id).all()
+    port_map = {(p.port_type, p.port_number): p for p in port_data}
+
+    # Get ONU counts per PON port from actual ONUs
+    onu_counts = {}
+    onus = db.query(ONU).filter(ONU.olt_id == olt_id).all()
+    for onu in onus:
+        if onu.pon_port not in onu_counts:
+            onu_counts[onu.pon_port] = {'total': 0, 'online': 0}
+        onu_counts[onu.pon_port]['total'] += 1
+        if onu.is_online:
+            onu_counts[onu.pon_port]['online'] += 1
+
+    # Build PON ports list
+    pon_ports = []
+    for i in range(1, pon_count + 1):
+        port = port_map.get(('pon', i))
+        counts = onu_counts.get(i, {'total': 0, 'online': 0})
+
+        # Determine status based on ONUs or port data
+        if counts['online'] > 0:
+            status = 'up'
+        elif port and port.status:
+            status = port.status
+        else:
+            status = 'unknown'
+
+        pon_ports.append({
+            "port_number": i,
+            "status": status,
+            "onu_count": counts['total'],
+            "onu_online": counts['online'],
+            "tx_power": port.tx_power if port else None,
+            "rx_power": port.rx_power if port else None
+        })
+
+    # Determine uplink port configuration based on model
+    # VSOL OLT PORT LAYOUTS - Verified from official product images (December 2025)
+    # Port order is LEFT to RIGHT as seen from front panel
+    model = olt.model or ''
+    model_upper = model.upper()
+
+    # Configuration: lists of tuples (if_index, label, speed)
+    # ge_config = RJ45 ports, sfp_config = SFP 1G ports, xge_config = SFP+ 10G ports
+    # qsfp_config = QSFP28 40G/100G ports (for V3600 series)
+
+    # COMPLETE VSOL OLT MODEL LIST - Updated December 2025
+
+    # ============ EPON OLT (1G) ============
+
+    if 'D-MINI' in model_upper:
+        # V1600D-MINI: 1 PON, L2, Compact
+        # RJ45(GE1-4) only
+        ge_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        sfp_config = []
+        xge_config = []
+        qsfp_config = []
+
+    elif 'E02' in model_upper:
+        # V1601E02-DP: 2 PON, L3, Dual power
+        # SFP+(GE1-2), RJ45(GE3-6)
+        sfp_config = []
+        xge_config = [(1, 'GE1', '1G/10G'), (2, 'GE2', '1G/10G')]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(3, 7)]
+        qsfp_config = []
+
+    elif 'E04' in model_upper or 'E08' in model_upper:
+        # V1601E04-DP/BT: 4 PON, L3, Redundant power
+        # SFP+(GE1-4), RJ45(GE5-8)
+        sfp_config = []
+        xge_config = [(1, 'GE1', '10G'), (2, 'GE2', '10G'), (3, 'GE3', '10G'), (4, 'GE4', '10G')]
+        ge_config = [(5, 'GE5', '1G'), (6, 'GE6', '1G'), (7, 'GE7', '1G'), (8, 'GE8', '1G')]
+        qsfp_config = []
+
+    elif 'D4-L' in model_upper:
+        # V1600D4-L: 4 PON, L2, Efficient switching
+        # SFP(GE1-2), RJ45(GE3-6)
+        sfp_config = [(1, 'GE1', '1G'), (2, 'GE2', '1G')]
+        xge_config = []
+        ge_config = [(i, f'GE{i}', '1G') for i in range(3, 7)]
+        qsfp_config = []
+
+    elif 'D4' in model_upper:
+        # V1600D4: 4 PON, L3
+        # SFP(GE1-2), SFP+(GE3-4), RJ45(GE5-8)
+        sfp_config = [(1, 'GE1', '1G'), (2, 'GE2', '1G')]
+        xge_config = [(3, 'GE3', '10G'), (4, 'GE4', '10G')]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(5, 9)]
+        qsfp_config = []
+
+    elif 'D8' in model_upper and 'D16' not in model_upper:
+        # V1600D8: 8 PON, L3, Hot-swap support
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-16)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 17)]
+        qsfp_config = []
+
+    elif 'D16' in model_upper:
+        # V1600D16: 16 PON, L3, Triple-play
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    # ============ GPON OLT (2.5G) ============
+
+    elif 'GS-F' in model_upper or 'GS-ZF' in model_upper or 'GS-O32' in model_upper or 'GS' in model_upper:
+        # V1600GS-F/ZF/O32: 1 PON, L2
+        # -F: Optional fan, -ZF: Fanless, -O32: Built-in 1:32 splitter
+        # RJ45(GE1-2), SFP+(10GE1)
+        ge_config = [(1, 'GE1', '1G'), (2, 'GE2', '1G')]
+        sfp_config = []
+        xge_config = [(3, '10GE1', '10G')]
+        qsfp_config = []
+
+    elif 'GT' in model_upper:
+        # V1600GT: 2 PON, L3, Simplified design
+        # RJ45(GE1-2), SFP+(10GE1)
+        ge_config = [(1, 'GE1', '1G'), (2, 'GE2', '1G')]
+        sfp_config = []
+        xge_config = [(3, '10GE1', '10G')]
+        qsfp_config = []
+
+    elif 'G0-B' in model_upper or 'G0' in model_upper:
+        # V1600G0-B / V1600G0: 4 PON, L3, Cloud EMS
+        # SFP+(GE1-2), RJ45(GE3-4)
+        sfp_config = []
+        xge_config = [(1, 'GE1', '10G'), (2, 'GE2', '10G')]
+        ge_config = [(3, 'GE3', '1G'), (4, 'GE4', '1G')]
+        qsfp_config = []
+
+    elif 'G1WEO-B' in model_upper:
+        # V1600G1WEO-B: 8 PON, L3, Outdoor + backup
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    elif 'G1WEO' in model_upper:
+        # V1600G1WEO: 8 PON, L3, Outdoor version
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    elif 'G1-B' in model_upper or 'G1-R' in model_upper:
+        # V1600G1-B/R: 8 PON, L3, Cloud EMS / Compact design
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    elif 'G1' in model_upper and 'G1WEO' not in model_upper:
+        # V1600G1: 8 PON, L3, Standard
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    elif 'G2-B' in model_upper or 'G2-R' in model_upper:
+        # V1600G2-B/R: 16 PON, L3, Cloud EMS / Compact design
+        # RJ45(GE1-4), SFP+(GE5-6)
+        ge_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        sfp_config = []
+        xge_config = [(5, 'GE5', '10G'), (6, 'GE6', '10G')]
+        qsfp_config = []
+
+    elif 'G2' in model_upper:
+        # V1600G2: 16 PON, L3, Standard
+        # SFP(GE1-4), SFP+(GE5-8), RJ45(GE9-12)
+        sfp_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(9, 13)]
+        qsfp_config = []
+
+    # ============ XGS-PON / XG-PON OLT (10G) ============
+
+    elif 'XG02-W' in model_upper:
+        # V1600XG02-W: 2 PON, L3, WDM1r support
+        # SFP+(GE1-2), RJ45(GE3-6)
+        sfp_config = []
+        xge_config = [(1, 'GE1', '1G/10G'), (2, 'GE2', '1G/10G')]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(3, 7)]
+        qsfp_config = []
+
+    elif 'XG02' in model_upper or 'V1600XG' in model_upper:
+        # V1600XG02: 2 PON, L3, XG/XGS-PON
+        # SFP+(GE1-2), RJ45(GE3-6)
+        sfp_config = []
+        xge_config = [(1, 'GE1', '1G/10G'), (2, 'GE2', '1G/10G')]
+        ge_config = [(i, f'GE{i}', '1G') for i in range(3, 7)]
+        qsfp_config = []
+
+    # ============ 10G-EPON OLT ============
+
+    elif 'V3600D8' in model_upper:
+        # V3600D8: 8 PON, L3, 100G QSFP28 uplink
+        # SFP(GE1-4), SFP+(GE5-6), QSFP28(1-2), RJ45(GE7-8)
+        sfp_config = [(i, f'GE{i}', '1G/10G') for i in range(1, 5)]
+        xge_config = [(5, 'GE5', '10G/25G'), (6, 'GE6', '10G/25G')]
+        qsfp_config = [(7, 'QSFP1', '40G/100G'), (8, 'QSFP2', '40G/100G')]
+        ge_config = [(9, 'GE7', '1G'), (10, 'GE8', '1G')]
+
+    # ============ XGS-PON/GPON Combo OLT ============
+
+    elif 'V3600G1' in model_upper:
+        # V3600G1-C: 8 PON, L3, Combo PON, 100G uplink
+        # SFP(GE1-4), SFP+(GE5-6), QSFP28(1-2), RJ45(GE7)
+        sfp_config = [(i, f'GE{i}', '1G/10G') for i in range(1, 5)]
+        xge_config = [(5, 'GE5', '1G/10G'), (6, 'GE6', '1G/10G')]
+        qsfp_config = [(7, 'QSFP1', '40G/100G'), (8, 'QSFP2', '40G/100G')]
+        ge_config = [(9, 'GE7', '1G')]
+
+    # ============ Chassis OLT (Modular) ============
+
+    elif 'V5600X26' in model_upper:
+        # V5600X26: 32 slots, Max 1700 PON, 700 Gbps backplane
+        # Modular - ports depend on line cards installed
+        sfp_config = [(i, f'GE{i}', '1G/10G') for i in range(1, 5)]
+        xge_config = [(i, f'XGE{i}', '10G/25G') for i in range(5, 9)]
+        qsfp_config = [(i, f'QSFP{i-8}', '40G/100G') for i in range(9, 13)]
+        ge_config = [(i, f'MGMT{i-12}', '1G') for i in range(13, 15)]
+
+    elif 'V5600X71' in model_upper:
+        # V5600X71: 32 slots, Max 2083 PON, 920 Gbps backplane
+        # Modular - ports depend on line cards installed
+        sfp_config = [(i, f'GE{i}', '1G/10G') for i in range(1, 5)]
+        xge_config = [(i, f'XGE{i}', '10G/25G') for i in range(5, 9)]
+        qsfp_config = [(i, f'QSFP{i-8}', '40G/100G') for i in range(9, 13)]
+        ge_config = [(i, f'MGMT{i-12}', '1G') for i in range(13, 15)]
+
+    # Default fallback
+    else:
+        ge_config = [(1, 'GE1', '1G'), (2, 'GE2', '1G')]
+        sfp_config = [(3, 'SFP1', '1G'), (4, 'SFP2', '1G')]
+        xge_config = []
+        qsfp_config = []
+
+    # Build GE RJ45 ports with live SNMP status
+    ge_ports = []
+    for if_idx, default_label, default_speed in ge_config:
+        port = port_map.get(('ge', if_idx))
+        snmp_info = snmp_ports.get(if_idx, {})
+        descr = snmp_info.get('descr')
+        snmp_status = snmp_info.get('status', 'down')
+        # Port is UP if: SNMP says UP OR has a custom description
+        if snmp_status == 'up' or (descr and descr.strip()):
+            status = 'up'
+        else:
+            status = 'down'
+        ge_ports.append({
+            "port_number": if_idx,
+            "type": "ge",
+            "status": status,
+            "speed": port.speed if port else default_speed,
+            "label": descr if descr else default_label
+        })
+
+    # Build SFP ports with live SNMP status
+    sfp_ports = []
+    for if_idx, default_label, default_speed in sfp_config:
+        port = port_map.get(('sfp', if_idx))
+        snmp_info = snmp_ports.get(if_idx, {})
+        descr = snmp_info.get('descr')
+        snmp_status = snmp_info.get('status', 'down')
+        # Port is UP if: SNMP says UP OR has a custom description
+        if snmp_status == 'up' or (descr and descr.strip()):
+            status = 'up'
+        else:
+            status = 'down'
+        sfp_ports.append({
+            "port_number": if_idx,
+            "type": "sfp",
+            "status": status,
+            "speed": port.speed if port else default_speed,
+            "label": descr if descr else default_label
+        })
+
+    # Build 10G SFP+ ports with live SNMP status
+    xge_ports = []
+    for if_idx, default_label, default_speed in xge_config:
+        port = port_map.get(('xge', if_idx))
+        snmp_info = snmp_ports.get(if_idx, {})
+        descr = snmp_info.get('descr')
+        snmp_status = snmp_info.get('status', 'down')
+        # Port is UP if: SNMP says UP OR has a custom description
+        if snmp_status == 'up' or (descr and descr.strip()):
+            status = 'up'
+        else:
+            status = 'down'
+        xge_ports.append({
+            "port_number": if_idx,
+            "type": "xge",
+            "status": status,
+            "speed": port.speed if port else default_speed,
+            "label": descr if descr else default_label
+        })
+
+    # Build QSFP28 40G/100G ports with live SNMP status (for V3600 series)
+    qsfp_ports = []
+    for if_idx, default_label, default_speed in qsfp_config:
+        port = port_map.get(('qsfp', if_idx))
+        snmp_info = snmp_ports.get(if_idx, {})
+        descr = snmp_info.get('descr')
+        snmp_status = snmp_info.get('status', 'down')
+        if snmp_status == 'up' or (descr and descr.strip()):
+            status = 'up'
+        else:
+            status = 'down'
+        qsfp_ports.append({
+            "port_number": if_idx,
+            "type": "qsfp",
+            "status": status,
+            "speed": port.speed if port else default_speed,
+            "label": descr if descr else default_label
+        })
+
+    return {
+        "olt_id": olt_id,
+        "olt_name": olt.name,
+        "model": olt.model,
+        "ip_address": olt.ip_address,
+        "is_online": olt.is_online,
+        "total_pon": pon_count,
+        "pon_ports": pon_ports,
+        "ge_ports": ge_ports,
+        "sfp_ports": sfp_ports,
+        "xge_ports": xge_ports,
+        "qsfp_ports": qsfp_ports,  # QSFP28 40G/100G ports for V3600 series
+        "total_onus": sum(c['total'] for c in onu_counts.values()),
+        "online_onus": sum(c['online'] for c in onu_counts.values())
+    }
+
+
+def set_port_description_snmp(ip: str, if_index: int, description: str, community: str = 'private') -> bool:
+    """Set interface description on OLT via SNMP.
+
+    Uses OID 1.3.6.1.2.1.31.1.1.1.18 (ifAlias) for interface description.
+    """
+    import subprocess
+
+    try:
+        # ifAlias OID for setting interface description
+        oid = f'1.3.6.1.2.1.31.1.1.1.18.{if_index}'
+
+        result = subprocess.run(
+            ['snmpset', '-v2c', '-c', community, ip, oid, 's', description],
+            capture_output=True, text=True, timeout=10
+        )
+
+        if result.returncode == 0:
+            logger.info(f"Set interface {if_index} description to '{description}' on {ip}")
+            return True
+        else:
+            logger.error(f"Failed to set interface description: {result.stderr}")
+            return False
+
+    except Exception as e:
+        logger.error(f"SNMP set failed for {ip}: {e}")
+        return False
+
+
+@app.put("/api/olts/{olt_id}/ports/{port_number}/description")
+async def set_port_description(
+    olt_id: int,
+    port_number: int,
+    description: str = Query(..., description="New port description"),
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Set port description on OLT via SNMP."""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    # Set description via SNMP (port_number is the interface index)
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(
+        ssh_executor,
+        set_port_description_snmp,
+        olt.ip_address,
+        port_number,
+        description,
+        'private'  # Write community string
+    )
+
+    if success:
+        return {"success": True, "message": f"Port {port_number} description set to '{description}'"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to set port description via SNMP")
+
+
+@app.get("/api/olts/{olt_id}/ports/{port_type}/{port_number}/traffic")
+def get_port_traffic_history(
+    olt_id: int,
+    port_type: str,
+    port_number: int,
+    range: str = Query('1h', description="Time range: 5m, 15m, 30m, 1h, 6h, 24h, 1w, 1M"),
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """
+    Get traffic history for a specific port.
+    Used for per-port traffic graphs.
+    """
+    from models import PortTraffic
+    from datetime import timedelta
+
+    # Time range mapping
+    time_ranges = {
+        '5m': timedelta(minutes=5),
+        '15m': timedelta(minutes=15),
+        '30m': timedelta(minutes=30),
+        '1h': timedelta(hours=1),
+        '6h': timedelta(hours=6),
+        '24h': timedelta(hours=24),
+        '1w': timedelta(weeks=1),
+        '1M': timedelta(days=30)
+    }
+
+    if range not in time_ranges:
+        raise HTTPException(status_code=400, detail=f"Invalid range. Use: {', '.join(time_ranges.keys())}")
+
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    time_delta = time_ranges[range]
+    since = datetime.utcnow() - time_delta
+
+    traffic = db.query(PortTraffic).filter(
+        PortTraffic.olt_id == olt_id,
+        PortTraffic.port_type == port_type,
+        PortTraffic.port_number == port_number,
+        PortTraffic.timestamp > since
+    ).order_by(PortTraffic.timestamp).all()
+
+    # If no per-port traffic data, fall back to aggregated PON traffic from TrafficHistory
+    if not traffic and port_type == 'pon':
+        # Get PON port traffic from TrafficHistory
+        pon_traffic = db.query(TrafficHistory).filter(
+            TrafficHistory.olt_id == olt_id,
+            TrafficHistory.entity_type == 'pon',
+            TrafficHistory.pon_port == port_number,
+            TrafficHistory.timestamp > since
+        ).order_by(TrafficHistory.timestamp).all()
+
+        return {
+            "olt_id": olt_id,
+            "port_type": port_type,
+            "port_number": port_number,
+            "range": range,
+            "data": [
+                {
+                    "timestamp": t.timestamp.isoformat(),
+                    "rx_kbps": t.rx_kbps,
+                    "tx_kbps": t.tx_kbps
+                }
+                for t in pon_traffic
+            ]
+        }
+
+    return {
+        "olt_id": olt_id,
+        "port_type": port_type,
+        "port_number": port_number,
+        "range": range,
+        "data": [
+            {
+                "timestamp": t.timestamp.isoformat(),
+                "rx_kbps": t.rx_kbps,
+                "tx_kbps": t.tx_kbps
+            }
+            for t in traffic
+        ]
+    }
 
 
 # ============ Traffic Monitoring Endpoints ============

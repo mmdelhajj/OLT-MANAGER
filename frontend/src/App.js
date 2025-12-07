@@ -1,63 +1,97 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as api from './api';
 
-// VSOL OLT Models with PON port counts
+const APP_VERSION = '2.1.2'; // Live traffic for All OLTs
+console.log('OLT Manager Pro v' + APP_VERSION + ' - All OLTs Live Traffic');
+
+// VSOL OLT Models with PON port counts - Complete List
 const VSOL_OLT_MODELS = {
-  // GPON (1 PON)
+  // ============ GPON OLT Series ============
+  // GPON (1 PON) - Single PON Mini OLT
   'V1600GS': 1,
   'V1600GS-F': 1,
   'V1600GS-ZF': 1,
-  'V1600GS-O32': 1,
+  'V1600GS-O32': 1,  // Built-in 1:32 splitter
+  'V1600GS-WB': 1,
 
   // GPON (2 PON)
   'V1600GT': 2,
+  'V1600GT-2F': 2,
 
   // GPON (4 PON)
   'V1600G0': 4,
   'V1600G0-B': 4,
+  'V1600G0-R': 4,
+  'V1601G04': 4,
+  'V1601E04': 4,  // EPON/GPON Combo
 
   // GPON (8 PON)
   'V1600G1': 8,
   'V1600G1-B': 8,
   'V1600G1-R': 8,
+  'V1600G1-A': 8,
   'V1600G1WEO': 8,
-  'V1600G1WEO-B': 8,
+  'V1600G1WEO-B': 8,  // Outdoor IP65
 
   // GPON (16 PON)
   'V1600G2': 16,
   'V1600G2-B': 16,
   'V1600G2-R': 16,
+  'V1600G2-A': 16,
+
+  // ============ EPON OLT Series ============
+  // EPON (1 PON)
+  'V1600DS': 1,
 
   // EPON (2 PON)
-  'V1601E02-DP': 2,
   'V1600D2': 2,
   'V1600D2-L': 2,
+  'V1601E02': 2,
+  'V1601E02-DP': 2,
 
   // EPON (4 PON)
-  'V1600D-MINI': 4,
-  'V1601E04-DP': 4,
   'V1600D4': 4,
   'V1600D4-L': 4,
   'V1600D4-DP': 4,
+  'V1600D-MINI': 4,
+  'V1601E04-DP': 4,
+  'V1601E04-BT': 4,
 
   // EPON (8 PON)
   'V1600D8': 8,
+  'V1600D8-L': 8,
+  'V1600D8-R': 8,
 
   // EPON (16 PON)
   'V1600D16': 16,
+  'V1600D16-L': 16,
 
-  // XGS-PON / 10G (2 PON)
+  // ============ 10G/XGS-PON OLT Series ============
+  // 10G GPON (2 PON)
   'V1600XG02': 2,
   'V1600XG02-W': 2,
 
-  // XGS-PON / 10G (8 PON)
+  // 10G GPON (4 PON)
+  'V1600XG04': 4,
+
+  // 10G GPON/EPON (8 PON)
   'V3600G1': 8,
   'V3600G1-C': 8,
   'V3600D8': 8,
 
-  // Chassis (32+ PON)
-  'V5600X2': 32,
-  'V5600X7': 112,
+  // 10G GPON (16 PON)
+  'V3600G2': 16,
+
+  // ============ Chassis OLT Series ============
+  'V5600X2': 32,   // 32 PON Chassis
+  'V5600X4': 64,   // 64 PON Chassis
+  'V5600X7': 112,  // 112 PON Chassis
+
+  // ============ Combo/Pizza Box OLT ============
+  'V1600P1': 1,
+  'V1600P2': 2,
+  'V1600P4': 4,
+  'V1600P8': 8,
 
   // Other (manual entry)
   'Other': 0,
@@ -562,60 +596,88 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
                   <option value="V1600GS">V1600GS</option>
                   <option value="V1600GS-F">V1600GS-F</option>
                   <option value="V1600GS-ZF">V1600GS-ZF</option>
-                  <option value="V1600GS-O32">V1600GS-O32</option>
+                  <option value="V1600GS-O32">V1600GS-O32 (Built-in Splitter)</option>
+                  <option value="V1600GS-WB">V1600GS-WB</option>
                 </optgroup>
                 <optgroup label="GPON - 2 PON">
                   <option value="V1600GT">V1600GT</option>
+                  <option value="V1600GT-2F">V1600GT-2F</option>
                 </optgroup>
                 <optgroup label="GPON - 4 PON">
                   <option value="V1600G0">V1600G0</option>
                   <option value="V1600G0-B">V1600G0-B</option>
+                  <option value="V1600G0-R">V1600G0-R</option>
+                  <option value="V1601G04">V1601G04</option>
+                  <option value="V1601E04">V1601E04</option>
                 </optgroup>
                 <optgroup label="GPON - 8 PON">
                   <option value="V1600G1">V1600G1</option>
                   <option value="V1600G1-B">V1600G1-B</option>
                   <option value="V1600G1-R">V1600G1-R</option>
+                  <option value="V1600G1-A">V1600G1-A</option>
                   <option value="V1600G1WEO">V1600G1WEO</option>
-                  <option value="V1600G1WEO-B">V1600G1WEO-B</option>
+                  <option value="V1600G1WEO-B">V1600G1WEO-B (Outdoor IP65)</option>
                 </optgroup>
                 <optgroup label="GPON - 16 PON">
                   <option value="V1600G2">V1600G2</option>
                   <option value="V1600G2-B">V1600G2-B</option>
                   <option value="V1600G2-R">V1600G2-R</option>
+                  <option value="V1600G2-A">V1600G2-A</option>
+                </optgroup>
+                <optgroup label="EPON - 1 PON">
+                  <option value="V1600DS">V1600DS</option>
                 </optgroup>
                 <optgroup label="EPON - 2 PON">
-                  <option value="V1601E02-DP">V1601E02-DP</option>
                   <option value="V1600D2">V1600D2</option>
                   <option value="V1600D2-L">V1600D2-L</option>
+                  <option value="V1601E02">V1601E02</option>
+                  <option value="V1601E02-DP">V1601E02-DP</option>
                 </optgroup>
                 <optgroup label="EPON - 4 PON">
-                  <option value="V1600D-MINI">V1600D-MINI</option>
-                  <option value="V1601E04-DP">V1601E04-DP</option>
                   <option value="V1600D4">V1600D4</option>
                   <option value="V1600D4-L">V1600D4-L</option>
                   <option value="V1600D4-DP">V1600D4-DP</option>
+                  <option value="V1600D-MINI">V1600D-MINI</option>
+                  <option value="V1601E04-DP">V1601E04-DP</option>
+                  <option value="V1601E04-BT">V1601E04-BT</option>
                 </optgroup>
                 <optgroup label="EPON - 8 PON">
                   <option value="V1600D8">V1600D8</option>
+                  <option value="V1600D8-L">V1600D8-L</option>
+                  <option value="V1600D8-R">V1600D8-R</option>
                 </optgroup>
                 <optgroup label="EPON - 16 PON">
                   <option value="V1600D16">V1600D16</option>
+                  <option value="V1600D16-L">V1600D16-L</option>
                 </optgroup>
-                <optgroup label="XGS-PON 10G - 2 PON">
+                <optgroup label="10G XGS-PON - 2 PON">
                   <option value="V1600XG02">V1600XG02</option>
                   <option value="V1600XG02-W">V1600XG02-W</option>
                 </optgroup>
-                <optgroup label="XGS-PON 10G - 8 PON">
+                <optgroup label="10G XGS-PON - 4 PON">
+                  <option value="V1600XG04">V1600XG04</option>
+                </optgroup>
+                <optgroup label="10G XGS-PON - 8 PON">
                   <option value="V3600G1">V3600G1</option>
                   <option value="V3600G1-C">V3600G1-C</option>
                   <option value="V3600D8">V3600D8</option>
                 </optgroup>
-                <optgroup label="Chassis">
+                <optgroup label="10G XGS-PON - 16 PON">
+                  <option value="V3600G2">V3600G2</option>
+                </optgroup>
+                <optgroup label="Chassis OLT">
                   <option value="V5600X2">V5600X2 (32 PON)</option>
+                  <option value="V5600X4">V5600X4 (64 PON)</option>
                   <option value="V5600X7">V5600X7 (112 PON)</option>
                 </optgroup>
+                <optgroup label="Pizza Box OLT">
+                  <option value="V1600P1">V1600P1 (1 PON)</option>
+                  <option value="V1600P2">V1600P2 (2 PON)</option>
+                  <option value="V1600P4">V1600P4 (4 PON)</option>
+                  <option value="V1600P8">V1600P8 (8 PON)</option>
+                </optgroup>
                 <optgroup label="Custom">
-                  <option value="Other">Other</option>
+                  <option value="Other">Other (Manual Entry)</option>
                 </optgroup>
               </select>
             </div>
@@ -654,6 +716,270 @@ function AddOLTModal({ isOpen, onClose, onSubmit, regions }) {
           </button>
           <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
             {loading ? 'Adding...' : 'Add OLT'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// Edit OLT Modal
+function EditOLTModal({ isOpen, onClose, olt, onSubmit, regions }) {
+  const [formData, setFormData] = useState({
+    name: '',
+    ip_address: '',
+    username: '',
+    password: '',
+    snmp_community: 'public',
+    model: '',
+    pon_ports: 8,
+  });
+  const [loading, setLoading] = useState(false);
+  const [ponPortsReadOnly, setPonPortsReadOnly] = useState(false);
+  const [changePassword, setChangePassword] = useState(false);
+
+  useEffect(() => {
+    if (olt) {
+      setFormData({
+        name: olt.name || '',
+        ip_address: olt.ip_address || '',
+        username: olt.username || 'admin',
+        password: '',
+        snmp_community: olt.snmp_community || 'public',
+        model: olt.model || '',
+        pon_ports: olt.pon_ports || 8,
+      });
+      if (olt.model && VSOL_OLT_MODELS[olt.model]) {
+        setPonPortsReadOnly(true);
+      } else {
+        setPonPortsReadOnly(false);
+      }
+      setChangePassword(false);
+    }
+  }, [olt]);
+
+  const handleModelChange = (model) => {
+    if (model && model !== 'Other' && VSOL_OLT_MODELS[model]) {
+      setFormData({ ...formData, model, pon_ports: VSOL_OLT_MODELS[model] });
+      setPonPortsReadOnly(true);
+    } else {
+      setFormData({ ...formData, model, pon_ports: model === 'Other' ? formData.pon_ports : 8 });
+      setPonPortsReadOnly(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const data = { ...formData };
+      // Only include password if user wants to change it
+      if (!changePassword || !data.password) {
+        delete data.password;
+      }
+      await onSubmit(olt.id, data);
+      onClose();
+    } catch (error) {
+      alert('Failed to update OLT: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!olt) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={`Edit OLT: ${olt.name}`} size="lg">
+      <form onSubmit={handleSubmit}>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+            <input
+              type="text"
+              required
+              className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              placeholder="OLT-1"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">IP Address *</label>
+            <input
+              type="text"
+              required
+              pattern="^(\d{1,3}\.){3}\d{1,3}$"
+              className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+              value={formData.ip_address}
+              onChange={(e) => setFormData({ ...formData, ip_address: e.target.value })}
+              placeholder="10.10.10.1"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">OLT Username *</label>
+              <input
+                type="text"
+                required
+                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                value={formData.username}
+                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                placeholder="admin"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                OLT Password
+                <label className="inline-flex items-center ml-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    checked={changePassword}
+                    onChange={(e) => setChangePassword(e.target.checked)}
+                  />
+                  <span className="ml-1 text-xs text-gray-500">Change</span>
+                </label>
+              </label>
+              <input
+                type="password"
+                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
+                value={formData.password}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                placeholder={changePassword ? "New password" : "••••••••"}
+                disabled={!changePassword}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">SNMP Community</label>
+            <input
+              type="text"
+              className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+              value={formData.snmp_community}
+              onChange={(e) => setFormData({ ...formData, snmp_community: e.target.value })}
+              placeholder="public"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+              <select
+                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                value={formData.model}
+                onChange={(e) => handleModelChange(e.target.value)}
+              >
+                <option value="">Select Model</option>
+                <optgroup label="GPON - 1 PON">
+                  <option value="V1600GS">V1600GS</option>
+                  <option value="V1600GS-F">V1600GS-F</option>
+                  <option value="V1600GS-ZF">V1600GS-ZF</option>
+                  <option value="V1600GS-O32">V1600GS-O32 (Built-in Splitter)</option>
+                  <option value="V1600GS-WB">V1600GS-WB</option>
+                </optgroup>
+                <optgroup label="GPON - 2 PON">
+                  <option value="V1600GT">V1600GT</option>
+                  <option value="V1600GT-2F">V1600GT-2F</option>
+                </optgroup>
+                <optgroup label="GPON - 4 PON">
+                  <option value="V1600G0">V1600G0</option>
+                  <option value="V1600G0-B">V1600G0-B</option>
+                  <option value="V1600G0-R">V1600G0-R</option>
+                  <option value="V1601G04">V1601G04</option>
+                  <option value="V1601E04">V1601E04</option>
+                </optgroup>
+                <optgroup label="GPON - 8 PON">
+                  <option value="V1600G1">V1600G1</option>
+                  <option value="V1600G1-B">V1600G1-B</option>
+                  <option value="V1600G1-R">V1600G1-R</option>
+                  <option value="V1600G1-A">V1600G1-A</option>
+                  <option value="V1600G1WEO">V1600G1WEO</option>
+                  <option value="V1600G1WEO-B">V1600G1WEO-B (Outdoor IP65)</option>
+                </optgroup>
+                <optgroup label="GPON - 16 PON">
+                  <option value="V1600G2">V1600G2</option>
+                  <option value="V1600G2-B">V1600G2-B</option>
+                  <option value="V1600G2-R">V1600G2-R</option>
+                  <option value="V1600G2-A">V1600G2-A</option>
+                </optgroup>
+                <optgroup label="EPON - 1 PON">
+                  <option value="V1600DS">V1600DS</option>
+                </optgroup>
+                <optgroup label="EPON - 2 PON">
+                  <option value="V1600D2">V1600D2</option>
+                  <option value="V1600D2-L">V1600D2-L</option>
+                  <option value="V1601E02">V1601E02</option>
+                  <option value="V1601E02-DP">V1601E02-DP</option>
+                </optgroup>
+                <optgroup label="EPON - 4 PON">
+                  <option value="V1600D4">V1600D4</option>
+                  <option value="V1600D4-L">V1600D4-L</option>
+                  <option value="V1600D4-DP">V1600D4-DP</option>
+                  <option value="V1600D-MINI">V1600D-MINI</option>
+                  <option value="V1601E04-DP">V1601E04-DP</option>
+                  <option value="V1601E04-BT">V1601E04-BT</option>
+                </optgroup>
+                <optgroup label="EPON - 8 PON">
+                  <option value="V1600D8">V1600D8</option>
+                  <option value="V1600D8-L">V1600D8-L</option>
+                  <option value="V1600D8-R">V1600D8-R</option>
+                </optgroup>
+                <optgroup label="EPON - 16 PON">
+                  <option value="V1600D16">V1600D16</option>
+                  <option value="V1600D16-L">V1600D16-L</option>
+                </optgroup>
+                <optgroup label="10G XGS-PON - 2 PON">
+                  <option value="V1600XG02">V1600XG02</option>
+                  <option value="V1600XG02-W">V1600XG02-W</option>
+                </optgroup>
+                <optgroup label="10G XGS-PON - 4 PON">
+                  <option value="V1600XG04">V1600XG04</option>
+                </optgroup>
+                <optgroup label="10G XGS-PON - 8 PON">
+                  <option value="V3600G1">V3600G1</option>
+                  <option value="V3600G1-C">V3600G1-C</option>
+                  <option value="V3600D8">V3600D8</option>
+                </optgroup>
+                <optgroup label="10G XGS-PON - 16 PON">
+                  <option value="V3600G2">V3600G2</option>
+                </optgroup>
+                <optgroup label="Chassis OLT">
+                  <option value="V5600X2">V5600X2 (32 PON)</option>
+                  <option value="V5600X4">V5600X4 (64 PON)</option>
+                  <option value="V5600X7">V5600X7 (112 PON)</option>
+                </optgroup>
+                <optgroup label="Pizza Box OLT">
+                  <option value="V1600P1">V1600P1 (1 PON)</option>
+                  <option value="V1600P2">V1600P2 (2 PON)</option>
+                  <option value="V1600P4">V1600P4 (4 PON)</option>
+                  <option value="V1600P8">V1600P8 (8 PON)</option>
+                </optgroup>
+                <optgroup label="Custom">
+                  <option value="Other">Other (Manual Entry)</option>
+                </optgroup>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">PON Ports</label>
+              <input
+                type="number"
+                min="1"
+                max="128"
+                required
+                className={`w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${ponPortsReadOnly ? 'bg-gray-100 text-gray-600' : ''}`}
+                value={formData.pon_ports}
+                onChange={(e) => setFormData({ ...formData, pon_ports: parseInt(e.target.value) || '' })}
+                readOnly={ponPortsReadOnly}
+              />
+              {ponPortsReadOnly && <p className="text-xs text-gray-500 mt-1">Auto-filled from model</p>}
+            </div>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end space-x-3">
+          <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg text-gray-700 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+            {loading ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </form>
@@ -1885,6 +2211,10 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
         url = `/api/traffic/history/pon/${oltId}/${ponPort}?range=${timeRange}`;
       } else if (entityType === 'olt') {
         url = `/api/traffic/history/olt/${entityId}?range=${timeRange}`;
+      } else if (entityType === 'port') {
+        // entityId format: "oltId:portType:portNumber"
+        const [oltId, portType, portNumber] = entityId.split(':');
+        url = `/api/olts/${oltId}/ports/${portType}/${portNumber}/traffic?range=${timeRange}`;
       }
 
       const response = await api.get(url);
@@ -2362,15 +2692,108 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
   );
 }
 
-// OLT Card Component - Enterprise Pro Design
-function OLTCard({ olt, onSelect, onPoll, onDelete, isSelected, isAdmin, onGraph }) {
+// Port Icon Component for OLT visualization
+function PortIcon({ type, number, status, onuCount, onClick, onEdit, isUplink, label }) {
+  const isUp = status === 'up';
+  const baseColor = isUp ? (isUplink ? 'bg-blue-500' : 'bg-green-500') : 'bg-gray-400';
+  const hoverColor = isUp ? (isUplink ? 'hover:bg-blue-600' : 'hover:bg-green-600') : 'hover:bg-gray-500';
+  const displayLabel = label || `${type.toUpperCase()}${number}`;
+  const hasCustomLabel = label && label !== `${type.toUpperCase()}${number}` && label !== `GE${number}` && label !== `SFP${number}` && label !== `10G${number}`;
+
+  const handleRightClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isUplink && onEdit) {
+      onEdit();
+    }
+  };
+
+  return (
+    <div
+      className={`relative group cursor-pointer`}
+      onClick={(e) => { e.stopPropagation(); onClick && onClick(); }}
+      onContextMenu={handleRightClick}
+      title={`${displayLabel} - ${isUp ? 'Online' : 'Offline'}${!isUplink && onuCount ? ` (${onuCount} ONUs)` : ''}${isUplink ? ' (Right-click to edit name)' : ''}`}
+    >
+      <div className={`w-8 h-8 ${baseColor} ${hoverColor} rounded flex items-center justify-center transition-all duration-150 shadow-sm ${hasCustomLabel ? 'ring-2 ring-yellow-400' : ''}`}>
+        {isUplink ? (
+          <span className="text-white text-[10px] font-bold">{number}</span>
+        ) : (
+          <span className="text-white text-xs font-bold">{number}</span>
+        )}
+      </div>
+      {!isUplink && onuCount > 0 && (
+        <span className="absolute -top-1 -right-1 bg-blue-600 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+          {onuCount > 99 ? '99+' : onuCount}
+        </span>
+      )}
+      {/* Connected indicator for uplink with custom label */}
+      {isUplink && hasCustomLabel && (
+        <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-yellow-400 text-gray-900 text-[8px] font-bold px-1 rounded">
+          {label.length > 6 ? label.substring(0, 6) : label}
+        </span>
+      )}
+      {/* Edit icon on hover for uplink ports */}
+      {isUplink && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onEdit && onEdit(); }}
+          className="absolute -top-1 -right-1 w-4 h-4 bg-gray-700 hover:bg-blue-600 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+          title="Edit port name"
+        >
+          <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+          </svg>
+        </button>
+      )}
+      {/* Tooltip */}
+      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none">
+        GE{number}
+        {hasCustomLabel && <span className="text-yellow-400"> ({label})</span>}
+        {!isUplink && onuCount !== undefined && <span> ({onuCount} ONUs)</span>}
+        <br />
+        <span className={isUp ? 'text-green-400' : 'text-red-400'}>{isUp ? 'Online' : 'Offline'}</span>
+      </div>
+    </div>
+  );
+}
+
+// OLT Card Component - Enterprise Pro Design with Port Visualization
+function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin, onGraph, onPortGraph }) {
   const [polling, setPolling] = useState(false);
+  const [ports, setPorts] = useState(null);
+  const [loadingPorts, setLoadingPorts] = useState(false);
+  const [showPorts, setShowPorts] = useState(true);
+  const [editingPort, setEditingPort] = useState(null);
+  const [portDescription, setPortDescription] = useState('');
+  const [savingPort, setSavingPort] = useState(false);
+
+  // Get PON port count from model
+  const ponPortCount = olt.model ? (VSOL_OLT_MODELS[olt.model] || olt.pon_ports || 8) : (olt.pon_ports || 8);
+
+  // Fetch ports when card expands
+  useEffect(() => {
+    if (showPorts && !ports && !loadingPorts) {
+      setLoadingPorts(true);
+      api.getOltPorts(olt.id)
+        .then(response => {
+          setPorts(response.data);
+        })
+        .catch(err => {
+          console.error('Failed to load ports:', err);
+        })
+        .finally(() => {
+          setLoadingPorts(false);
+        });
+    }
+  }, [showPorts, olt.id, ports, loadingPorts]);
 
   const handlePoll = async (e) => {
     e.stopPropagation();
     setPolling(true);
     try {
       await onPoll(olt.id);
+      // Refresh ports after poll
+      setPorts(null);
     } finally {
       setPolling(false);
     }
@@ -2383,7 +2806,79 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, isSelected, isAdmin, onGraph
     }
   };
 
+  const togglePorts = (e) => {
+    e.stopPropagation();
+    setShowPorts(!showPorts);
+  };
+
+  const handleEditPort = (portNumber, currentLabel) => {
+    setEditingPort(portNumber);
+    // Extract just the description part if label is like "GE9" or custom
+    const desc = currentLabel && !currentLabel.startsWith('GE') ? currentLabel : '';
+    setPortDescription(desc);
+  };
+
+  const handleSavePortDescription = async () => {
+    if (!editingPort) return;
+    setSavingPort(true);
+    try {
+      await api.put(`/api/olts/${olt.id}/ports/${editingPort}/description?description=${encodeURIComponent(portDescription)}`);
+      // Refresh ports to show new description
+      setPorts(null);
+      setEditingPort(null);
+      setPortDescription('');
+    } catch (err) {
+      console.error('Failed to save port description:', err);
+      alert('Failed to save port description');
+    } finally {
+      setSavingPort(false);
+    }
+  };
+
+  const handlePortClick = (portType, portNumber) => {
+    if (onPortGraph) {
+      onPortGraph(olt.id, olt.name, portType, portNumber);
+    }
+  };
+
   const onlinePercent = olt.onu_count > 0 ? Math.round((olt.online_onu_count / olt.onu_count) * 100) : 0;
+
+  // Generate port data - use API data if available, otherwise generate defaults
+  const ponPorts = ports?.pon_ports || Array.from({ length: ponPortCount }, (_, i) => ({
+    port_number: i + 1,
+    status: 'unknown',
+    onu_count: 0
+  }));
+
+  // Combine all uplink ports: GE RJ45, SFP, and 10G SFP+
+  const gePorts = (ports?.ge_ports || []).map(p => ({
+    port_type: 'ge',
+    port_number: p.port_number,
+    status: p.status || 'unknown',
+    label: p.label || `GE${p.port_number}`
+  }));
+
+  const sfpPorts = (ports?.sfp_ports || []).map(p => ({
+    port_type: 'sfp',
+    port_number: p.port_number,
+    status: p.status || 'unknown',
+    label: p.label || `SFP${p.port_number}`
+  }));
+
+  const xgePorts = (ports?.xge_ports || []).map(p => ({
+    port_type: 'xge',
+    port_number: p.port_number,
+    status: p.status || 'unknown',
+    label: p.label || `10G${p.port_number}`
+  }));
+
+  // Default fallback if no port data
+  const uplinkPorts = [...gePorts, ...sfpPorts, ...xgePorts].length > 0
+    ? [...gePorts, ...sfpPorts, ...xgePorts]
+    : [
+        { port_type: 'ge', port_number: 1, status: 'unknown', label: 'GE1' },
+        { port_type: 'ge', port_number: 2, status: 'unknown', label: 'GE2' }
+      ];
 
   return (
     <div
@@ -2412,7 +2907,10 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, isSelected, isAdmin, onGraph
 
       {/* Body */}
       <div className="p-4">
-        {olt.model && <p className="text-xs text-[#9ca3af] mb-3">{olt.model}</p>}
+        <div className="flex items-center justify-between mb-3">
+          {olt.model && <p className="text-xs text-[#9ca3af]">{olt.model}</p>}
+          <span className="text-xs text-[#9ca3af]">{ponPortCount} PON Ports</span>
+        </div>
 
         {/* Stats with progress bar */}
         <div className="mb-3">
@@ -2427,6 +2925,153 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, isSelected, isAdmin, onGraph
             ></div>
           </div>
         </div>
+
+        {/* Port Visualization Toggle */}
+        <button
+          onClick={togglePorts}
+          className="w-full py-2 px-3 mb-3 text-sm text-[#4b5563] bg-[#f4f5f7] rounded-lg hover:bg-[#e8eaed] transition-all flex items-center justify-between"
+        >
+          <span className="flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+            </svg>
+            Port Status
+          </span>
+          <svg className={`w-4 h-4 transition-transform ${showPorts ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {/* Port Visualization Panel */}
+        {showPorts && (
+          <div className="bg-[#1a1a2e] rounded-lg p-4 mb-3" onClick={(e) => e.stopPropagation()}>
+            {loadingPorts ? (
+              <div className="flex items-center justify-center py-4">
+                <svg className="animate-spin w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+              </div>
+            ) : (
+              <>
+                {/* PON Ports */}
+                <div className="mb-4">
+                  <p className="text-xs text-gray-400 mb-2 uppercase tracking-wider">PON Ports</p>
+                  <div className="flex flex-wrap gap-2">
+                    {ponPorts.map((port) => (
+                      <PortIcon
+                        key={`pon-${port.port_number}`}
+                        type="pon"
+                        number={port.port_number}
+                        status={port.status}
+                        onuCount={port.onu_count}
+                        onClick={() => handlePortClick('pon', port.port_number)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {/* Uplink Ports - Grouped by Type */}
+                <div className="space-y-3">
+                  {/* GE RJ45 Ports */}
+                  {gePorts.length > 0 && (
+                    <div>
+                      <p className="text-xs text-gray-400 mb-2 uppercase tracking-wider">GE RJ45 ({gePorts.length})</p>
+                      <div className="flex flex-wrap gap-2">
+                        {gePorts.map((port) => (
+                          <PortIcon
+                            key={`ge-${port.port_number}`}
+                            type="ge"
+                            number={port.port_number}
+                            status={port.status}
+                            isUplink={true}
+                            label={port.label}
+                            onClick={() => handlePortClick('ge', port.port_number)}
+                            onEdit={() => handleEditPort(port.port_number, port.label)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SFP Ports */}
+                  {sfpPorts.length > 0 && (
+                    <div>
+                      <p className="text-xs text-gray-400 mb-2 uppercase tracking-wider">SFP ({sfpPorts.length})</p>
+                      <div className="flex flex-wrap gap-2">
+                        {sfpPorts.map((port) => (
+                          <PortIcon
+                            key={`sfp-${port.port_number}`}
+                            type="sfp"
+                            number={port.port_number}
+                            status={port.status}
+                            isUplink={true}
+                            label={port.label}
+                            onClick={() => handlePortClick('sfp', port.port_number)}
+                            onEdit={() => handleEditPort(port.port_number, port.label)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 10G SFP+ Ports */}
+                  {xgePorts.length > 0 && (
+                    <div>
+                      <p className="text-xs text-gray-400 mb-2 uppercase tracking-wider">10G SFP+ ({xgePorts.length})</p>
+                      <div className="flex flex-wrap gap-2">
+                        {xgePorts.map((port) => (
+                          <PortIcon
+                            key={`xge-${port.port_number}`}
+                            type="xge"
+                            number={port.port_number}
+                            status={port.status}
+                            isUplink={true}
+                            label={port.label}
+                            onClick={() => handlePortClick('xge', port.port_number)}
+                            onEdit={() => handleEditPort(port.port_number, port.label)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fallback if no uplink data */}
+                  {gePorts.length === 0 && sfpPorts.length === 0 && xgePorts.length === 0 && (
+                    <div>
+                      <p className="text-xs text-gray-400 mb-2 uppercase tracking-wider">Uplink Ports</p>
+                      <div className="flex flex-wrap gap-2">
+                        {uplinkPorts.map((port) => (
+                          <PortIcon
+                            key={`${port.port_type}-${port.port_number}`}
+                            type={port.port_type}
+                            number={port.port_number}
+                            status={port.status}
+                            isUplink={true}
+                            onClick={() => handlePortClick(port.port_type, port.port_number)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Legend */}
+                <div className="mt-3 pt-3 border-t border-gray-700 flex items-center gap-4 text-xs text-gray-400">
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-3 bg-green-500 rounded"></span> PON Online
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-3 bg-blue-500 rounded"></span> Uplink Online
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-3 bg-gray-400 rounded"></span> Offline
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {olt.last_poll && (
           <p className="text-xs text-[#9ca3af] flex items-center gap-1.5 mb-2">
@@ -2481,20 +3126,87 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, isSelected, isAdmin, onGraph
           )}
         </button>
         {isAdmin && (
-          <button
-            onClick={handleDelete}
-            className="px-3 py-1.5 text-sm text-[#dc2626] border border-[#e8eaed] bg-white rounded-lg hover:bg-red-50 font-medium transition-all duration-150"
-          >
-            Delete
-          </button>
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit && onEdit(olt); }}
+              className="px-3 py-1.5 text-sm text-[#2563eb] border border-[#e8eaed] bg-white rounded-lg hover:bg-blue-50 font-medium transition-all duration-150 flex items-center gap-1.5"
+              title="Edit OLT"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Edit
+            </button>
+            <button
+              onClick={handleDelete}
+              className="px-3 py-1.5 text-sm text-[#dc2626] border border-[#e8eaed] bg-white rounded-lg hover:bg-red-50 font-medium transition-all duration-150"
+            >
+              Delete
+            </button>
+          </>
         )}
       </div>
+
+      {/* Port Description Edit Modal */}
+      {editingPort && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={(e) => { e.stopPropagation(); setEditingPort(null); }}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+              Edit Port GE{editingPort} Description
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Set a custom name for this port. This will be synced to the OLT.
+            </p>
+            <input
+              type="text"
+              value={portDescription}
+              onChange={(e) => setPortDescription(e.target.value)}
+              placeholder="Enter port description (e.g., MIKROTIK, ROUTER)"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-4"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSavePortDescription();
+                if (e.key === 'Escape') setEditingPort(null);
+              }}
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setEditingPort(null)}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSavePortDescription}
+                disabled={savingPort}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {savingPort ? (
+                  <>
+                    <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                    Saving...
+                  </>
+                ) : 'Save to OLT'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ONU Table Component - Enterprise Pro Design
-function ONUTable({ onus, onEdit, onDelete, isAdmin, trafficData, onGraph }) {
+function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGraph }) {
   const [previewImages, setPreviewImages] = useState(null);
   const [previewTitle, setPreviewTitle] = useState('');
 
@@ -2695,6 +3407,17 @@ function ONUTable({ onus, onEdit, onDelete, isAdmin, trafficData, onGraph }) {
                         >
                           Edit
                         </button>
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Reboot ONU "${onu.description || onu.mac_address}"?`)) {
+                              onReboot(onu.id);
+                            }
+                          }}
+                          className="px-3 py-1.5 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded-lg transition-colors"
+                          title="Reboot ONU"
+                        >
+                          Reboot
+                        </button>
                         {isAdmin && (
                           <button
                             onClick={() => {
@@ -2721,7 +3444,7 @@ function ONUTable({ onus, onEdit, onDelete, isAdmin, trafficData, onGraph }) {
 }
 
 // Mobile ONU Card - Premium Material Design
-function ONUCard({ onu, onEdit, onDelete, isAdmin, onImagePreview }) {
+function ONUCard({ onu, onEdit, onDelete, onReboot, isAdmin, onImagePreview }) {
   const images = onu.image_urls || (onu.image_url ? [onu.image_url] : []);
   const hasImages = images.length > 0;
 
@@ -2804,6 +3527,14 @@ function ONUCard({ onu, onEdit, onDelete, isAdmin, onImagePreview }) {
             className="px-3 py-1.5 text-sm bg-primary-500 text-white rounded-lg font-medium shadow-sm hover:bg-primary-600 transition-colors"
           >
             Edit
+          </button>
+          <button
+            onClick={() => {
+              if (window.confirm(`Reboot ONU "${onu.description || onu.mac_address}"?`)) onReboot(onu.id);
+            }}
+            className="px-3 py-1.5 text-sm bg-amber-500 text-white rounded-lg font-medium shadow-sm hover:bg-amber-600 transition-colors"
+          >
+            Reboot
           </button>
           {isAdmin && (
             <button
@@ -5028,6 +5759,8 @@ function Dashboard({ user, onLogout, pageName }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [showAddOLTModal, setShowAddOLTModal] = useState(false);
+  const [showEditOLTModal, setShowEditOLTModal] = useState(false);
+  const [editingOLT, setEditingOLT] = useState(null);
   const [showEditONUModal, setShowEditONUModal] = useState(false);
   const [showRegionModal, setShowRegionModal] = useState(false);
   const [showUserModal, setShowUserModal] = useState(false);
@@ -5045,6 +5778,7 @@ function Dashboard({ user, onLogout, pageName }) {
   const [trafficLoading, setTrafficLoading] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
+  const wsMapRef = useRef({});  // Map of OLT ID -> WebSocket for "All" mode
   const trafficBufferRef = useRef({});  // Buffer to keep traffic values between updates
 
   const isAdmin = user?.role === 'admin';
@@ -5127,19 +5861,13 @@ function Dashboard({ user, onLogout, pageName }) {
     }
   }, []);
 
-  // WebSocket connection for live traffic
-  const connectWebSocket = useCallback((oltId) => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-
-    // Construct WebSocket URL
+  // Helper function to get WebSocket URL
+  const getWsUrl = useCallback((oltId) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const apiUrl = process.env.REACT_APP_API_URL || '';
     let wsHost = window.location.host;
 
     if (apiUrl) {
-      // Extract host from API URL
       try {
         const url = new URL(apiUrl);
         wsHost = url.host;
@@ -5148,7 +5876,16 @@ function Dashboard({ user, onLogout, pageName }) {
       }
     }
 
-    const wsUrl = `${protocol}//${wsHost}/ws/traffic/${oltId}`;
+    return `${protocol}//${wsHost}/ws/traffic/${oltId}`;
+  }, []);
+
+  // WebSocket connection for live traffic (single OLT)
+  const connectWebSocket = useCallback((oltId) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const wsUrl = getWsUrl(oltId);
     console.log('Connecting to WebSocket:', wsUrl);
 
     // Clear buffer when connecting to new OLT
@@ -5213,33 +5950,142 @@ function Dashboard({ user, onLogout, pageName }) {
     };
 
     wsRef.current = ws;
+  }, [getWsUrl]);
+
+  // Connect to all OLTs WebSockets for "All" mode
+  const connectAllWebSockets = useCallback((oltList) => {
+    // Check if already connected to all OLTs
+    const currentIds = Object.keys(wsMapRef.current).map(Number).sort();
+    const newIds = oltList.map(o => o.id).sort();
+    if (JSON.stringify(currentIds) === JSON.stringify(newIds) && Object.values(wsMapRef.current).some(ws => ws.readyState === WebSocket.OPEN)) {
+      console.log('Already connected to all OLTs, skipping reconnect');
+      return;
+    }
+
+    // Close existing connections
+    Object.values(wsMapRef.current).forEach(ws => ws.close());
+    wsMapRef.current = {};
+    trafficBufferRef.current = {};
+    setTrafficLoading(true);
+
+    console.log('Initiating WebSocket connections to', oltList.length, 'OLTs');
+
+    oltList.forEach(olt => {
+      const wsUrl = getWsUrl(olt.id);
+      console.log('Connecting to WebSocket for OLT', olt.name, ':', wsUrl);
+
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('WebSocket connected for OLT', olt.name);
+        setWsConnected(true);
+        setTrafficLoading(false);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          // Merge traffic data from this OLT into the global buffer
+          if (data.traffic && data.traffic.length > 0) {
+            data.traffic.forEach(t => {
+              trafficBufferRef.current[t.mac_address] = {
+                ...t,
+                olt_id: olt.id,
+                olt_name: olt.name,
+                lastUpdate: Date.now()
+              };
+            });
+          }
+
+          // Create merged traffic array from all OLTs
+          const mergedTraffic = Object.values(trafficBufferRef.current)
+            .filter(t => Date.now() - t.lastUpdate < 30000)
+            .sort((a, b) => (b.rx_kbps + b.tx_kbps) - (a.rx_kbps + a.tx_kbps));
+
+          setTrafficData({
+            olt_id: 'all',
+            timestamp: new Date().toISOString(),
+            traffic: mergedTraffic
+          });
+        } catch (e) {
+          console.error('Failed to parse WebSocket message:', e);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error for OLT', olt.name, ':', error);
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected for OLT', olt.name);
+        delete wsMapRef.current[olt.id];
+        // Check if all connections are closed
+        if (Object.keys(wsMapRef.current).length === 0) {
+          setWsConnected(false);
+        }
+      };
+
+      wsMapRef.current[olt.id] = ws;
+    });
+  }, [getWsUrl]);
+
+  // Disconnect all WebSockets
+  const disconnectAllWebSockets = useCallback(() => {
+    // Close single OLT connection
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    // Close all OLT connections
+    Object.values(wsMapRef.current).forEach(ws => ws.close());
+    wsMapRef.current = {};
+    setTrafficData(null);
+    setWsConnected(false);
+    trafficBufferRef.current = {};
   }, []);
 
   // Connect/disconnect WebSocket when OLT is selected on ONUs page
   useEffect(() => {
-    if (currentPage !== 'onus' || !selectedOLT) {
-      // Close WebSocket if not on ONUs page or no OLT selected
+    console.log('WebSocket effect triggered:', { currentPage, selectedOLT, oltsCount: olts.length });
+
+    if (currentPage !== 'onus') {
+      // Close all WebSockets if not on ONUs page
+      console.log('Not on ONUs page, closing connections');
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
+      Object.values(wsMapRef.current).forEach(ws => ws.close());
+      wsMapRef.current = {};
       setTrafficData(null);
       setWsConnected(false);
-      trafficBufferRef.current = {};  // Clear buffer
+      trafficBufferRef.current = {};
       return;
     }
 
-    // Connect WebSocket for the selected OLT
-    connectWebSocket(selectedOLT);
-
-    // Cleanup on unmount or OLT change
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+    if (selectedOLT) {
+      // Close all-OLT connections if any
+      console.log('Connecting to single OLT:', selectedOLT);
+      Object.values(wsMapRef.current).forEach(ws => ws.close());
+      wsMapRef.current = {};
+      // Connect to single OLT
+      connectWebSocket(selectedOLT);
+    } else {
+      // "All" is selected - connect to all OLTs
+      console.log('ALL selected, olts.length:', olts.length);
+      if (olts.length > 0) {
+        console.log('Connecting to ALL OLTs:', olts.map(o => o.name));
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
+        }
+        connectAllWebSockets(olts);
+      } else {
+        console.log('No OLTs available yet, waiting...');
       }
-    };
-  }, [currentPage, selectedOLT, connectWebSocket]);
+    }
+  }, [currentPage, selectedOLT, olts, connectWebSocket, connectAllWebSockets]);
 
   // Initial load
   useEffect(() => {
@@ -5306,6 +6152,16 @@ function Dashboard({ user, onLogout, pageName }) {
     await fetchStats();
   };
 
+  const handleEditOLT = (olt) => {
+    setEditingOLT(olt);
+    setShowEditOLTModal(true);
+  };
+
+  const handleUpdateOLT = async (id, data) => {
+    await api.updateOLT(id, data);
+    await fetchOLTs();
+  };
+
   const handleEditONU = (onu) => {
     setEditingONU(onu);
     setShowEditONUModal(true);
@@ -5320,6 +6176,15 @@ function Dashboard({ user, onLogout, pageName }) {
     await api.deleteONU(id);
     await fetchONUs();
     await fetchStats();
+  };
+
+  const handleRebootONU = async (id) => {
+    try {
+      const response = await api.rebootONU(id);
+      alert(response.data.message || 'Reboot command sent successfully');
+    } catch (error) {
+      alert('Failed to reboot ONU: ' + (error.response?.data?.detail || error.message));
+    }
   };
 
   const handleOpenGraph = (type, id, name) => {
@@ -5521,9 +6386,13 @@ function Dashboard({ user, onLogout, pageName }) {
                         onSelect={handleSelectOLT}
                         onPoll={handlePollOLT}
                         onDelete={handleDeleteOLT}
+                        onEdit={handleEditOLT}
                         isSelected={selectedOLT === olt.id}
                         isAdmin={isAdmin}
                         onGraph={handleOpenGraph}
+                        onPortGraph={(oltId, oltName, portType, portNumber) => {
+                          handleOpenGraph('port', `${oltId}:${portType}:${portNumber}`, `${oltName} - ${portType.toUpperCase()} ${portNumber}`);
+                        }}
                       />
                     ))}
                   </div>
@@ -5609,7 +6478,21 @@ function Dashboard({ user, onLogout, pageName }) {
               {/* Filter by OLT buttons */}
               <div className="flex flex-wrap gap-2 mb-4">
                 <button
-                  onClick={() => { setSelectedOLT(null); setSelectedRegion(null); setSelectedPonPort(null); }}
+                  onClick={() => {
+                    console.log('All button clicked');
+                    setSelectedOLT(null);
+                    setSelectedRegion(null);
+                    setSelectedPonPort(null);
+                    // Directly connect to all OLTs
+                    if (wsRef.current) {
+                      wsRef.current.close();
+                      wsRef.current = null;
+                    }
+                    if (olts.length > 0) {
+                      console.log('Directly connecting to all OLTs:', olts.length);
+                      connectAllWebSockets(olts);
+                    }
+                  }}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
                     !selectedOLT && !selectedRegion ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
@@ -5681,38 +6564,37 @@ function Dashboard({ user, onLogout, pageName }) {
                 ) : null;
               })()}
 
-              {/* Traffic Status Indicator */}
-              {selectedOLT && (
-                <div className="mb-4 flex items-center gap-3">
-                  <div className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-blue-50 border border-cyan-200 rounded-lg">
-                    {trafficLoading ? (
-                      <>
-                        <svg className="animate-spin h-4 w-4 text-cyan-600" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span className="text-sm text-cyan-700 font-medium">Updating traffic...</span>
-                      </>
-                    ) : (
-                      <>
-                        <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
-                        <svg className="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-                        </svg>
-                        <span className="text-sm text-cyan-700 font-medium">Live Traffic</span>
-                      </>
-                    )}
-                    <span className={`text-xs ${wsConnected ? 'text-green-600 font-medium' : 'text-gray-500'}`}>
-                      {wsConnected ? (trafficData?.message ? `(${trafficData.message})` : '(Live ~3s)') : '(connecting...)'}
-                    </span>
-                  </div>
-                  {trafficData && trafficData.olt_id === selectedOLT && trafficData.timestamp && (
-                    <span className="text-xs text-gray-500">
-                      {new Date(trafficData.timestamp).toLocaleTimeString()}
-                    </span>
+              {/* Traffic Status Indicator - Shows for both "All" and specific OLT */}
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-blue-50 border border-cyan-200 rounded-lg">
+                  {trafficLoading ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-cyan-600" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      <span className="text-sm text-cyan-700 font-medium">Updating traffic...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
+                      <svg className="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                      </svg>
+                      <span className="text-sm text-cyan-700 font-medium">Live Traffic</span>
+                      {!selectedOLT && <span className="text-xs text-cyan-600">(All OLTs)</span>}
+                    </>
                   )}
+                  <span className={`text-xs ${wsConnected ? 'text-green-600 font-medium' : 'text-gray-500'}`}>
+                    {wsConnected ? (trafficData?.message ? `(${trafficData.message})` : '(Live ~3s)') : '(connecting...)'}
+                  </span>
                 </div>
-              )}
+                {trafficData && trafficData.timestamp && (
+                  <span className="text-xs text-gray-500">
+                    {new Date(trafficData.timestamp).toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
 
               {(() => {
                 const filteredOnus = selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort) : onus;
@@ -5726,12 +6608,12 @@ function Dashboard({ user, onLogout, pageName }) {
                     />
                     <div>
                       {filteredOnus.map((onu) => (
-                        <ONUCard key={onu.id} onu={onu} onEdit={handleEditONU} onDelete={handleDeleteONU} isAdmin={isAdmin} onImagePreview={handleMobileImagePreview} />
+                        <ONUCard key={onu.id} onu={onu} onEdit={handleEditONU} onDelete={handleDeleteONU} onReboot={handleRebootONU} isAdmin={isAdmin} onImagePreview={handleMobileImagePreview} />
                       ))}
                     </div>
                   </>
                 ) : (
-                  <ONUTable onus={filteredOnus} onEdit={handleEditONU} onDelete={handleDeleteONU} isAdmin={isAdmin} trafficData={selectedOLT && trafficData && trafficData.olt_id === selectedOLT ? trafficData : null} onGraph={handleOpenGraph} />
+                  <ONUTable onus={filteredOnus} onEdit={handleEditONU} onDelete={handleDeleteONU} onReboot={handleRebootONU} isAdmin={isAdmin} trafficData={trafficData && (selectedOLT ? trafficData.olt_id === selectedOLT : trafficData.olt_id === 'all') ? trafficData : null} onGraph={handleOpenGraph} />
                 );
               })()}
             </>
@@ -5902,6 +6784,13 @@ function Dashboard({ user, onLogout, pageName }) {
         isOpen={showAddOLTModal}
         onClose={() => setShowAddOLTModal(false)}
         onSubmit={handleAddOLT}
+        regions={regions}
+      />
+      <EditOLTModal
+        isOpen={showEditOLTModal}
+        onClose={() => { setShowEditOLTModal(false); setEditingOLT(null); }}
+        olt={editingOLT}
+        onSubmit={handleUpdateOLT}
         regions={regions}
       />
       <EditONUModal
