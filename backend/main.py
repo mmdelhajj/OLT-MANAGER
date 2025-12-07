@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 import uuid
 import shutil
-from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File, WebSocket, WebSocketDisconnect
+from pathlib import Path
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Set
@@ -2276,6 +2277,401 @@ def check_for_updates(current_user: dict = Depends(get_current_user)):
         "update_available": update_info is not None,
         "update": update_info
     }
+
+
+# Update status tracking
+update_status = {
+    "in_progress": False,
+    "stage": "",
+    "progress": 0,
+    "error": None,
+    "completed": False
+}
+
+
+@app.get("/api/update/status")
+def get_update_status(current_user: dict = Depends(get_current_user)):
+    """Get current update status"""
+    return update_status
+
+
+@app.post("/api/update/download")
+async def download_update(
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_admin)
+):
+    """Download update from license server"""
+    global update_status
+    from license_manager import license_manager, LICENSE_SERVER_URL, SOFTWARE_VERSION
+
+    if update_status["in_progress"]:
+        raise HTTPException(status_code=400, detail="Update already in progress")
+
+    # Reset status
+    update_status = {
+        "in_progress": True,
+        "stage": "preparing",
+        "progress": 0,
+        "error": None,
+        "completed": False
+    }
+
+    try:
+        # Get update info
+        update_info = license_manager.update_info
+        if not update_info:
+            update_status["error"] = "No update available"
+            update_status["in_progress"] = False
+            raise HTTPException(status_code=400, detail="No update available")
+
+        latest_version = update_info.get("latest_version", "1.0.0")
+
+        # Create updates directory
+        updates_dir = Path("/tmp/olt-manager-updates")
+        updates_dir.mkdir(exist_ok=True)
+
+        update_status["stage"] = "downloading"
+        update_status["progress"] = 10
+
+        # Download from license server
+        try:
+            response = requests.post(
+                f"{LICENSE_SERVER_URL}/api/download-update",
+                json={
+                    "license_key": license_manager.license_key,
+                    "hardware_id": license_manager.hardware_id
+                },
+                timeout=300,  # 5 minute timeout for download
+                stream=True
+            )
+
+            if response.status_code != 200:
+                error_msg = response.json().get("error", "Download failed")
+                update_status["error"] = error_msg
+                update_status["in_progress"] = False
+                raise HTTPException(status_code=400, detail=error_msg)
+
+            # Save the package
+            package_path = updates_dir / f"olt-manager-v{latest_version}.tar.gz"
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+
+            with open(package_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            update_status["progress"] = 10 + int((downloaded / total_size) * 40)
+
+            update_status["stage"] = "downloaded"
+            update_status["progress"] = 50
+            update_status["package_path"] = str(package_path)
+            update_status["new_version"] = latest_version  # Save version for install step
+
+            return {
+                "success": True,
+                "message": f"Update v{latest_version} downloaded successfully",
+                "package_path": str(package_path),
+                "version": latest_version
+            }
+
+        except requests.exceptions.RequestException as e:
+            update_status["error"] = f"Download failed: {str(e)}"
+            update_status["in_progress"] = False
+            raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        update_status["error"] = str(e)
+        update_status["in_progress"] = False
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/update/install")
+async def install_update(current_user: User = Depends(require_admin)):
+    """Install downloaded update"""
+    global update_status
+    import tarfile
+    import subprocess
+    from license_manager import license_manager
+
+    if not update_status.get("package_path"):
+        raise HTTPException(status_code=400, detail="No update downloaded")
+
+    package_path = Path(update_status["package_path"])
+    if not package_path.exists():
+        raise HTTPException(status_code=400, detail="Update package not found")
+
+    try:
+        update_status["stage"] = "installing"
+        update_status["progress"] = 55
+
+        # Extract to temp directory
+        extract_dir = Path("/tmp/olt-manager-update-extract")
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
+        extract_dir.mkdir()
+
+        update_status["progress"] = 60
+
+        # Extract the tarball
+        with tarfile.open(package_path, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+
+        update_status["stage"] = "backing_up"
+        update_status["progress"] = 70
+
+        # Create backup of current installation
+        backup_dir = Path("/root/olt-manager-backup")
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+        # Backup backend
+        shutil.copytree("/root/olt-manager/backend", backup_dir / "backend")
+
+        update_status["stage"] = "applying"
+        update_status["progress"] = 80
+
+        # Apply backend update
+        extracted_backend = extract_dir / "backend"
+        if extracted_backend.exists():
+            # Copy new backend files (preserve venv)
+            for item in extracted_backend.iterdir():
+                if item.name != "venv" and item.name != "__pycache__":
+                    dest = Path("/root/olt-manager/backend") / item.name
+                    if item.is_dir():
+                        if dest.exists():
+                            shutil.rmtree(dest)
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+
+        # Apply frontend update
+        extracted_frontend = extract_dir / "frontend" / "build"
+        if extracted_frontend.exists():
+            # Copy to nginx directory (both locations for compatibility)
+            for nginx_dir in [Path("/var/www/olt-manager"), Path("/var/www/html")]:
+                if nginx_dir.exists():
+                    for item in extracted_frontend.iterdir():
+                        dest = nginx_dir / item.name
+                        if item.is_dir():
+                            if dest.exists():
+                                shutil.rmtree(dest)
+                            shutil.copytree(item, dest)
+                        else:
+                            shutil.copy2(item, dest)
+
+        # Update version file with new version
+        update_status["progress"] = 85
+        new_version = update_status.get("new_version", "1.1.0")
+        version_file = Path("/root/olt-manager/backend/VERSION")
+        version_file.write_text(new_version)
+        logger.info(f"Updated VERSION file to {new_version}")
+
+        update_status["stage"] = "restarting"
+        update_status["progress"] = 90
+
+        # Create a script to restart the service after response is sent
+        restart_script = Path("/tmp/restart-olt-manager.sh")
+        restart_script.write_text("""#!/bin/bash
+sleep 2
+systemctl restart olt-manager 2>/dev/null || (
+    cd /root/olt-manager/backend
+    pkill -f "uvicorn main:app" 2>/dev/null
+    sleep 1
+    source venv/bin/activate
+    nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/olt-manager.log 2>&1 &
+)
+""")
+        restart_script.chmod(0o755)
+
+        # Run restart script in background
+        subprocess.Popen(["/bin/bash", str(restart_script)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+
+        update_status["stage"] = "completed"
+        update_status["progress"] = 100
+        update_status["completed"] = True
+        update_status["in_progress"] = False
+
+        # Cleanup
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
+
+        return {
+            "success": True,
+            "message": "Update installed successfully. Service is restarting...",
+            "restart_in_seconds": 3
+        }
+
+    except Exception as e:
+        update_status["error"] = str(e)
+        update_status["in_progress"] = False
+        logger.error(f"Update installation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Installation failed: {str(e)}")
+
+
+@app.post("/api/update/rollback")
+async def rollback_update(current_user: User = Depends(require_admin)):
+    """Rollback to previous version"""
+    import subprocess
+
+    backup_dir = Path("/root/olt-manager-backup")
+    if not backup_dir.exists():
+        raise HTTPException(status_code=400, detail="No backup available for rollback")
+
+    try:
+        # Restore backend
+        backend_backup = backup_dir / "backend"
+        if backend_backup.exists():
+            backend_dest = Path("/root/olt-manager/backend")
+            for item in backend_backup.iterdir():
+                if item.name != "venv" and item.name != "__pycache__":
+                    dest = backend_dest / item.name
+                    if item.is_dir():
+                        if dest.exists():
+                            shutil.rmtree(dest)
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+
+        # Restart service
+        restart_script = Path("/tmp/restart-olt-manager.sh")
+        subprocess.Popen(["/bin/bash", str(restart_script)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+
+        return {
+            "success": True,
+            "message": "Rollback completed. Service is restarting..."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {str(e)}")
+
+
+# ============ Dev Server / Publisher API ============
+
+def is_dev_server():
+    """Check if this is the development server"""
+    dev_marker = Path("/root/olt-manager/backend/.dev_server")
+    return dev_marker.exists()
+
+@app.get("/api/dev/status")
+async def get_dev_status():
+    """Check if this is a development server - for showing publish UI"""
+    from license_manager import SOFTWARE_VERSION
+    return {
+        "is_dev_server": is_dev_server(),
+        "current_version": SOFTWARE_VERSION
+    }
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class PublishRequest(PydanticBaseModel):
+    version: str
+    changelog: str
+
+@app.post("/api/dev/publish")
+async def publish_update(
+    request: PublishRequest,
+    current_user: User = Depends(require_admin)
+):
+    """Build and publish update to license server (dev server only)"""
+    import subprocess
+    import tarfile
+    from license_manager import LICENSE_SERVER_URL
+
+    version = request.version
+    changelog = request.changelog
+
+    if not is_dev_server():
+        raise HTTPException(status_code=403, detail="This feature is only available on development server")
+
+    try:
+        result_steps = []
+
+        # Step 1: Update VERSION file
+        version_file = Path("/root/olt-manager/backend/VERSION")
+        version_file.write_text(version)
+        result_steps.append(f"Updated VERSION to {version}")
+
+        # Step 2: Build frontend
+        frontend_dir = Path("/root/olt-manager/frontend")
+        build_result = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=str(frontend_dir),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "DISABLE_ESLINT_PLUGIN": "true", "CI": "false"}
+        )
+        if build_result.returncode != 0:
+            raise Exception(f"Frontend build failed: {build_result.stderr}")
+        result_steps.append("Frontend built successfully")
+
+        # Step 3: Create tar.gz package
+        package_name = f"olt-manager-v{version}.tar.gz"
+        package_path = Path(f"/tmp/{package_name}")
+
+        with tarfile.open(package_path, "w:gz") as tar:
+            # Add backend (excluding venv, __pycache__, .dev_server)
+            backend_dir = Path("/root/olt-manager/backend")
+            for item in backend_dir.iterdir():
+                if item.name not in ["venv", "__pycache__", ".dev_server", "uploads"]:
+                    tar.add(item, arcname=f"backend/{item.name}")
+
+            # Add frontend build
+            frontend_build = Path("/root/olt-manager/frontend/build")
+            if frontend_build.exists():
+                tar.add(frontend_build, arcname="frontend/build")
+
+        package_size = package_path.stat().st_size / (1024 * 1024)  # MB
+        result_steps.append(f"Package created: {package_name} ({package_size:.2f} MB)")
+
+        # Step 4: Upload to license server
+        with open(package_path, 'rb') as f:
+            files = {'package': (package_name, f, 'application/gzip')}
+            data = {
+                'version': version,
+                'changelog': changelog
+            }
+
+            response = requests.post(
+                f"{LICENSE_SERVER_URL}/api/upload-update",
+                files=files,
+                data=data,
+                timeout=300
+            )
+
+        if response.status_code != 200:
+            try:
+                error_msg = response.json().get('error', 'Upload failed')
+            except:
+                error_msg = response.text or f"HTTP {response.status_code}"
+            raise Exception(f"Upload failed: {error_msg}")
+
+        result_steps.append(f"Uploaded to license server successfully")
+
+        # Cleanup
+        package_path.unlink()
+
+        return {
+            "success": True,
+            "version": version,
+            "message": f"Version {version} published successfully!",
+            "steps": result_steps
+        }
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Publish failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============ Settings API ============

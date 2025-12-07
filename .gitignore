@@ -38,3 +38,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Dev server marker (only on development server)
+backend/.dev_server

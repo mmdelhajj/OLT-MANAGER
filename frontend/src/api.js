@@ -84,6 +84,16 @@ export const updateSettings = (data) => api.put('/api/settings', data);
 export const getLicenseInfo = () => api.get('/api/license');
 export const checkForUpdates = () => api.get('/api/update-check');
 
+// Auto-Update
+export const getUpdateStatus = () => api.get('/api/update/status');
+export const downloadUpdate = () => api.post('/api/update/download');
+export const installUpdate = () => api.post('/api/update/install');
+export const rollbackUpdate = () => api.post('/api/update/rollback');
+
+// Dev Server (Publisher)
+export const getDevStatus = () => api.get('/api/dev/status');
+export const publishUpdate = (version, changelog) => api.post('/api/dev/publish', { version, changelog }, { timeout: 600000 });
+
 // Traffic
 export const getOltTraffic = (oltId) => api.get(`/api/olts/${oltId}/traffic`);
 export const getAllTraffic = () => api.get('/api/traffic/all');

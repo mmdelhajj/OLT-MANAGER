@@ -29,8 +29,18 @@ OFFLINE_GRACE_DAYS = 7
 # How often to check license (seconds) - 5 minutes
 LICENSE_CHECK_INTERVAL = 300
 
-# Current software version
-SOFTWARE_VERSION = "1.0.0"
+# Current software version - read from version file if exists
+VERSION_FILE = Path("/root/olt-manager/backend/VERSION")
+def get_software_version():
+    """Get software version from file or default"""
+    try:
+        if VERSION_FILE.exists():
+            return VERSION_FILE.read_text().strip()
+    except:
+        pass
+    return "1.0.0"
+
+SOFTWARE_VERSION = get_software_version()
 
 
 class LicenseError(Exception):

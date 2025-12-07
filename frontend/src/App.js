@@ -1525,6 +1525,15 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
   const [newRecipient, setNewRecipient] = useState({ name: '', phone: '' });
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const [updating, setUpdating] = useState(false);
+
+  // Dev Server / Publisher states
+  const [isDevServer, setIsDevServer] = useState(false);
+  const [publishVersion, setPublishVersion] = useState('');
+  const [publishChangelog, setPublishChangelog] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState(null);
 
   // Update activeTab when defaultTab changes (when modal opens with specific tab)
   useEffect(() => {
@@ -1532,6 +1541,25 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       setActiveTab(defaultTab);
     }
   }, [isOpen, defaultTab]);
+
+  // Check if this is dev server
+  useEffect(() => {
+    const checkDevServer = async () => {
+      try {
+        const response = await api.getDevStatus();
+        setIsDevServer(response.data.is_dev_server);
+        if (response.data.current_version) {
+          // Suggest next version
+          const parts = response.data.current_version.split('.');
+          parts[2] = parseInt(parts[2] || 0) + 1;
+          setPublishVersion(parts.join('.'));
+        }
+      } catch (error) {
+        setIsDevServer(false);
+      }
+    };
+    checkDevServer();
+  }, []);
 
   useEffect(() => {
     if (settings) {
@@ -1570,6 +1598,92 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       alert('Failed to check for updates: ' + (error.response?.data?.detail || error.message));
     } finally {
       setCheckingUpdate(false);
+    }
+  };
+
+  const handleAutoUpdate = async () => {
+    if (!window.confirm('This will download and install the update automatically. The system will restart after installation. Continue?')) {
+      return;
+    }
+
+    setUpdating(true);
+    setUpdateStatus({ stage: 'preparing', progress: 0 });
+
+    try {
+      // Step 1: Download update
+      setUpdateStatus({ stage: 'downloading', progress: 10 });
+      const downloadResponse = await api.downloadUpdate();
+
+      if (!downloadResponse.data.success) {
+        throw new Error(downloadResponse.data.message || 'Download failed');
+      }
+
+      setUpdateStatus({ stage: 'downloaded', progress: 50, version: downloadResponse.data.version });
+
+      // Step 2: Install update
+      setUpdateStatus({ stage: 'installing', progress: 60 });
+      const installResponse = await api.installUpdate();
+
+      if (!installResponse.data.success) {
+        throw new Error(installResponse.data.message || 'Installation failed');
+      }
+
+      setUpdateStatus({ stage: 'restarting', progress: 95 });
+
+      // Wait a moment then show completion
+      setTimeout(() => {
+        setUpdateStatus({ stage: 'completed', progress: 100, message: 'Update installed! Reloading page...' });
+
+        // Reload page after a few seconds
+        setTimeout(() => {
+          window.location.reload();
+        }, 3000);
+      }, 2000);
+
+    } catch (error) {
+      console.error('Update failed:', error);
+      setUpdateStatus({
+        stage: 'error',
+        progress: 0,
+        error: error.response?.data?.detail || error.message || 'Update failed'
+      });
+      setUpdating(false);
+    }
+  };
+
+  // Handle publishing update to customers (dev server only)
+  const handlePublish = async () => {
+    if (!publishVersion || !publishChangelog) {
+      alert('Please enter version number and changelog');
+      return;
+    }
+
+    if (!window.confirm(`Publish version ${publishVersion} to all customers?\n\nChangelog:\n${publishChangelog}`)) {
+      return;
+    }
+
+    setPublishing(true);
+    setPublishResult(null);
+
+    try {
+      const response = await api.publishUpdate(publishVersion, publishChangelog);
+      setPublishResult({
+        success: true,
+        message: response.data.message,
+        steps: response.data.steps
+      });
+      // Increment version for next publish
+      const parts = publishVersion.split('.');
+      parts[2] = parseInt(parts[2] || 0) + 1;
+      setPublishVersion(parts.join('.'));
+      setPublishChangelog('');
+    } catch (error) {
+      setPublishResult({
+        success: false,
+        message: error.response?.data?.detail || error.message || 'Publish failed'
+      });
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -2219,21 +2333,53 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                     <p className="text-sm text-blue-100">{updateInfo.update.changelog}</p>
                   </div>
                 )}
-                {updateInfo.update.download_url && (
-                  <div className="mt-3">
-                    <a
-                      href={updateInfo.update.download_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center px-4 py-2 bg-white text-blue-600 rounded-lg font-medium hover:bg-blue-50 transition-colors"
-                    >
-                      <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      Download Update
-                    </a>
+
+                {/* Update Progress */}
+                {updating && updateStatus && (
+                  <div className="mt-4 p-4 bg-white/10 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium">
+                        {updateStatus.stage === 'preparing' && 'Preparing update...'}
+                        {updateStatus.stage === 'downloading' && 'Downloading update...'}
+                        {updateStatus.stage === 'downloaded' && 'Download complete'}
+                        {updateStatus.stage === 'installing' && 'Installing update...'}
+                        {updateStatus.stage === 'restarting' && 'Restarting service...'}
+                        {updateStatus.stage === 'completed' && 'Update completed!'}
+                        {updateStatus.stage === 'error' && 'Update failed'}
+                      </span>
+                      <span className="text-sm">{updateStatus.progress}%</span>
+                    </div>
+                    <div className="w-full bg-white/20 rounded-full h-2">
+                      <div
+                        className={`h-2 rounded-full transition-all duration-300 ${
+                          updateStatus.stage === 'error' ? 'bg-red-400' :
+                          updateStatus.stage === 'completed' ? 'bg-green-400' : 'bg-white'
+                        }`}
+                        style={{ width: `${updateStatus.progress}%` }}
+                      ></div>
+                    </div>
+                    {updateStatus.error && (
+                      <p className="mt-2 text-red-200 text-sm">{updateStatus.error}</p>
+                    )}
+                    {updateStatus.stage === 'completed' && (
+                      <p className="mt-2 text-green-200 text-sm">Page will reload automatically...</p>
+                    )}
                   </div>
                 )}
+
+                {/* Update Now Button - Always show when not updating */}
+                <div className="mt-4">
+                  <button
+                    onClick={handleAutoUpdate}
+                    disabled={updating}
+                    className="inline-flex items-center px-5 py-2.5 bg-white text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-colors shadow-lg disabled:opacity-50"
+                  >
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    {updating ? 'Updating...' : 'Update Now'}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -2275,6 +2421,88 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               )}
             </button>
           </div>
+
+          {/* Dev Server: Publish Update Section */}
+          {isDevServer && (
+            <div className="mt-6 bg-gradient-to-r from-purple-600 to-indigo-600 rounded-xl p-5 text-white">
+              <h4 className="font-bold text-lg mb-4 flex items-center">
+                <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+                Publish Update to Customers
+              </h4>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-purple-200 mb-1">Version Number</label>
+                  <input
+                    type="text"
+                    value={publishVersion}
+                    onChange={(e) => setPublishVersion(e.target.value)}
+                    placeholder="1.2.0"
+                    className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-purple-300 focus:outline-none focus:ring-2 focus:ring-white/30"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-purple-200 mb-1">Changelog</label>
+                  <textarea
+                    value={publishChangelog}
+                    onChange={(e) => setPublishChangelog(e.target.value)}
+                    placeholder="- Fixed bugs&#10;- Added new features&#10;- Improved performance"
+                    rows={4}
+                    className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-white placeholder-purple-300 focus:outline-none focus:ring-2 focus:ring-white/30 resize-none"
+                  />
+                </div>
+
+                {publishResult && (
+                  <div className={`p-3 rounded-lg ${publishResult.success ? 'bg-green-500/20 border border-green-400' : 'bg-red-500/20 border border-red-400'}`}>
+                    <p className="font-medium">{publishResult.success ? 'Success!' : 'Failed'}</p>
+                    <p className="text-sm">{publishResult.message}</p>
+                    {publishResult.steps && (
+                      <ul className="mt-2 text-sm space-y-1">
+                        {publishResult.steps.map((step, i) => (
+                          <li key={i} className="flex items-center">
+                            <svg className="w-4 h-4 mr-2 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            {step}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  onClick={handlePublish}
+                  disabled={publishing || !publishVersion || !publishChangelog}
+                  className="w-full py-3 bg-white text-purple-600 font-bold rounded-lg hover:bg-purple-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                >
+                  {publishing ? (
+                    <>
+                      <svg className="w-5 h-5 mr-2 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Building & Publishing...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      Build & Publish Update
+                    </>
+                  )}
+                </button>
+
+                <p className="text-xs text-purple-200 text-center">
+                  This will build frontend, create package, and upload to license server
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Modal>
