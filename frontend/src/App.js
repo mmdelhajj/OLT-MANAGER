@@ -2431,11 +2431,16 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
       }
     };
 
-    // Draw Download (TX from OLT = to customer) - Green
-    drawSmoothLine(txValues, '#22c55e', ['rgba(34, 197, 94, 0.4)', 'rgba(34, 197, 94, 0.02)']);
+    // rx = Download (green), tx = Upload (cyan)
+    // API returns rx_kbps as customer download traffic (bigger value)
+    const downloadValues = rxValues;
+    const uploadValues = txValues;
 
-    // Draw Upload (RX at OLT = from customer) - Cyan/Blue
-    drawSmoothLine(rxValues, '#06b6d4', ['rgba(6, 182, 212, 0.35)', 'rgba(6, 182, 212, 0.02)']);
+    // Draw Download - Green (the BIG number - rx)
+    drawSmoothLine(downloadValues, '#22c55e', ['rgba(34, 197, 94, 0.4)', 'rgba(34, 197, 94, 0.02)']);
+
+    // Draw Upload - Cyan/Blue (the small number - tx)
+    drawSmoothLine(uploadValues, '#06b6d4', ['rgba(6, 182, 212, 0.35)', 'rgba(6, 182, 212, 0.02)']);
 
     // Draw legend box
     const legendX = padding.left + 10;
@@ -2521,16 +2526,24 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
 
   if (!isOpen) return null;
 
-  // Calculate stats
-  const stats = data && data.data && data.data.length > 0 ? {
-    maxDownload: Math.max(...data.data.map(d => d.tx_kbps)),
-    maxUpload: Math.max(...data.data.map(d => d.rx_kbps)),
-    avgDownload: data.data.reduce((sum, d) => sum + d.tx_kbps, 0) / data.data.length,
-    avgUpload: data.data.reduce((sum, d) => sum + d.rx_kbps, 0) / data.data.length,
-    // Total data transferred (approximate based on samples)
-    totalDownload: data.data.reduce((sum, d) => sum + d.tx_kbps, 0) * 60 / 8 / 1024, // MB (assuming 60s intervals)
-    totalUpload: data.data.reduce((sum, d) => sum + d.rx_kbps, 0) * 60 / 8 / 1024, // MB
-  } : null;
+  // Calculate stats - ALWAYS use rx as Download (the bigger value from API)
+  // API returns rx_kbps as the larger value for uplink ports (customer download)
+  const stats = data && data.data && data.data.length > 0 ? (() => {
+    // rx_kbps = Download (from internet to customers - bigger)
+    // tx_kbps = Upload (from customers to internet - smaller)
+    const rxMax = Math.max(...data.data.map(d => d.rx_kbps));
+    const txMax = Math.max(...data.data.map(d => d.tx_kbps));
+    const rxSum = data.data.reduce((sum, d) => sum + d.rx_kbps, 0);
+    const txSum = data.data.reduce((sum, d) => sum + d.tx_kbps, 0);
+    return {
+      maxDownload: rxMax,
+      maxUpload: txMax,
+      avgDownload: rxSum / data.data.length,
+      avgUpload: txSum / data.data.length,
+      totalDownload: rxSum * 60 / 8 / 1024,
+      totalUpload: txSum * 60 / 8 / 1024
+    };
+  })() : null;
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`Traffic Monitor - ${entityName}`} size="xl">
@@ -2631,12 +2644,12 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
                   <div className="flex items-center gap-2 mb-1">
                     <span className="w-2 h-2 rounded-full bg-green-500"></span>
                     <span className="text-slate-300">Download:</span>
-                    <span className="text-green-400 font-bold">{formatBandwidth(tooltip.data.tx_kbps)}</span>
+                    <span className="text-green-400 font-bold">{formatBandwidth(tooltip.data.rx_kbps)}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-cyan-500"></span>
                     <span className="text-slate-300">Upload:</span>
-                    <span className="text-cyan-400 font-bold">{formatBandwidth(tooltip.data.rx_kbps)}</span>
+                    <span className="text-cyan-400 font-bold">{formatBandwidth(tooltip.data.tx_kbps)}</span>
                   </div>
                 </div>
               )}

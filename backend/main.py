@@ -2468,13 +2468,17 @@ def poll_port_traffic_snmp(ip: str, community: str = 'public') -> dict:
         timestamp = time.time()
 
         # Parse results - ifIndex starts at 1
+        # For UPLINK ports (like GE7), data flows are from the INTERNET perspective:
+        # - ifInOctets = data FROM internet TO OLT = Customer DOWNLOAD (big number)
+        # - ifOutOctets = data FROM OLT TO internet = Customer UPLOAD (small number)
+        # So we use ifInOctets as rx_bytes (Download) and ifOutOctets as tx_bytes (Upload)
         for i, (in_oct, out_oct) in enumerate(zip(in_octets, out_octets), start=1):
             try:
-                rx_bytes = int(in_oct.strip().split(':')[-1].strip())
-                tx_bytes = int(out_oct.strip().split(':')[-1].strip())
+                in_bytes = int(in_oct.strip().split(':')[-1].strip())
+                out_bytes = int(out_oct.strip().split(':')[-1].strip())
                 port_traffic[i] = {
-                    'rx_bytes': rx_bytes,
-                    'tx_bytes': tx_bytes,
+                    'rx_bytes': in_bytes,   # Customer Download = ifInOctets (data from internet)
+                    'tx_bytes': out_bytes,  # Customer Upload = ifOutOctets (data to internet)
                     'timestamp': timestamp
                 }
             except (ValueError, IndexError):

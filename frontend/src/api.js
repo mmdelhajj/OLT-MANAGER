@@ -59,6 +59,7 @@ export const uploadONUImage = (id, file) => {
   });
 };
 export const deleteONUImage = (id, imageIndex = 0) => api.delete(`/api/onus/${id}/image?image_index=${imageIndex}`);
+export const rebootONU = (id) => api.post(`/api/onus/${id}/reboot`);
 
 // Regions
 export const getRegions = () => api.get('/api/regions');
@@ -91,6 +92,11 @@ export const getOnuTrafficHistory = (onuId, range) => api.get(`/api/traffic/hist
 export const getPonTrafficHistory = (oltId, ponPort, range) => api.get(`/api/traffic/history/pon/${oltId}/${ponPort}?range=${range}`);
 export const getOltTrafficHistory = (oltId, range) => api.get(`/api/traffic/history/olt/${oltId}?range=${range}`);
 
+// OLT Ports
+export const getOltPorts = (oltId) => api.get(`/api/olts/${oltId}/ports`);
+export const getPortTrafficHistory = (oltId, portType, portNumber, range) =>
+  api.get(`/api/olts/${oltId}/ports/${portType}/${portNumber}/traffic?range=${range}`);
+
 // Diagrams (Splitter Simulator)
 export const getDiagrams = () => api.get('/api/diagrams');
 export const getDiagram = (id) => api.get(`/api/diagrams/${id}`);
@@ -98,7 +104,9 @@ export const createDiagram = (data) => api.post('/api/diagrams', data);
 export const updateDiagram = (id, data) => api.put(`/api/diagrams/${id}`, data);
 export const deleteDiagram = (id) => api.delete(`/api/diagrams/${id}`);
 
-// Generic get function
+// Generic functions
 export const get = (url) => api.get(url);
+export const put = (url, data) => api.put(url, data);
+export const post = (url, data) => api.post(url, data);
 
 export default api;

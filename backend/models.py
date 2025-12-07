@@ -146,6 +146,41 @@ class TrafficHistory(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class OLTPort(Base):
+    """OLT Port status model - tracks individual PON and SFP ports"""
+    __tablename__ = "olt_ports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    olt_id = Column(Integer, ForeignKey("olts.id"), nullable=False, index=True)
+    port_type = Column(String(10), nullable=False)  # 'pon', 'ge', 'xge'
+    port_number = Column(Integer, nullable=False)
+    if_index = Column(Integer, nullable=True)  # SNMP interface index
+    status = Column(String(10), default='unknown')  # 'up', 'down', 'unknown'
+    onu_count = Column(Integer, default=0)  # For PON ports
+    tx_power = Column(Float, nullable=True)  # Optical TX power in dBm
+    rx_power = Column(Float, nullable=True)  # Optical RX power in dBm
+    speed = Column(String(20), nullable=True)  # Port speed e.g. "1G", "10G"
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+    # Unique constraint
+    __table_args__ = (
+        {'sqlite_autoincrement': True},
+    )
+
+
+class PortTraffic(Base):
+    """Port traffic history for per-port bandwidth graphs"""
+    __tablename__ = "port_traffic"
+
+    id = Column(Integer, primary_key=True, index=True)
+    olt_id = Column(Integer, ForeignKey("olts.id"), nullable=False, index=True)
+    port_type = Column(String(10), nullable=False)  # 'pon', 'ge', 'xge'
+    port_number = Column(Integer, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    rx_kbps = Column(Float, default=0)  # Download rate
+    tx_kbps = Column(Float, default=0)  # Upload rate
+
+
 class Settings(Base):
     """System settings model"""
     __tablename__ = "settings"
