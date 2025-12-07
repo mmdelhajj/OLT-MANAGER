@@ -221,6 +221,71 @@ class OLTConnector:
         finally:
             client.close()
 
+    def reboot_onu(self, pon_port: int, onu_id: int) -> bool:
+        """Reboot an ONU via SSH CLI command"""
+        import time
+
+        # Create new connection for this operation
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        try:
+            client.connect(
+                hostname=self.ip,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+                timeout=10,
+                look_for_keys=False,
+                allow_agent=False
+            )
+
+            channel = client.invoke_shell(width=200, height=1000)
+            channel.settimeout(15)
+
+            # Helper to drain buffer
+            def drain():
+                time.sleep(0.3)
+                while channel.recv_ready():
+                    channel.recv(65535)
+
+            # Wait for initial prompt
+            drain()
+
+            # Enter enable mode
+            channel.send("enable\n")
+            drain()
+            channel.send(self.password + "\n")
+            drain()
+
+            # Enter config mode
+            channel.send("config terminal\n")
+            drain()
+
+            # Enter interface epon mode
+            channel.send(f"interface epon 0/{pon_port}\n")
+            drain()
+
+            # Send reset command - VSOL EPON OLT command
+            # Format: reset onu auth onuid <onu-id>
+            channel.send(f"reset onu auth onuid {onu_id}\n")
+            time.sleep(1)
+            drain()
+
+            # Exit interface mode
+            channel.send("exit\n")
+            drain()
+
+            channel.close()
+            logger.info(f"Rebooted ONU 0/{pon_port}:{onu_id} on {self.ip}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to reboot ONU: {e}")
+            raise RuntimeError(f"Failed to reboot ONU: {e}")
+        finally:
+            client.close()
+
 
 class ConfigParser:
     """Parser for VSOL OLT configuration output"""
@@ -720,9 +785,11 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
 
 # SNMP OIDs for traffic counters (IF-MIB)
 # Uses 64-bit counters (ifHCInOctets/ifHCOutOctets) for accurate high-speed measurements
+# NOTE: From OLT perspective, IN = data received FROM customer (upload), OUT = data sent TO customer (download)
+# We swap them to show from CUSTOMER perspective: RX = download, TX = upload
 SNMP_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"          # Interface description (EPONxxONUyy)
-SNMP_IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"   # 64-bit RX bytes counter
-SNMP_IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10" # 64-bit TX bytes counter
+SNMP_IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"   # OLT IN = Customer Upload (TX)
+SNMP_IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10" # OLT OUT = Customer Download (RX)
 
 
 def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, Dict[str, int]]:
@@ -862,25 +929,29 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
 
         # Combine: ifIndex -> (pon, onu) -> MAC -> traffic data
         # Handle duplicate MACs: prefer entry with actual traffic over zero traffic
+        # IMPORTANT: Swap RX/TX to show from CUSTOMER perspective
+        # - OLT ifHCInOctets (rx_by_index) = data received BY OLT = Customer UPLOAD
+        # - OLT ifHCOutOctets (tx_by_index) = data sent BY OLT = Customer DOWNLOAD
         for if_index, (pon_port, onu_id) in onu_interfaces.items():
             mac = pon_onu_to_mac.get((pon_port, onu_id))
             if mac:
-                rx_bytes = rx_by_index.get(if_index, 0)
-                tx_bytes = tx_by_index.get(if_index, 0)
+                # Swap: OLT's IN becomes customer's TX (upload), OLT's OUT becomes customer's RX (download)
+                customer_tx_bytes = rx_by_index.get(if_index, 0)  # OLT IN = Customer Upload
+                customer_rx_bytes = tx_by_index.get(if_index, 0)  # OLT OUT = Customer Download
 
                 # If MAC already exists, only overwrite if new entry has more traffic
                 # This handles cases where same MAC is registered at multiple (pon, onu) locations
                 if mac in traffic_data:
                     existing = traffic_data[mac]
                     existing_total = existing['rx_bytes'] + existing['tx_bytes']
-                    new_total = rx_bytes + tx_bytes
+                    new_total = customer_rx_bytes + customer_tx_bytes
                     if new_total <= existing_total:
                         # Keep existing entry with more traffic
                         continue
 
                 traffic_data[mac] = {
-                    'rx_bytes': rx_bytes,
-                    'tx_bytes': tx_bytes,
+                    'rx_bytes': customer_rx_bytes,  # Customer Download
+                    'tx_bytes': customer_tx_bytes,  # Customer Upload
                     'if_index': int(if_index),
                     'pon_port': pon_port,
                     'onu_id': onu_id
