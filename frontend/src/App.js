@@ -1523,6 +1523,8 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
   const [testingRecipient, setTestingRecipient] = useState(null);
   const [activeTab, setActiveTab] = useState('general');
   const [newRecipient, setNewRecipient] = useState({ name: '', phone: '' });
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
 
   useEffect(() => {
     if (settings) {
@@ -1548,6 +1550,21 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       });
     }
   }, [settings]);
+
+  const handleCheckForUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const response = await api.checkForUpdates();
+      setUpdateInfo(response.data);
+      if (!response.data.update_available) {
+        alert('You are running the latest version (v' + response.data.current_version + ')');
+      }
+    } catch (error) {
+      alert('Failed to check for updates: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   const addRecipient = () => {
     if (!newRecipient.name.trim() || !newRecipient.phone.trim()) {
@@ -2160,6 +2177,96 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               <span className="text-gray-600 text-sm">Hardware ID</span>
               <span className="font-mono text-xs text-gray-500">{licenseInfo?.hardware_id || 'N/A'}</span>
             </div>
+          </div>
+
+          {/* Check for Updates */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Software Updates
+            </h4>
+
+            {/* Update Available Banner */}
+            {updateInfo?.update_available && updateInfo.update && (
+              <div className="mb-4 p-4 bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl text-white">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center">
+                    <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center mr-3">
+                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h5 className="font-bold text-lg">Update Available!</h5>
+                      <p className="text-blue-100 text-sm">
+                        Version {updateInfo.update.latest_version} is available (You have v{updateInfo.current_version})
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                {updateInfo.update.changelog && (
+                  <div className="mt-3 p-3 bg-white/10 rounded-lg">
+                    <p className="text-sm font-medium mb-1">What's New:</p>
+                    <p className="text-sm text-blue-100">{updateInfo.update.changelog}</p>
+                  </div>
+                )}
+                {updateInfo.update.download_url && (
+                  <div className="mt-3">
+                    <a
+                      href={updateInfo.update.download_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center px-4 py-2 bg-white text-blue-600 rounded-lg font-medium hover:bg-blue-50 transition-colors"
+                    >
+                      <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download Update
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* No Update Available Message */}
+            {updateInfo && !updateInfo.update_available && (
+              <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-xl">
+                <div className="flex items-center">
+                  <svg className="w-6 h-6 text-green-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <div>
+                    <p className="font-medium text-green-800">You're up to date!</p>
+                    <p className="text-sm text-green-600">Version {updateInfo.current_version} is the latest version.</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={handleCheckForUpdate}
+              disabled={checkingUpdate}
+              className="w-full flex items-center justify-center px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {checkingUpdate ? (
+                <>
+                  <svg className="w-5 h-5 mr-2 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Checking for Updates...
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Check for Updates
+                </>
+              )}
+            </button>
           </div>
         </div>
       )}
