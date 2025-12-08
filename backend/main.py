@@ -4428,6 +4428,72 @@ async def get_license_info(user: User = Depends(require_auth)):
     return info
 
 
+# ============ Remote Access Tunnel API ============
+
+try:
+    from tunnel_manager import tunnel_manager
+    TUNNEL_AVAILABLE = True
+except ImportError:
+    TUNNEL_AVAILABLE = False
+    tunnel_manager = None
+
+
+@app.get("/api/tunnel/status")
+def get_tunnel_status(current_user: User = Depends(get_current_user)):
+    """Get remote access tunnel status"""
+    if not TUNNEL_AVAILABLE or not tunnel_manager:
+        return {"available": False, "error": "Tunnel feature not available"}
+
+    status = tunnel_manager.get_status()
+    status["available"] = True
+    return status
+
+
+@app.post("/api/tunnel/enable")
+def enable_tunnel(current_user: User = Depends(get_current_user)):
+    """Enable remote access tunnel (admin only)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not TUNNEL_AVAILABLE or not tunnel_manager:
+        raise HTTPException(status_code=503, detail="Tunnel feature not available")
+
+    result = tunnel_manager.enable_tunnel()
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to enable tunnel"))
+
+    return result
+
+
+@app.post("/api/tunnel/disable")
+def disable_tunnel(current_user: User = Depends(get_current_user)):
+    """Disable remote access tunnel (admin only)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not TUNNEL_AVAILABLE or not tunnel_manager:
+        raise HTTPException(status_code=503, detail="Tunnel feature not available")
+
+    result = tunnel_manager.disable_tunnel()
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to disable tunnel"))
+
+    return result
+
+
+@app.delete("/api/tunnel")
+def delete_tunnel(current_user: User = Depends(get_current_user)):
+    """Delete tunnel completely (admin only)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not TUNNEL_AVAILABLE or not tunnel_manager:
+        raise HTTPException(status_code=503, detail="Tunnel feature not available")
+
+    result = tunnel_manager.delete_tunnel()
+    return result
+
+
 # ============ Health Check ============
 
 @app.get("/api/health")

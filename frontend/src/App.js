@@ -1535,6 +1535,11 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState(null);
 
+  // Remote Access Tunnel states
+  const [tunnelStatus, setTunnelStatus] = useState(null);
+  const [tunnelLoading, setTunnelLoading] = useState(false);
+  const [tunnelError, setTunnelError] = useState(null);
+
   // Update activeTab when defaultTab changes (when modal opens with specific tab)
   useEffect(() => {
     if (isOpen) {
@@ -1585,6 +1590,66 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       });
     }
   }, [settings]);
+
+  // Fetch tunnel status when tunnel tab is selected
+  const fetchTunnelStatus = async () => {
+    try {
+      setTunnelLoading(true);
+      setTunnelError(null);
+      const response = await api.getTunnelStatus();
+      setTunnelStatus(response.data);
+    } catch (error) {
+      if (error.response?.status === 501) {
+        setTunnelStatus({ available: false, message: 'Remote access feature not available on this installation' });
+      } else {
+        setTunnelError(error.response?.data?.detail || 'Failed to get tunnel status');
+      }
+    } finally {
+      setTunnelLoading(false);
+    }
+  };
+
+  const handleEnableTunnel = async () => {
+    try {
+      setTunnelLoading(true);
+      setTunnelError(null);
+      const response = await api.enableTunnel();
+      if (response.data.success) {
+        setTunnelStatus({ ...tunnelStatus, running: true, url: response.data.url, subdomain: response.data.subdomain });
+        await fetchTunnelStatus();
+      } else {
+        setTunnelError(response.data.error || 'Failed to enable tunnel');
+      }
+    } catch (error) {
+      setTunnelError(error.response?.data?.detail || error.response?.data?.error || 'Failed to enable tunnel');
+    } finally {
+      setTunnelLoading(false);
+    }
+  };
+
+  const handleDisableTunnel = async () => {
+    try {
+      setTunnelLoading(true);
+      setTunnelError(null);
+      const response = await api.disableTunnel();
+      if (response.data.success) {
+        await fetchTunnelStatus();
+      } else {
+        setTunnelError(response.data.error || 'Failed to disable tunnel');
+      }
+    } catch (error) {
+      setTunnelError(error.response?.data?.detail || 'Failed to disable tunnel');
+    } finally {
+      setTunnelLoading(false);
+    }
+  };
+
+  // Fetch tunnel status when tab changes to tunnel
+  useEffect(() => {
+    if (activeTab === 'tunnel') {
+      fetchTunnelStatus();
+    }
+  }, [activeTab]);
 
   const handleCheckForUpdate = async () => {
     setCheckingUpdate(true);
@@ -1802,6 +1867,12 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
           onClick={() => setActiveTab('license')}
         >
           License
+        </button>
+        <button
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'tunnel' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          onClick={() => setActiveTab('tunnel')}
+        >
+          Remote Access
         </button>
       </div>
 
@@ -2502,6 +2573,157 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                 </p>
               </div>
             </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'tunnel' && (
+        <div className="space-y-4">
+          {/* Remote Access Header */}
+          <div className="bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl p-5 text-white">
+            <div className="flex items-center mb-3">
+              <svg className="w-8 h-8 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <h4 className="font-bold text-lg">Remote Access</h4>
+                <p className="text-cyan-100 text-sm">Access your OLT Manager from anywhere via secure tunnel</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Loading State */}
+          {tunnelLoading && (
+            <div className="flex items-center justify-center py-8">
+              <svg className="w-8 h-8 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span className="ml-3 text-gray-600">Loading tunnel status...</span>
+            </div>
+          )}
+
+          {/* Error State */}
+          {tunnelError && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-xl">
+              <div className="flex items-center">
+                <svg className="w-6 h-6 text-red-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <p className="font-medium text-red-800">Error</p>
+                  <p className="text-sm text-red-600">{tunnelError}</p>
+                </div>
+              </div>
+              <button
+                onClick={fetchTunnelStatus}
+                className="mt-3 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Not Available State */}
+          {!tunnelLoading && tunnelStatus?.available === false && (
+            <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl">
+              <div className="flex items-center">
+                <svg className="w-6 h-6 text-gray-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                </svg>
+                <p className="text-gray-600">{tunnelStatus.message || 'Remote access feature is not available'}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Tunnel Status */}
+          {!tunnelLoading && !tunnelError && tunnelStatus && tunnelStatus.available !== false && (
+            <>
+              {/* Status Card */}
+              <div className={`p-4 rounded-xl border ${tunnelStatus.running ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center">
+                    <div className={`w-4 h-4 rounded-full mr-3 ${tunnelStatus.running ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                    <div>
+                      <p className="font-semibold text-gray-800">
+                        {tunnelStatus.running ? 'Tunnel Active' : 'Tunnel Inactive'}
+                      </p>
+                      <p className="text-sm text-gray-500">
+                        {tunnelStatus.running ? 'Remote access is enabled' : 'Click enable to start remote access'}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={tunnelStatus.running ? handleDisableTunnel : handleEnableTunnel}
+                    disabled={tunnelLoading}
+                    className={`px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 ${
+                      tunnelStatus.running
+                        ? 'bg-red-100 text-red-700 hover:bg-red-200'
+                        : 'bg-green-600 text-white hover:bg-green-700'
+                    }`}
+                  >
+                    {tunnelLoading ? 'Please wait...' : (tunnelStatus.running ? 'Disable' : 'Enable')}
+                  </button>
+                </div>
+              </div>
+
+              {/* Active Tunnel Info */}
+              {tunnelStatus.running && tunnelStatus.url && (
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                  <h5 className="font-semibold text-blue-800 mb-3 flex items-center">
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                    Your Remote Access URL
+                  </h5>
+                  <div className="bg-white p-3 rounded-lg border border-blue-100">
+                    <div className="flex items-center justify-between">
+                      <a
+                        href={tunnelStatus.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 font-mono text-lg break-all"
+                      >
+                        {tunnelStatus.url}
+                      </a>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(tunnelStatus.url);
+                          alert('URL copied to clipboard!');
+                        }}
+                        className="ml-3 p-2 bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 transition-colors flex-shrink-0"
+                        title="Copy URL"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-sm text-blue-600 mt-2">
+                    Share this URL to access your OLT Manager from anywhere in the world.
+                  </p>
+                </div>
+              )}
+
+              {/* Info Box */}
+              <div className="p-4 bg-cyan-50 border border-cyan-200 rounded-xl">
+                <div className="flex items-start">
+                  <svg className="w-6 h-6 text-cyan-600 mt-0.5 mr-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                  </svg>
+                  <div>
+                    <p className="font-medium text-cyan-800">How Remote Access Works</p>
+                    <ul className="text-sm text-cyan-700 mt-2 space-y-1 list-disc ml-4">
+                      <li>Creates a secure encrypted tunnel via Cloudflare</li>
+                      <li>No need to open ports or configure firewall</li>
+                      <li>Works from any network, even behind NAT</li>
+                      <li>Your unique subdomain: <span className="font-mono">{tunnelStatus.subdomain || 'xxxxxx'}.olt.mes.net.lb</span></li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}

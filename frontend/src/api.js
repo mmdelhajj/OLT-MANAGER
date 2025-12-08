@@ -115,6 +115,12 @@ export const createDiagram = (data) => api.post('/api/diagrams', data);
 export const updateDiagram = (id, data) => api.put(`/api/diagrams/${id}`, data);
 export const deleteDiagram = (id) => api.delete(`/api/diagrams/${id}`);
 
+// Remote Access Tunnel
+export const getTunnelStatus = () => api.get('/api/tunnel/status');
+export const enableTunnel = () => api.post('/api/tunnel/enable', {}, { timeout: 120000 });
+export const disableTunnel = () => api.post('/api/tunnel/disable');
+export const deleteTunnel = () => api.delete('/api/tunnel');
+
 // Generic functions
 export const get = (url) => api.get(url);
 export const put = (url, data) => api.put(url, data);

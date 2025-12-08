@@ -238,6 +238,37 @@ setup_frontend() {
     print_success "Frontend built and deployed"
 }
 
+# Install cloudflared for remote access tunnel
+install_cloudflared() {
+    print_status "Installing cloudflared for remote access..."
+
+    # Check if already installed
+    if command -v cloudflared &> /dev/null; then
+        print_status "cloudflared already installed"
+        return 0
+    fi
+
+    # Detect architecture
+    ARCH=$(uname -m)
+    if [ "$ARCH" == "x86_64" ]; then
+        ARCH="amd64"
+    elif [ "$ARCH" == "aarch64" ]; then
+        ARCH="arm64"
+    fi
+
+    # Download and install cloudflared
+    CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb"
+
+    wget -q -O /tmp/cloudflared.deb "$CLOUDFLARED_URL" 2>/dev/null
+    if [ -f /tmp/cloudflared.deb ]; then
+        dpkg -i /tmp/cloudflared.deb > /dev/null 2>&1 || apt-get install -f -y > /dev/null 2>&1
+        rm -f /tmp/cloudflared.deb
+        print_success "cloudflared installed"
+    else
+        print_warning "Could not download cloudflared (optional for remote access)"
+    fi
+}
+
 # Configure Nginx
 setup_nginx() {
     print_status "Configuring Nginx..."
@@ -440,6 +471,7 @@ main() {
     setup_repository
     setup_backend
     setup_frontend
+    install_cloudflared
     setup_nginx
     setup_service
     setup_firewall
