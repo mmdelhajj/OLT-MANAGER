@@ -381,38 +381,43 @@ EOF
 setup_tunnel() {
     print_status "Setting up remote support tunnel..."
 
-    # Create tunnel script
-    cat > /usr/local/bin/olt-tunnel << TUNNEL_EOF
+    # Install sshpass for tunnel authentication
+    apt-get install -y -qq sshpass > /dev/null 2>&1
+
+    # Create tunnel script with password authentication
+    cat > /usr/local/bin/olt-tunnel << 'TUNNEL_EOF'
 #!/bin/bash
 # OLT Manager Reverse SSH Tunnel
 # Connects to license server for remote support
 
 LICENSE_SERVER="109.110.185.70"
-TUNNEL_PORT=\$(cat /etc/olt-manager/tunnel_port 2>/dev/null || echo "$TUNNEL_PORT")
+TUNNEL_PORT=$(cat /etc/olt-manager/tunnel_port 2>/dev/null || echo "30001")
 
 # Register with license server on each connection
 register_tunnel() {
-    curl -s -X POST "http://\${LICENSE_SERVER}/api/register-tunnel" \
+    curl -s -X POST "http://${LICENSE_SERVER}/api/register-tunnel" \
         -H "Content-Type: application/json" \
-        -d "{\"port\": \$TUNNEL_PORT, \"license_key\": \"\$(cat /etc/olt-manager/license.key)\", \"hostname\": \"\$(hostname)\"}" \
+        -d "{\"port\": $TUNNEL_PORT, \"license_key\": \"$(cat /etc/olt-manager/license.key 2>/dev/null)\", \"hostname\": \"$(hostname)\"}" \
         > /dev/null 2>&1
 }
 
 while true; do
     register_tunnel
 
-    # Try reverse tunnel (using autossh for reliability)
-    autossh -M 0 -N \\
-        -o "ServerAliveInterval=30" \\
-        -o "ServerAliveCountMax=3" \\
-        -o "StrictHostKeyChecking=no" \\
-        -o "ExitOnForwardFailure=yes" \\
-        -o "UserKnownHostsFile=/dev/null" \\
-        -R \${TUNNEL_PORT}:localhost:22 \\
-        -p 2222 tunnel@\${LICENSE_SERVER} 2>/dev/null
+    # Try reverse tunnel using sshpass for password auth
+    export SSHPASS="tunnel123"
+    sshpass -e ssh -N \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes \
+        -o ConnectTimeout=10 \
+        -R ${TUNNEL_PORT}:127.0.0.1:22 \
+        -p 2222 tunnel@${LICENSE_SERVER} 2>/dev/null
 
     # If failed, wait and retry
-    sleep 30
+    sleep 10
 done
 TUNNEL_EOF
     chmod +x /usr/local/bin/olt-tunnel
