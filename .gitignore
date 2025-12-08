@@ -41,3 +41,7 @@ Thumbs.db
 
 # Dev server marker (only on development server)
 backend/.dev_server
+
+# Debug scripts (may contain credentials)
+backend/debug_*.py
+backend/test_*.py
