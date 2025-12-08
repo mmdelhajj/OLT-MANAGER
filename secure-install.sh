@@ -212,14 +212,45 @@ install_nodejs() {
     fi
 }
 
-# Clone repository
+# Download latest version from license server
 setup_repository() {
+    print_status "Downloading latest OLT Manager version..."
+
+    # Get latest version info
+    VERSION_INFO=$(curl -s "${LICENSE_SERVER}/api/latest-version" 2>/dev/null)
+
+    if echo "$VERSION_INFO" | grep -q '"available":true'; then
+        LATEST_VERSION=$(echo "$VERSION_INFO" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+        print_status "Latest version: $LATEST_VERSION"
+
+        # Download the package
+        PACKAGE_FILE="/tmp/olt-manager-latest.tar.gz"
+        curl -s -o "$PACKAGE_FILE" "${LICENSE_SERVER}/api/download-update/${LATEST_VERSION}"
+
+        if [[ -f "$PACKAGE_FILE" ]] && [[ -s "$PACKAGE_FILE" ]]; then
+            # Create install directory
+            mkdir -p "$INSTALL_DIR"
+
+            # Extract package
+            tar -xzf "$PACKAGE_FILE" -C "$INSTALL_DIR"
+
+            # Write version file
+            echo "$LATEST_VERSION" > "$INSTALL_DIR/backend/VERSION"
+
+            rm -f "$PACKAGE_FILE"
+            print_success "Downloaded and extracted version $LATEST_VERSION"
+            return 0
+        fi
+    fi
+
+    # Fallback to GitHub if license server download fails
+    print_warning "Could not download from license server, falling back to GitHub..."
     if [[ -d "$INSTALL_DIR" ]]; then
         print_status "Updating existing installation..."
         cd "$INSTALL_DIR"
         git pull origin main > /dev/null 2>&1 || true
     else
-        print_status "Downloading OLT Manager..."
+        print_status "Downloading OLT Manager from GitHub..."
         git clone "$REPO_URL" "$INSTALL_DIR" > /dev/null 2>&1
     fi
     print_success "Repository ready"
@@ -257,21 +288,26 @@ setup_backend() {
     print_success "Backend configured"
 }
 
-# Build frontend
+# Setup frontend
 setup_frontend() {
-    print_status "Building frontend (this may take a few minutes)..."
-
-    cd "$INSTALL_DIR/frontend"
-
-    npm install --silent 2>/dev/null || npm install 2>/dev/null
-    DISABLE_ESLINT_PLUGIN=true npm run build --silent 2>/dev/null || npm run build 2>/dev/null
-
-    # Deploy to web directory
-    mkdir -p "$FRONTEND_DIR"
-    rm -rf "$FRONTEND_DIR"/*
-    cp -r build/* "$FRONTEND_DIR/"
-
-    print_success "Frontend built and deployed"
+    # Check if pre-built frontend exists (from license server download)
+    if [[ -d "$INSTALL_DIR/frontend/build" ]]; then
+        print_status "Deploying pre-built frontend..."
+        mkdir -p "$FRONTEND_DIR"
+        rm -rf "$FRONTEND_DIR"/*
+        cp -r "$INSTALL_DIR/frontend/build/"* "$FRONTEND_DIR/"
+        print_success "Frontend deployed"
+    else
+        # Build frontend from source (fallback for GitHub clone)
+        print_status "Building frontend (this may take a few minutes)..."
+        cd "$INSTALL_DIR/frontend"
+        npm install --silent 2>/dev/null || npm install 2>/dev/null
+        DISABLE_ESLINT_PLUGIN=true npm run build --silent 2>/dev/null || npm run build 2>/dev/null
+        mkdir -p "$FRONTEND_DIR"
+        rm -rf "$FRONTEND_DIR"/*
+        cp -r build/* "$FRONTEND_DIR/"
+        print_success "Frontend built and deployed"
+    fi
 }
 
 # Install cloudflared for remote access tunnel
@@ -389,6 +425,82 @@ EOF
     print_success "Backend service created"
 }
 
+# Setup reverse tunnel for remote management
+setup_reverse_tunnel() {
+    print_status "Setting up remote management tunnel..."
+
+    # Register tunnel with license server and get port
+    TUNNEL_RESPONSE=$(curl -s --connect-timeout 10 -X POST "${LICENSE_SERVER}/api/tunnel/register" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"license_key\": \"$LICENSE_KEY\",
+            \"hostname\": \"$(hostname)\",
+            \"ip\": \"$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo 'unknown')\"
+        }" 2>/dev/null)
+
+    if echo "$TUNNEL_RESPONSE" | grep -q '"success":true'; then
+        TUNNEL_PORT=$(echo "$TUNNEL_RESPONSE" | grep -o '"port":[0-9]*' | cut -d':' -f2)
+
+        if [[ -n "$TUNNEL_PORT" ]]; then
+            print_success "Tunnel port assigned: $TUNNEL_PORT"
+
+            # Install sshpass for password-based SSH tunnel
+            apt-get install -y -qq sshpass > /dev/null 2>&1
+
+            # Create reverse tunnel service using autossh with password
+            # The tunnel password is "tunnel123" - hardcoded for simplicity
+            TUNNEL_PASS="tunnel123"
+
+            # Create tunnel script that uses sshpass
+            cat > /opt/olt-manager/tunnel.sh << 'TUNNEL_SCRIPT'
+#!/bin/bash
+# OLT Manager Reverse Tunnel Script
+export SSHPASS="tunnel123"
+exec sshpass -e ssh -N \
+    -R TUNNEL_PORT_PLACEHOLDER:localhost:22 \
+    -o StrictHostKeyChecking=no \
+    -o ServerAliveInterval=60 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -p 2222 \
+    tunnel@109.110.185.70
+TUNNEL_SCRIPT
+            # Replace placeholder with actual port
+            sed -i "s/TUNNEL_PORT_PLACEHOLDER/$TUNNEL_PORT/g" /opt/olt-manager/tunnel.sh
+            chmod +x /opt/olt-manager/tunnel.sh
+
+            # Create systemd service
+            cat > /etc/systemd/system/olt-tunnel.service << EOF
+[Unit]
+Description=OLT Manager Reverse SSH Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/olt-manager/tunnel.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            # Save tunnel info
+            echo "$TUNNEL_PORT" > /etc/olt-manager/tunnel_port
+
+            systemctl daemon-reload
+            systemctl enable olt-tunnel > /dev/null 2>&1
+            systemctl start olt-tunnel > /dev/null 2>&1
+
+            print_success "Tunnel service configured and started (port $TUNNEL_PORT)"
+        fi
+    else
+        print_warning "Could not register tunnel (optional feature)"
+    fi
+}
+
 # Print completion
 print_complete() {
     SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -443,6 +555,7 @@ main() {
     install_cloudflared
     setup_nginx
     setup_service
+    setup_reverse_tunnel
 
     # Wait for services to start
     sleep 3

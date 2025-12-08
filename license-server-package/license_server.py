@@ -17,7 +17,7 @@ import termios
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session, Response, send_file
 from flask_sockets import Sockets
 from geventwebsocket import WebSocketError
 
@@ -380,6 +380,7 @@ DASHBOARD_HTML = '''
                             {% if lic.active %}
                             <button class="btn btn-danger btn-sm" onclick="revokeLicense('{{ lic.license_key }}')">Revoke</button>
                             {% endif %}
+                            <button class="btn btn-sm" style="background:#333;color:#fff;" onclick="deleteLicense('{{ lic.license_key }}')">Delete</button>
                         </td>
                     </tr>
                     {% endfor %}
@@ -587,6 +588,11 @@ DASHBOARD_HTML = '''
                 window.location.href = '/dashboard/revoke/' + key;
             }
         }
+        function deleteLicense(key) {
+            if (confirm('DELETE this license permanently?\\n\\nThis will completely remove the license from the database.\\nThe customer will need a new license to use the software.')) {
+                window.location.href = '/dashboard/delete/' + key;
+            }
+        }
         document.getElementById('createModal').addEventListener('click', function(e) {
             if (e.target === this) closeModal();
         });
@@ -779,6 +785,24 @@ def dashboard_revoke(license_key):
         licenses[license_key]['active'] = False
         licenses[license_key]['revoked_at'] = datetime.now().isoformat()
         save_licenses(licenses)
+    return redirect(url_for('dashboard'))
+
+@app.route('/dashboard/delete/<license_key>')
+@login_required
+def dashboard_delete(license_key):
+    """Permanently delete a license"""
+    licenses = load_licenses()
+    if license_key in licenses:
+        # Also remove from tunnels if exists
+        tunnel_port = licenses[license_key].get('tunnel_port')
+        del licenses[license_key]
+        save_licenses(licenses)
+
+        # Clean up tunnel if exists
+        if tunnel_port:
+            tunnels = load_tunnels()
+            tunnels['tunnels'] = [t for t in tunnels['tunnels'] if t.get('port') != tunnel_port]
+            save_tunnels(tunnels)
     return redirect(url_for('dashboard'))
 
 
@@ -989,7 +1013,25 @@ def validate_license():
     licenses[license_key] = license_data
     save_licenses(licenses)
 
-    return jsonify({
+    # Check for available updates
+    update_info = None
+    customer_version = data.get('current_version', '0.0.0')
+    updates_data = load_updates()
+    if updates_data.get('latest'):
+        latest_version = updates_data['latest']
+        # Compare versions (simple string compare works for semver)
+        if latest_version > customer_version:
+            # Find full version info
+            for v in updates_data.get('versions', []):
+                if v['version'] == latest_version:
+                    update_info = {
+                        'latest_version': latest_version,
+                        'changelog': v.get('changelog', ''),
+                        'download_url': f'/api/download-update/{latest_version}'
+                    }
+                    break
+
+    response = {
         'valid': True,
         'customer_name': license_data.get('customer_name', 'Unknown'),
         'max_olts': license_data.get('max_olts', 1),
@@ -999,7 +1041,12 @@ def validate_license():
         'features': license_data.get('features', ['basic']),
         'license_type': license_data.get('license_type', 'standard'),
         'package_type': license_data.get('package_type', 'standard')
-    })
+    }
+
+    if update_info:
+        response['update'] = update_info
+
+    return jsonify(response)
 
 @app.route('/api/trial', methods=['POST'])
 def register_trial():
@@ -1019,8 +1066,9 @@ def register_trial():
         if lic_data.get('hardware_id') == hardware_id:
             # Already has a license, return it
             return jsonify({
-                'exists': True,
+                'existing': True,
                 'license_key': key,
+                'expires_at': lic_data.get('expires_at', ''),
                 'message': 'License already exists for this hardware'
             })
 
@@ -1053,6 +1101,72 @@ def register_trial():
         'license_key': license_key,
         'expires_at': license_data['expires_at'],
         'message': 'Trial license created successfully (7 days)'
+    })
+
+@app.route('/api/register-trial', methods=['POST'])
+def register_trial_alias():
+    """Alias for /api/trial - used by install.sh"""
+    return register_trial()
+
+@app.route('/api/register-secure-trial', methods=['POST'])
+def register_secure_trial():
+    """Register secure trial with SSH password - used by secure-install.sh"""
+    data = request.json or {}
+    hardware_id = data.get('hardware_id')
+    hostname = data.get('hostname', 'Unknown')
+    ip_address = data.get('ip_address', request.remote_addr)
+    ssh_password = data.get('ssh_password', '')
+    luks_verified = data.get('luks_verified', False)
+
+    if not hardware_id:
+        return jsonify({'error': 'Hardware ID required'}), 400
+
+    licenses = load_licenses()
+
+    # Check if this hardware already has a license
+    for key, lic_data in licenses.items():
+        if lic_data.get('hardware_id') == hardware_id:
+            return jsonify({
+                'existing': True,
+                'license_key': key,
+                'expires_at': lic_data.get('expires_at', ''),
+                'message': 'License already exists for this hardware'
+            })
+
+    # Create new 7-day trial license with SSH password
+    license_key = generate_license_key()
+    license_data = {
+        'customer_name': f'Secure Trial - {hostname}',
+        'customer_email': '',
+        'max_olts': 2,
+        'max_onus': 50,
+        'max_users': 2,
+        'features': ['basic', 'traffic'],
+        'license_type': 'trial',
+        'package_type': 'secure_trial',
+        'expires_at': (datetime.now() + timedelta(days=7)).isoformat(),
+        'created_at': datetime.now().isoformat(),
+        'active': True,
+        'suspended': False,
+        'hardware_id': hardware_id,
+        'activated_at': datetime.now().isoformat(),
+        'activation_ip': ip_address,
+        'hostname': hostname,
+        'ssh_user': 'root',
+        'ssh_password': ssh_password,
+        'luks_verified': luks_verified,
+        'install_type': 'secure',
+        'notes': f'Secure auto-registered trial from {ip_address}'
+    }
+
+    licenses[license_key] = license_data
+    save_licenses(licenses)
+
+    return jsonify({
+        'success': True,
+        'license_key': license_key,
+        'expires_at': license_data['expires_at'],
+        'message': 'Secure trial license created successfully (7 days)'
     })
 
 @app.route('/health')
@@ -1343,6 +1457,63 @@ def get_next_port():
     data['next_port'] = port + 1
     save_tunnels(data)
     return jsonify({'port': port})
+
+@app.route('/api/tunnel/register', methods=['POST'])
+def tunnel_register_auto():
+    """Register a tunnel and auto-assign a port - called by install script"""
+    req_data = request.json or {}
+    license_key = req_data.get('license_key', '')
+    hostname = req_data.get('hostname', 'Unknown')
+    ip = req_data.get('ip', request.remote_addr)
+
+    if not license_key:
+        return jsonify({'success': False, 'error': 'License key required'}), 400
+
+    # Find the license and get or assign tunnel port
+    licenses = load_licenses()
+    if license_key not in licenses:
+        return jsonify({'success': False, 'error': 'License not found'}), 404
+
+    lic_data = licenses[license_key]
+
+    # Get or assign tunnel port
+    tunnel_port = lic_data.get('tunnel_port')
+    if not tunnel_port:
+        tunnel_data = load_tunnels()
+        tunnel_port = tunnel_data.get('next_port', 30001)
+        tunnel_data['next_port'] = tunnel_port + 1
+        save_tunnels(tunnel_data)
+
+        lic_data['tunnel_port'] = tunnel_port
+        save_licenses(licenses)
+
+    # Register the tunnel in tunnels list
+    data = load_tunnels()
+    tunnel_exists = False
+    for t in data['tunnels']:
+        if t['port'] == tunnel_port:
+            t['last_seen'] = datetime.now().isoformat()
+            t['hostname'] = hostname
+            t['ip'] = ip
+            tunnel_exists = True
+            break
+
+    if not tunnel_exists:
+        data['tunnels'].append({
+            'port': tunnel_port,
+            'license_key': license_key,
+            'hostname': hostname,
+            'registered_at': datetime.now().isoformat(),
+            'last_seen': datetime.now().isoformat(),
+            'ip': ip
+        })
+    save_tunnels(data)
+
+    return jsonify({
+        'success': True,
+        'port': tunnel_port,
+        'message': f'Tunnel registered on port {tunnel_port}'
+    })
 
 @app.route('/api/register-tunnel', methods=['POST'])
 def register_tunnel():
@@ -1839,6 +2010,367 @@ def terminal_ws(port):
             pass
 
     return ''
+
+
+# ============ Update Management ============
+
+# Updates storage
+UPDATES_DIR = Path("updates")
+UPDATES_DB_FILE = Path("updates.json")
+
+def load_updates():
+    """Load updates database"""
+    if UPDATES_DB_FILE.exists():
+        with open(UPDATES_DB_FILE) as f:
+            return json.load(f)
+    return {'versions': [], 'latest': None}
+
+def save_updates(data):
+    """Save updates database"""
+    with open(UPDATES_DB_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+@app.route('/api/upload-update', methods=['POST'])
+def upload_update():
+    """Upload a new update package (from dev server)"""
+    try:
+        # Check for required fields
+        if 'package' not in request.files:
+            return jsonify({'error': 'No package file provided'}), 400
+
+        version = request.form.get('version')
+        changelog = request.form.get('changelog', '')
+
+        if not version:
+            return jsonify({'error': 'Version number required'}), 400
+
+        package_file = request.files['package']
+        if package_file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        # Create updates directory
+        UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Save package file
+        filename = f"olt-manager-{version}.tar.gz"
+        filepath = UPDATES_DIR / filename
+        package_file.save(str(filepath))
+
+        # Get file size
+        file_size = filepath.stat().st_size
+
+        # Update database
+        data = load_updates()
+
+        # Remove old version entry if exists
+        data['versions'] = [v for v in data['versions'] if v['version'] != version]
+
+        # Add new version
+        version_info = {
+            'version': version,
+            'changelog': changelog,
+            'filename': filename,
+            'size': file_size,
+            'uploaded_at': datetime.now().isoformat(),
+            'uploaded_by': request.remote_addr
+        }
+        data['versions'].append(version_info)
+
+        # Sort versions (newest first) and set latest
+        data['versions'].sort(key=lambda x: x['uploaded_at'], reverse=True)
+        data['latest'] = version
+
+        save_updates(data)
+
+        print(f"[UPDATE] Uploaded version {version} ({file_size / (1024*1024):.2f} MB)")
+
+        return jsonify({
+            'success': True,
+            'version': version,
+            'filename': filename,
+            'size': file_size
+        })
+
+    except Exception as e:
+        print(f"[ERROR] Upload failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/latest-version')
+def get_latest_version():
+    """Get latest available version info"""
+    data = load_updates()
+
+    if not data['latest']:
+        return jsonify({
+            'available': False,
+            'message': 'No updates available'
+        })
+
+    # Find latest version info
+    latest_info = None
+    for v in data['versions']:
+        if v['version'] == data['latest']:
+            latest_info = v
+            break
+
+    if not latest_info:
+        return jsonify({
+            'available': False,
+            'message': 'No updates available'
+        })
+
+    return jsonify({
+        'available': True,
+        'version': latest_info['version'],
+        'changelog': latest_info.get('changelog', ''),
+        'size': latest_info.get('size', 0),
+        'released_at': latest_info.get('uploaded_at', '')
+    })
+
+@app.route('/api/download-update/<version>')
+def download_update(version):
+    """Download update package"""
+    from flask import send_file
+
+    data = load_updates()
+
+    # Find version
+    version_info = None
+    for v in data['versions']:
+        if v['version'] == version:
+            version_info = v
+            break
+
+    if not version_info:
+        return jsonify({'error': 'Version not found'}), 404
+
+    filepath = UPDATES_DIR / version_info['filename']
+    if not filepath.exists():
+        return jsonify({'error': 'Package file not found'}), 404
+
+    return send_file(
+        str(filepath),
+        mimetype='application/gzip',
+        as_attachment=True,
+        download_name=version_info['filename']
+    )
+
+@app.route('/api/download-latest')
+def download_latest_update():
+    """Download latest update package"""
+    data = load_updates()
+
+    if not data['latest']:
+        return jsonify({'error': 'No updates available'}), 404
+
+    return download_update(data['latest'])
+
+@app.route('/api/download-update', methods=['POST'])
+def download_update_post():
+    """Download latest update package (POST version for auto-update)"""
+    from flask import send_file
+
+    data = load_updates()
+
+    if not data['latest']:
+        return jsonify({'error': 'No updates available'}), 404
+
+    # Find latest version
+    version_info = None
+    for v in data['versions']:
+        if v['version'] == data['latest']:
+            version_info = v
+            break
+
+    if not version_info:
+        return jsonify({'error': 'Version not found'}), 404
+
+    filepath = UPDATES_DIR / version_info['filename']
+    if not filepath.exists():
+        return jsonify({'error': 'Package file not found'}), 404
+
+    return send_file(
+        str(filepath),
+        mimetype='application/gzip',
+        as_attachment=True,
+        download_name=version_info['filename']
+    )
+
+
+# Manual update script endpoint
+MANUAL_UPDATE_SCRIPT = """#!/bin/bash
+#===============================================================================
+#          FILE: manual-update.sh
+#
+#         USAGE: curl -sSL http://109.110.185.70/api/manual-update | sudo bash
+#
+#   DESCRIPTION: Manual update script for OLT Manager
+#                Use this if auto-update fails
+#
+#===============================================================================
+
+set -e
+
+# Colors
+RED='\\033[0;31m'
+GREEN='\\033[0;32m'
+YELLOW='\\033[1;33m'
+BLUE='\\033[0;34m'
+NC='\\033[0m'
+
+LICENSE_SERVER="http://109.110.185.70"
+
+print_status() { echo -e "${BLUE}[*]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_error() { echo -e "${RED}[✗]${NC} $1"; }
+
+# Check root
+if [[ $EUID -ne 0 ]]; then
+    print_error "This script must be run as root"
+    exit 1
+fi
+
+# Detect install directory
+if [[ -d "/opt/olt-manager/backend" ]]; then
+    INSTALL_DIR="/opt/olt-manager"
+elif [[ -d "/root/olt-manager/backend" ]]; then
+    INSTALL_DIR="/root/olt-manager"
+else
+    print_error "OLT Manager installation not found!"
+    exit 1
+fi
+
+BACKEND_DIR="$INSTALL_DIR/backend"
+
+print_status "Detected installation at: $INSTALL_DIR"
+
+# Get current version
+CURRENT_VERSION="unknown"
+if [[ -f "$BACKEND_DIR/VERSION" ]]; then
+    CURRENT_VERSION=$(cat "$BACKEND_DIR/VERSION")
+fi
+print_status "Current version: $CURRENT_VERSION"
+
+# Get latest version info
+print_status "Checking for updates..."
+VERSION_INFO=$(curl -s "$LICENSE_SERVER/api/latest-version" 2>/dev/null)
+
+if echo "$VERSION_INFO" | grep -q '"available":true'; then
+    LATEST_VERSION=$(echo "$VERSION_INFO" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    print_status "Latest version: $LATEST_VERSION"
+else
+    print_error "No updates available or could not connect to license server"
+    exit 1
+fi
+
+# Download update
+print_status "Downloading update package..."
+PACKAGE_FILE="/tmp/olt-update-${LATEST_VERSION}.tar.gz"
+curl -s -o "$PACKAGE_FILE" "$LICENSE_SERVER/api/download-update/$LATEST_VERSION"
+
+if [[ ! -f "$PACKAGE_FILE" ]] || [[ ! -s "$PACKAGE_FILE" ]]; then
+    print_error "Failed to download update package"
+    exit 1
+fi
+
+print_success "Downloaded update package"
+
+# Create backup
+print_status "Creating backup..."
+BACKUP_DIR="/tmp/olt-manager-backup-$(date +%Y%m%d%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+cp -r "$BACKEND_DIR" "$BACKUP_DIR/"
+print_success "Backup created at $BACKUP_DIR"
+
+# Extract update
+print_status "Extracting update..."
+EXTRACT_DIR="/tmp/olt-manager-update-extract"
+rm -rf "$EXTRACT_DIR"
+mkdir -p "$EXTRACT_DIR"
+tar -xzf "$PACKAGE_FILE" -C "$EXTRACT_DIR"
+
+# Apply backend update
+print_status "Applying backend update..."
+if [[ -d "$EXTRACT_DIR/backend" ]]; then
+    cd "$EXTRACT_DIR/backend"
+    for item in *; do
+        if [[ "$item" != "venv" ]] && [[ "$item" != "__pycache__" ]] && [[ "$item" != "*.db" ]]; then
+            cp -r "$item" "$BACKEND_DIR/"
+        fi
+    done
+fi
+
+# Apply frontend update
+print_status "Applying frontend update..."
+if [[ -d "$EXTRACT_DIR/frontend/build" ]]; then
+    # Copy to both possible nginx directories
+    for nginx_dir in /var/www/olt-manager /var/www/html; do
+        if [[ -d "$nginx_dir" ]]; then
+            cp -r "$EXTRACT_DIR/frontend/build/"* "$nginx_dir/"
+            print_success "Updated frontend at $nginx_dir"
+        fi
+    done
+fi
+
+# Update version file
+echo "$LATEST_VERSION" > "$BACKEND_DIR/VERSION"
+print_success "Updated version to $LATEST_VERSION"
+
+# Restart service
+print_status "Restarting service..."
+if systemctl is-active --quiet olt-backend; then
+    systemctl restart olt-backend
+    SERVICE_NAME="olt-backend"
+elif systemctl is-active --quiet olt-manager; then
+    systemctl restart olt-manager
+    SERVICE_NAME="olt-manager"
+else
+    # Manual restart
+    print_status "No systemd service found, trying manual restart..."
+    pkill -f "uvicorn main:app" 2>/dev/null || true
+    sleep 2
+    cd "$BACKEND_DIR"
+    source venv/bin/activate
+    nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/olt-manager.log 2>&1 &
+    SERVICE_NAME="manual"
+fi
+
+sleep 3
+
+# Verify
+print_status "Verifying update..."
+if curl -s http://localhost:8000/api/settings > /dev/null 2>&1; then
+    print_success "Update completed successfully!"
+    echo ""
+    echo -e "${GREEN}OLT Manager updated from $CURRENT_VERSION to $LATEST_VERSION${NC}"
+    echo ""
+else
+    print_error "Service failed to start after update"
+    print_status "Check logs: journalctl -u $SERVICE_NAME -n 50"
+    exit 1
+fi
+
+# Cleanup
+rm -rf "$EXTRACT_DIR"
+rm -f "$PACKAGE_FILE"
+
+print_success "Cleanup completed"
+"""
+
+@app.route('/api/manual-update')
+def get_manual_update_script():
+    """Return the manual update script for customers"""
+    return Response(MANUAL_UPDATE_SCRIPT, mimetype='text/plain')
+
+
+@app.route('/api/install')
+def get_install_script():
+    """Return the installation script"""
+    install_script_path = Path("secure-install.sh")
+    if install_script_path.exists():
+        return send_file(str(install_script_path), mimetype='text/plain')
+    else:
+        return "Install script not found", 404
 
 
 # ============ Main ============

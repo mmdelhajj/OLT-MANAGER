@@ -2423,13 +2423,21 @@ async def install_update(current_user: User = Depends(require_admin)):
         update_status["stage"] = "backing_up"
         update_status["progress"] = 70
 
+        # Detect install directory (could be /opt/olt-manager or /root/olt-manager)
+        if Path("/opt/olt-manager/backend").exists():
+            install_dir = Path("/opt/olt-manager")
+        else:
+            install_dir = Path("/root/olt-manager")
+
+        backend_dir = install_dir / "backend"
+
         # Create backup of current installation
-        backup_dir = Path("/root/olt-manager-backup")
+        backup_dir = Path("/tmp/olt-manager-backup")
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
 
         # Backup backend
-        shutil.copytree("/root/olt-manager/backend", backup_dir / "backend")
+        shutil.copytree(str(backend_dir), str(backup_dir / "backend"))
 
         update_status["stage"] = "applying"
         update_status["progress"] = 80
@@ -2440,7 +2448,7 @@ async def install_update(current_user: User = Depends(require_admin)):
             # Copy new backend files (preserve venv)
             for item in extracted_backend.iterdir():
                 if item.name != "venv" and item.name != "__pycache__":
-                    dest = Path("/root/olt-manager/backend") / item.name
+                    dest = backend_dir / item.name
                     if item.is_dir():
                         if dest.exists():
                             shutil.rmtree(dest)
@@ -2466,7 +2474,7 @@ async def install_update(current_user: User = Depends(require_admin)):
         # Update version file with new version
         update_status["progress"] = 85
         new_version = update_status.get("new_version", "1.1.0")
-        version_file = Path("/root/olt-manager/backend/VERSION")
+        version_file = backend_dir / "VERSION"
         version_file.write_text(new_version)
         logger.info(f"Updated VERSION file to {new_version}")
 
@@ -2477,13 +2485,19 @@ async def install_update(current_user: User = Depends(require_admin)):
         restart_script = Path("/tmp/restart-olt-manager.sh")
         restart_script.write_text("""#!/bin/bash
 sleep 2
-systemctl restart olt-manager 2>/dev/null || (
-    cd /root/olt-manager/backend
+# Try different service names used by different install methods
+if systemctl is-active --quiet olt-backend; then
+    systemctl restart olt-backend
+elif systemctl is-active --quiet olt-manager; then
+    systemctl restart olt-manager
+else
+    # Fallback: manual restart
+    cd /opt/olt-manager/backend 2>/dev/null || cd /root/olt-manager/backend
     pkill -f "uvicorn main:app" 2>/dev/null
     sleep 1
     source venv/bin/activate
     nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/olt-manager.log 2>&1 &
-)
+fi
 """)
         restart_script.chmod(0o755)
 

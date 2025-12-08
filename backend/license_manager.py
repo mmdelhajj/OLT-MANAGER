@@ -30,12 +30,26 @@ OFFLINE_GRACE_DAYS = 7
 LICENSE_CHECK_INTERVAL = 300
 
 # Current software version - read from version file if exists
-VERSION_FILE = Path("/root/olt-manager/backend/VERSION")
+def get_version_file_path():
+    """Get version file path for different install locations"""
+    paths = [
+        Path("/opt/olt-manager/backend/VERSION"),
+        Path("/root/olt-manager/backend/VERSION"),
+        Path(__file__).parent / "VERSION"
+    ]
+    for p in paths:
+        if p.exists():
+            return p
+    return paths[0]  # Default to /opt path
+
+VERSION_FILE = get_version_file_path()
+
 def get_software_version():
     """Get software version from file or default"""
     try:
-        if VERSION_FILE.exists():
-            return VERSION_FILE.read_text().strip()
+        version_file = get_version_file_path()
+        if version_file.exists():
+            return version_file.read_text().strip()
     except:
         pass
     return "1.0.0"
