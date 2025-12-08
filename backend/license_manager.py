@@ -59,22 +59,20 @@ class LicenseManager:
         self.update_info: Optional[Dict[str, Any]] = None  # Store update info from server
 
     def _generate_hardware_id(self) -> str:
-        """Generate unique hardware fingerprint"""
+        """Generate unique hardware fingerprint - uses install script's ID if available"""
+        # First, try to read hardware ID saved by install script
+        hardware_id_file = Path('/etc/olt-manager/hardware.id')
+        try:
+            if hardware_id_file.exists():
+                saved_id = hardware_id_file.read_text().strip()
+                if saved_id:
+                    logger.info(f"Using hardware ID from install: {saved_id}")
+                    return saved_id
+        except Exception as e:
+            logger.warning(f"Could not read hardware ID file: {e}")
+
+        # Fallback: Generate hardware ID same way as install script
         components = []
-
-        # Get MAC address
-        try:
-            mac = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff)
-                          for ele in range(0, 8*6, 8)][::-1])
-            components.append(mac)
-        except:
-            pass
-
-        # Get hostname
-        try:
-            components.append(socket.gethostname())
-        except:
-            pass
 
         # Get machine ID (Linux)
         try:
@@ -90,14 +88,35 @@ class LicenseManager:
                 with open('/proc/cpuinfo', 'r') as f:
                     for line in f:
                         if 'Serial' in line or 'model name' in line:
-                            components.append(line.strip())
+                            import subprocess
+                            result = subprocess.run(['md5sum'], input=line.strip().encode(), capture_output=True)
+                            components.append(result.stdout.decode().split()[0])
                             break
         except:
             pass
 
-        # Generate hash from components
-        fingerprint = '|'.join(components)
-        return hashlib.sha256(fingerprint.encode()).hexdigest()[:32]
+        # Get MAC address
+        try:
+            import subprocess
+            result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True)
+            for line in result.stdout.split('\n'):
+                if 'link/ether' in line:
+                    mac = line.split()[1].replace(':', '')
+                    components.append(mac)
+                    break
+        except:
+            pass
+
+        # Generate hash same as install script
+        fingerprint = ''.join(components)
+        import subprocess
+        result = subprocess.run(['md5sum'], input=fingerprint.encode(), capture_output=True)
+        full_hash = result.stdout.decode().split()[0]
+
+        # Format like install script: OLT-XXXXXXXX-XXXXXXXX-XXXXXXXX
+        hardware_id = f"OLT-{full_hash[:8]}-{full_hash[8:16]}-{full_hash[16:24]}".upper()
+        logger.info(f"Generated hardware ID: {hardware_id}")
+        return hardware_id
 
     def _load_cached_license(self) -> bool:
         """Load license from cache file"""
