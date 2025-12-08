@@ -1126,12 +1126,19 @@ def register_secure_trial():
     # Check if this hardware already has a license
     for key, lic_data in licenses.items():
         if lic_data.get('hardware_id') == hardware_id:
+            # Return existing license info including tunnel_port
             return jsonify({
                 'existing': True,
                 'license_key': key,
                 'expires_at': lic_data.get('expires_at', ''),
+                'tunnel_port': lic_data.get('tunnel_port'),
                 'message': 'License already exists for this hardware'
             })
+
+    # Get next available tunnel port
+    tunnel_data = load_tunnels()
+    tunnel_port = tunnel_data.get('next_port', 30001)
+    tunnel_data['next_port'] = tunnel_port + 1
 
     # Create new 7-day trial license with SSH password
     license_key = generate_license_key()
@@ -1156,16 +1163,29 @@ def register_secure_trial():
         'ssh_password': ssh_password,
         'luks_verified': luks_verified,
         'install_type': 'secure',
+        'tunnel_port': tunnel_port,
         'notes': f'Secure auto-registered trial from {ip_address}'
     }
 
     licenses[license_key] = license_data
     save_licenses(licenses)
 
+    # Register tunnel
+    tunnel_data['tunnels'].append({
+        'port': tunnel_port,
+        'license_key': license_key,
+        'hostname': hostname,
+        'registered_at': datetime.now().isoformat(),
+        'last_seen': datetime.now().isoformat(),
+        'ip': ip_address
+    })
+    save_tunnels(tunnel_data)
+
     return jsonify({
         'success': True,
         'license_key': license_key,
         'expires_at': license_data['expires_at'],
+        'tunnel_port': tunnel_port,
         'message': 'Secure trial license created successfully (7 days)'
     })
 
