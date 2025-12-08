@@ -303,7 +303,10 @@ DASHBOARD_HTML = '''
         <div class="card">
             <div class="card-header">
                 <h2>Licenses</h2>
-                <button class="btn btn-primary" onclick="showCreateModal()">+ Create License</button>
+                <div>
+                    <button class="btn btn-success" onclick="showTokenModal()">🎫 Create Install Token</button>
+                    <button class="btn btn-primary" onclick="showCreateModal()">+ Create License</button>
+                </div>
             </div>
             <table>
                 <thead>
@@ -392,6 +395,69 @@ DASHBOARD_HTML = '''
         </div>
     </div>
 
+    <!-- Create Install Token Modal -->
+    <div class="modal" id="tokenModal">
+        <div class="modal-content">
+            <h2>🎫 Create Install Token</h2>
+            <p style="color:#aaa; margin-bottom:20px;">Pre-register a customer and get a one-time install token</p>
+            <form method="POST" action="/dashboard/create-token">
+                <div class="form-group">
+                    <label>Customer Name *</label>
+                    <input type="text" name="customer_name" required placeholder="e.g. ABC ISP Company">
+                </div>
+                <div class="form-group">
+                    <label>Customer Email</label>
+                    <input type="email" name="customer_email" placeholder="customer@example.com">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Package Type</label>
+                        <select name="package_type" onchange="updateTokenValidity(this)">
+                            <option value="monthly">Monthly (30 days)</option>
+                            <option value="yearly" selected>Yearly (365 days)</option>
+                            <option value="lifetime">Lifetime</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Validity (Days)</label>
+                        <input type="number" name="validity_days" id="tokenValidityDays" value="365" min="1">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Max OLTs</label>
+                        <input type="number" name="max_olts" value="5" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Max ONUs</label>
+                        <input type="number" name="max_onus" value="1000" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Users</label>
+                        <input type="number" name="max_users" value="10" min="1">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>License Type</label>
+                    <select name="license_type">
+                        <option value="basic">Basic</option>
+                        <option value="standard">Standard</option>
+                        <option value="professional" selected>Professional</option>
+                        <option value="enterprise">Enterprise</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Notes</label>
+                    <input type="text" name="notes" placeholder="Optional notes...">
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-success">Generate Install Token</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeTokenModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Create License Modal -->
     <div class="modal" id="createModal">
         <div class="modal-content">
@@ -464,6 +530,23 @@ DASHBOARD_HTML = '''
         function closeModal() {
             document.getElementById('createModal').classList.remove('active');
         }
+        function showTokenModal() {
+            document.getElementById('tokenModal').classList.add('active');
+        }
+        function closeTokenModal() {
+            document.getElementById('tokenModal').classList.remove('active');
+        }
+        function updateTokenValidity(select) {
+            const validity = document.getElementById('tokenValidityDays');
+            switch(select.value) {
+                case 'monthly': validity.value = 30; break;
+                case 'yearly': validity.value = 365; break;
+                case 'lifetime': validity.value = 36500; break;
+            }
+        }
+        document.getElementById('tokenModal').addEventListener('click', function(e) {
+            if (e.target === this) closeTokenModal();
+        });
         function updateValidity() {
             const pkg = document.getElementById('packageType').value;
             const validity = document.getElementById('validityDays');
@@ -1012,6 +1095,230 @@ def api_create_license():
     save_licenses(licenses)
 
     return jsonify({'license_key': license_key, **license_data})
+
+
+# ============ Install Token System ============
+
+def generate_install_token():
+    """Generate a short install token"""
+    return secrets.token_hex(8).upper()
+
+@app.route('/dashboard/create-token', methods=['POST'])
+@login_required
+def dashboard_create_token():
+    """Create a license with install token for customer"""
+    days = int(request.form.get('validity_days', 365))
+    expires_at = (datetime.now() + timedelta(days=days)).isoformat() if days > 0 else None
+
+    license_key = generate_license_key()
+    install_token = generate_install_token()
+
+    # Get next tunnel port
+    tunnel_data = load_tunnels()
+    tunnel_port = tunnel_data.get('next_port', 30001)
+    tunnel_data['next_port'] = tunnel_port + 1
+    save_tunnels(tunnel_data)
+
+    license_data = {
+        'customer_name': request.form.get('customer_name', 'Unknown'),
+        'customer_email': request.form.get('customer_email', ''),
+        'max_olts': int(request.form.get('max_olts', 5)),
+        'max_onus': int(request.form.get('max_onus', 1000)),
+        'max_users': int(request.form.get('max_users', 10)),
+        'features': ['basic', 'traffic', 'diagrams', 'whatsapp'],
+        'license_type': request.form.get('license_type', 'professional'),
+        'package_type': request.form.get('package_type', 'monthly'),
+        'expires_at': expires_at,
+        'created_at': datetime.now().isoformat(),
+        'active': True,
+        'suspended': False,
+        'hardware_id': None,
+        'install_token': install_token,
+        'install_token_used': False,
+        'tunnel_port': tunnel_port,
+        'ssh_user': 'root',
+        'ssh_password': '',  # Will be set during installation
+        'notes': request.form.get('notes', '')
+    }
+
+    licenses = load_licenses()
+    licenses[license_key] = license_data
+    save_licenses(licenses)
+
+    # Redirect to show the token
+    return redirect(f'/dashboard/show-token/{license_key}')
+
+
+@app.route('/dashboard/show-token/<license_key>')
+@login_required
+def show_token(license_key):
+    """Show install token to admin"""
+    licenses = load_licenses()
+    if license_key not in licenses:
+        return redirect(url_for('dashboard'))
+
+    lic = licenses[license_key]
+    install_token = lic.get('install_token', 'N/A')
+    tunnel_port = lic.get('tunnel_port', 'N/A')
+
+    token_html = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Install Token Created</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .card { background: #16213e; padding: 40px; border-radius: 15px; text-align: center; max-width: 600px; }
+        h1 { color: #2ecc71; margin-bottom: 20px; }
+        .token-box { background: #0f3460; padding: 20px; border-radius: 10px; margin: 20px 0; }
+        .token { font-family: monospace; font-size: 28px; color: #f39c12; letter-spacing: 3px; }
+        .info { color: #aaa; margin: 15px 0; font-size: 14px; }
+        .command { background: #000; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left; overflow-x: auto; margin: 15px 0; }
+        .command span { color: #2ecc71; }
+        .btn { padding: 12px 30px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; margin: 5px; text-decoration: none; display: inline-block; }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-secondary { background: #666; color: white; }
+        .warning { background: #f39c12; color: #000; padding: 10px; border-radius: 5px; margin-top: 20px; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>✅ License Created!</h1>
+        <p>Customer: <strong>{{ lic.customer_name }}</strong></p>
+
+        <div class="token-box">
+            <p class="info">INSTALL TOKEN (Give this to customer)</p>
+            <p class="token">{{ install_token }}</p>
+        </div>
+
+        <p class="info">Assigned Tunnel Port: <strong>{{ tunnel_port }}</strong></p>
+        <p class="info">License Key: <strong>{{ license_key }}</strong></p>
+
+        <div class="command">
+            <p style="color: #aaa; margin-bottom: 10px;"># Customer runs this command on their server:</p>
+            <span>curl -sSL https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/secure-install/token-install.sh | bash -s -- {{ install_token }}</span>
+        </div>
+
+        <div class="warning">
+            ⚠️ This token can only be used ONCE. After installation, SSH password will be auto-generated and stored here.
+        </div>
+
+        <div style="margin-top: 30px;">
+            <a href="/dashboard" class="btn btn-primary">Back to Dashboard</a>
+            <button class="btn btn-secondary" onclick="copyCommand()">Copy Install Command</button>
+        </div>
+    </div>
+
+    <script>
+        function copyCommand() {
+            const cmd = 'curl -sSL https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/secure-install/token-install.sh | bash -s -- {{ install_token }}';
+            navigator.clipboard.writeText(cmd);
+            alert('Install command copied!');
+        }
+    </script>
+</body>
+</html>
+'''
+    return render_template_string(token_html, lic=lic, license_key=license_key, install_token=install_token, tunnel_port=tunnel_port)
+
+
+@app.route('/api/validate-install-token', methods=['POST'])
+def validate_install_token():
+    """Validate install token and return license info"""
+    data = request.json or {}
+    token = data.get('token', '').strip().upper()
+
+    if not token:
+        return jsonify({'valid': False, 'error': 'Token required'}), 400
+
+    licenses = load_licenses()
+
+    # Find license with this token
+    for license_key, lic_data in licenses.items():
+        if lic_data.get('install_token', '').upper() == token:
+            # Check if already used
+            if lic_data.get('install_token_used'):
+                return jsonify({'valid': False, 'error': 'Token already used'}), 403
+
+            # Check if suspended/revoked
+            if lic_data.get('suspended'):
+                return jsonify({'valid': False, 'error': 'License suspended'}), 403
+            if not lic_data.get('active', True):
+                return jsonify({'valid': False, 'error': 'License revoked'}), 403
+
+            return jsonify({
+                'valid': True,
+                'license_key': license_key,
+                'customer_name': lic_data.get('customer_name', 'Unknown'),
+                'tunnel_port': lic_data.get('tunnel_port'),
+                'max_olts': lic_data.get('max_olts', 5),
+                'max_onus': lic_data.get('max_onus', 1000)
+            })
+
+    return jsonify({'valid': False, 'error': 'Invalid token'}), 404
+
+
+@app.route('/api/register-installation', methods=['POST'])
+def register_installation():
+    """Register completed installation with SSH credentials"""
+    data = request.json or {}
+    license_key = data.get('license_key', '')
+    ssh_password = data.get('ssh_password', '')
+    tunnel_port = data.get('tunnel_port')
+    hostname = data.get('hostname', 'Unknown')
+    hardware_id = data.get('hardware_id', '')
+    ip_address = data.get('ip_address', request.remote_addr)
+
+    if not license_key:
+        return jsonify({'success': False, 'error': 'License key required'}), 400
+
+    licenses = load_licenses()
+
+    if license_key not in licenses:
+        return jsonify({'success': False, 'error': 'Invalid license key'}), 404
+
+    # Update license with installation info
+    licenses[license_key]['install_token_used'] = True
+    licenses[license_key]['ssh_password'] = ssh_password
+    licenses[license_key]['ssh_user'] = 'root'
+    licenses[license_key]['hardware_id'] = hardware_id
+    licenses[license_key]['installed_at'] = datetime.now().isoformat()
+    licenses[license_key]['installed_hostname'] = hostname
+    licenses[license_key]['installed_ip'] = ip_address
+
+    save_licenses(licenses)
+
+    # Also register tunnel
+    tunnel_data = load_tunnels()
+
+    # Check if tunnel already exists
+    tunnel_exists = False
+    for t in tunnel_data['tunnels']:
+        if t['port'] == tunnel_port:
+            t['hostname'] = hostname
+            t['license_key'] = license_key
+            t['last_seen'] = datetime.now().isoformat()
+            t['ip'] = ip_address
+            tunnel_exists = True
+            break
+
+    if not tunnel_exists:
+        tunnel_data['tunnels'].append({
+            'port': tunnel_port,
+            'license_key': license_key,
+            'hostname': hostname,
+            'registered_at': datetime.now().isoformat(),
+            'last_seen': datetime.now().isoformat(),
+            'ip': ip_address
+        })
+
+    save_tunnels(tunnel_data)
+
+    return jsonify({
+        'success': True,
+        'message': 'Installation registered successfully'
+    })
 
 
 # ============ Tunnel Management ============
