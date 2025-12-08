@@ -76,11 +76,96 @@ sudo /opt/olt-manager/install.sh --uninstall
 
 ## Supported Equipment
 
-| Device | PON Ports | Type |
-|--------|-----------|------|
-| VSOL V1600D8 | 8 | EPON/GPON |
-| VSOL V1601E04 | 4 | EPON/GPON |
-| Other VSOL OLTs | Various | EPON/GPON |
+### VSOL GPON OLTs (1 PON Port)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600GS | 1 | Standard |
+| V1600GS-F | 1 | Fiber uplink |
+| V1600GS-ZF | 1 | Zero-touch |
+| V1600GS-O32 | 1 | Built-in 1:32 splitter |
+| V1600GS-WB | 1 | WDM backhaul |
+
+### VSOL GPON OLTs (2 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600GT | 2 | Standard |
+| V1600GT-2F | 2 | Dual fiber uplink |
+
+### VSOL GPON OLTs (4 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600G0 | 4 | Standard |
+| V1600G0-B | 4 | Basic |
+| V1600G0-R | 4 | Rack mount |
+| V1601G04 | 4 | G.984 compliant |
+| V1601E04 | 4 | EPON/GPON Combo |
+
+### VSOL GPON OLTs (8 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600G1 | 8 | Standard |
+| V1600G1-B | 8 | Basic |
+| V1600G1-R | 8 | Rack mount |
+| V1600G1-A | 8 | Advanced |
+| V1600G1WEO | 8 | Outdoor |
+| V1600G1WEO-B | 8 | Outdoor IP65 rated |
+
+### VSOL GPON OLTs (16 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600G2 | 16 | Standard |
+| V1600G2-B | 16 | Basic |
+| V1600G2-R | 16 | Rack mount |
+| V1600G2-A | 16 | Advanced |
+
+### VSOL EPON OLTs (1-2 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600DS | 1 | Single PON |
+| V1600D2 | 2 | Standard |
+| V1600D2-L | 2 | L2 switching |
+| V1601E02 | 2 | EPON/GPON |
+| V1601E02-DP | 2 | Dual power |
+
+### VSOL EPON OLTs (4 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600D4 | 4 | Standard |
+| V1600D4-L | 4 | L2 switching |
+| V1600D4-DP | 4 | Dual power |
+| V1600D-MINI | 4 | Compact design |
+| V1601E04-DP | 4 | Dual power |
+| V1601E04-BT | 4 | Battery backup |
+
+### VSOL EPON OLTs (8 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600D8 | 8 | Standard |
+| V1600D8-L | 8 | L2 switching |
+| V1600D8-R | 8 | Rack mount |
+
+### VSOL EPON OLTs (16 PON Ports)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600D16 | 16 | Standard |
+| V1600D16-L | 16 | L2 switching |
+
+### VSOL 10G-PON OLTs (XGS-PON/XG-PON)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600XG02 | 2 | 10G-PON |
+| V1600XG02-W | 2 | 10G-PON WiFi |
+| V1600XG04 | 4 | 10G-PON |
+
+### VSOL P Series (Pizza Box)
+| Model | PON Ports | Notes |
+|-------|-----------|-------|
+| V1600P1 | 1 | Pizza box form factor |
+| V1600P2 | 2 | Pizza box form factor |
+| V1600P4 | 4 | Pizza box form factor |
+| V1600P8 | 8 | Pizza box form factor |
+
+> **Note:** Custom OLT models can be added using the "Other" option with manual PON port configuration.
 
 ## License Plans
 
