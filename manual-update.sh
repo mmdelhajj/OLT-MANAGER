@@ -94,9 +94,16 @@ print_status "Applying backend update..."
 if [[ -d "$EXTRACT_DIR/backend" ]]; then
     cd "$EXTRACT_DIR/backend"
     for item in *; do
-        if [[ "$item" != "venv" ]] && [[ "$item" != "__pycache__" ]] && [[ "$item" != "*.db" ]]; then
-            cp -r "$item" "$BACKEND_DIR/"
+        # Skip directories that shouldn't be overwritten
+        if [[ "$item" == "venv" ]] || [[ "$item" == "__pycache__" ]] || [[ "$item" == "uploads" ]]; then
+            continue
         fi
+        # Skip database files (NEVER overwrite customer data!)
+        if [[ "$item" == *.db ]] || [[ "$item" == *.sqlite ]] || [[ "$item" == *.sqlite3 ]]; then
+            print_status "Skipping database file: $item"
+            continue
+        fi
+        cp -r "$item" "$BACKEND_DIR/"
     done
 fi
 

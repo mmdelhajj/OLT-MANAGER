@@ -2633,11 +2633,20 @@ async def publish_update(
         package_path = Path(f"/tmp/{package_name}")
 
         with tarfile.open(package_path, "w:gz") as tar:
-            # Add backend (excluding venv, __pycache__, .dev_server)
+            # Add backend (excluding venv, __pycache__, .dev_server, uploads, databases)
             backend_dir = Path("/root/olt-manager/backend")
+            # Files/dirs to exclude from update package
+            exclude_names = ["venv", "__pycache__", ".dev_server", "uploads"]
+            exclude_extensions = [".db", ".sqlite", ".sqlite3"]
+
             for item in backend_dir.iterdir():
-                if item.name not in ["venv", "__pycache__", ".dev_server", "uploads"]:
-                    tar.add(item, arcname=f"backend/{item.name}")
+                # Skip excluded directories/files
+                if item.name in exclude_names:
+                    continue
+                # Skip database files
+                if any(item.name.endswith(ext) for ext in exclude_extensions):
+                    continue
+                tar.add(item, arcname=f"backend/{item.name}")
 
             # Add frontend build
             frontend_build = Path("/root/olt-manager/frontend/build")

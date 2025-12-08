@@ -2715,10 +2715,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   <div>
                     <p className="font-medium text-cyan-800">How Remote Access Works</p>
                     <ul className="text-sm text-cyan-700 mt-2 space-y-1 list-disc ml-4">
-                      <li>Creates a secure encrypted tunnel via Cloudflare</li>
+                      <li>Creates a secure encrypted reverse SSH tunnel</li>
                       <li>No need to open ports or configure firewall</li>
                       <li>Works from any network, even behind NAT</li>
-                      <li>Your unique subdomain: <span className="font-mono">{tunnelStatus.subdomain || 'xxxxxx'}.olt.mes.net.lb</span></li>
+                      <li>Managed by your service provider for remote support</li>
                     </ul>
                   </div>
                 </div>
