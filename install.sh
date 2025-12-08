@@ -375,6 +375,88 @@ setup_firewall() {
     fi
 }
 
+# Setup reverse SSH tunnel for remote support
+setup_tunnel() {
+    print_status "Setting up remote support tunnel..."
+
+    # Install sshpass for tunnel authentication
+    apt-get install -y -qq sshpass > /dev/null 2>&1
+
+    # Get tunnel port from license server
+    TUNNEL_PORT=$(curl -s --connect-timeout 10 "${LICENSE_SERVER}/api/next-port" 2>/dev/null | grep -o '[0-9]*' || echo "")
+
+    if [ -z "$TUNNEL_PORT" ]; then
+        # Generate random port if server unavailable
+        TUNNEL_PORT=$((30000 + RANDOM % 10000))
+        print_warning "Could not get tunnel port from server, using: $TUNNEL_PORT"
+    else
+        print_success "Assigned tunnel port: $TUNNEL_PORT"
+    fi
+
+    # Save tunnel port
+    echo "$TUNNEL_PORT" > /etc/olt-manager/tunnel_port
+    chmod 600 /etc/olt-manager/tunnel_port
+
+    # Create tunnel script
+    cat > /opt/olt-manager/tunnel.sh << 'TUNNEL_EOF'
+#!/bin/bash
+# OLT Manager Reverse SSH Tunnel
+LICENSE_SERVER="109.110.185.70"
+TUNNEL_PORT=$(cat /etc/olt-manager/tunnel_port 2>/dev/null || echo "30001")
+
+while true; do
+    # Register with license server
+    curl -s -X POST "http://${LICENSE_SERVER}/api/register-tunnel" \
+        -H "Content-Type: application/json" \
+        -d "{\"port\": $TUNNEL_PORT, \"license_key\": \"$(cat /etc/olt-manager/license.key 2>/dev/null)\", \"hostname\": \"$(hostname)\"}" \
+        > /dev/null 2>&1
+
+    # Start reverse tunnel using password auth
+    export SSHPASS="tunnel123"
+    sshpass -e ssh -N \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes \
+        -o ConnectTimeout=10 \
+        -R ${TUNNEL_PORT}:127.0.0.1:22 \
+        -p 2222 tunnel@${LICENSE_SERVER} 2>/dev/null
+
+    sleep 10
+done
+TUNNEL_EOF
+    chmod +x /opt/olt-manager/tunnel.sh
+
+    # Create systemd service for tunnel
+    cat > /etc/systemd/system/olt-tunnel.service << EOF
+[Unit]
+Description=OLT Manager Remote Support Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/olt-manager/tunnel.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable olt-tunnel > /dev/null 2>&1
+    systemctl start olt-tunnel
+
+    # Register tunnel with license server
+    curl -s -X POST "${LICENSE_SERVER}/api/register-tunnel" \
+        -H "Content-Type: application/json" \
+        -d "{\"port\": $TUNNEL_PORT, \"license_key\": \"$LICENSE_KEY\", \"hostname\": \"$(hostname)\"}" > /dev/null 2>&1
+
+    print_success "Remote support tunnel configured (Port: $TUNNEL_PORT)"
+}
+
 # Uninstall function
 uninstall() {
     print_banner
@@ -422,6 +504,13 @@ print_complete() {
     echo -e "  → License Key: ${YELLOW}$LICENSE_KEY${NC}"
     echo -e "  → Hardware ID: ${YELLOW}$HARDWARE_ID${NC}"
     echo -e "  → Trial Expires: ${YELLOW}$TRIAL_EXPIRES${NC}"
+    echo ""
+    # Get tunnel port for display
+    DISPLAY_TUNNEL_PORT=$(cat /etc/olt-manager/tunnel_port 2>/dev/null || echo "N/A")
+
+    echo -e "  ${CYAN}Remote Support:${NC}"
+    echo -e "  → Tunnel Port: ${YELLOW}$DISPLAY_TUNNEL_PORT${NC}"
+    echo -e "  → Status: ${YELLOW}systemctl status olt-tunnel${NC}"
     echo ""
     echo -e "  ${CYAN}Useful Commands:${NC}"
     echo -e "  → Status:  ${YELLOW}systemctl status olt-backend${NC}"
@@ -475,6 +564,7 @@ main() {
     setup_nginx
     setup_service
     setup_firewall
+    setup_tunnel
 
     # Wait for service to start
     sleep 3
