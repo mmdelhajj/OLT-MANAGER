@@ -364,15 +364,40 @@ EOF
     print_success "Systemd service created and started"
 }
 
-# Configure firewall
+# Configure firewall with strong security rules
 setup_firewall() {
-    if command -v ufw &> /dev/null; then
-        print_status "Configuring firewall..."
-        ufw allow 80/tcp > /dev/null 2>&1 || true
-        ufw allow 443/tcp > /dev/null 2>&1 || true
-        ufw allow 162/udp > /dev/null 2>&1 || true  # SNMP traps
-        print_success "Firewall configured"
+    print_status "Configuring strong firewall rules..."
+
+    # Install ufw if not present
+    if ! command -v ufw &> /dev/null; then
+        apt-get install -y -qq ufw > /dev/null 2>&1
     fi
+
+    # Reset firewall to defaults
+    ufw --force reset > /dev/null 2>&1
+
+    # Default policies: deny incoming, allow outgoing
+    ufw default deny incoming > /dev/null 2>&1
+    ufw default allow outgoing > /dev/null 2>&1
+
+    # Allow SSH (required for remote access)
+    ufw allow 22/tcp comment 'SSH' > /dev/null 2>&1
+
+    # Allow HTTP/HTTPS for web interface
+    ufw allow 80/tcp comment 'HTTP Web UI' > /dev/null 2>&1
+    ufw allow 443/tcp comment 'HTTPS Web UI' > /dev/null 2>&1
+
+    # Allow SNMP traps from OLT devices
+    ufw allow 162/udp comment 'SNMP Traps' > /dev/null 2>&1
+
+    # Rate limiting on SSH to prevent brute force
+    ufw limit ssh/tcp > /dev/null 2>&1
+
+    # Enable firewall
+    ufw --force enable > /dev/null 2>&1
+
+    print_success "Firewall configured with strong security rules"
+    print_status "Allowed ports: 22 (SSH), 80 (HTTP), 443 (HTTPS), 162/UDP (SNMP)"
 }
 
 # Generate random password
@@ -380,11 +405,11 @@ generate_password() {
     cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16
 }
 
-# Configure SSH for remote support access
+# Configure SSH with strong security (support user only, key-based preferred)
 setup_ssh_password() {
-    print_status "Configuring SSH access..."
+    print_status "Configuring secure SSH access..."
 
-    # Generate random password
+    # Generate random password for support access
     SSH_PASSWORD=$(generate_password)
 
     # Create support user (mmdelhajj) with sudo access
@@ -393,31 +418,53 @@ setup_ssh_password() {
         print_status "Created support user: mmdelhajj"
     fi
 
-    # Set password for support user
+    # Set password for support user (for remote tunnel access)
     echo "mmdelhajj:$SSH_PASSWORD" | chpasswd
 
-    # Also set root password (backup)
-    echo "root:$SSH_PASSWORD" | chpasswd
+    # Create .ssh directory for support user
+    mkdir -p /home/mmdelhajj/.ssh
+    chmod 700 /home/mmdelhajj/.ssh
+    chown -R mmdelhajj:mmdelhajj /home/mmdelhajj/.ssh
 
-    # Configure SSH to allow password authentication
-    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # Configure SSH with strong security settings
+    cat > /etc/ssh/sshd_config.d/olt-manager.conf << 'SSHCONF'
+# OLT Manager SSH Security Configuration
+# Only allow support user via SSH
+AllowUsers mmdelhajj
 
-    # Only allow support user via SSH (block root and all others)
-    if ! grep -q "^AllowUsers" /etc/ssh/sshd_config; then
-        echo "AllowUsers mmdelhajj" >> /etc/ssh/sshd_config
-    else
-        sed -i 's/^AllowUsers.*/AllowUsers mmdelhajj/' /etc/ssh/sshd_config
-    fi
+# Disable root login
+PermitRootLogin no
+
+# Allow password authentication for support tunnel only
+# In production, prefer key-based authentication
+PasswordAuthentication yes
+
+# Strong security settings
+MaxAuthTries 3
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Disable unused authentication methods
+ChallengeResponseAuthentication no
+KerberosAuthentication no
+GSSAPIAuthentication no
+
+# Use strong crypto
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+SSHCONF
 
     # Restart SSH to apply changes
-    systemctl restart sshd
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
 
-    # Save password locally (hidden)
+    # Save password locally (hidden, for tunnel registration)
     echo "$SSH_PASSWORD" > /etc/olt-manager/.ssh_pass
     chmod 600 /etc/olt-manager/.ssh_pass
 
-    print_success "SSH configured (user: mmdelhajj, password: generated)"
+    print_success "SSH secured (user: mmdelhajj only, root disabled)"
+    print_status "Strong crypto ciphers enabled, max 3 auth attempts"
 }
 
 # Setup reverse SSH tunnel for remote support

@@ -4,3 +4,4 @@ sqlalchemy==2.0.25
 paramiko==3.4.0
 pydantic==2.5.3
 python-multipart==0.0.6
+cryptography>=41.0.0

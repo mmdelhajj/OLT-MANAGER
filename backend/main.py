@@ -30,7 +30,7 @@ from schemas import (
 )
 from olt_connector import poll_olt, poll_olt_snmp, get_opm_data_via_ssh, get_traffic_counters_snmp, ONUData, OLTConnector
 from trap_receiver import SimpleTrapReceiver, TrapEvent
-from config import POLL_INTERVAL
+from config import POLL_INTERVAL, encrypt_sensitive, decrypt_sensitive
 from auth import (
     authenticate_user, create_access_token, get_password_hash,
     require_auth, require_admin, get_current_user, create_default_admin
@@ -478,7 +478,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 get_opm_data_via_ssh,
                                 olt.ip_address,
                                 olt.username,
-                                olt.password
+                                decrypt_sensitive(olt.password)  # Decrypt password for SSH
                             )
                             if opm_data:
                                 logger.info(f"SSH OPM for {olt.name}: got optical data for {len(opm_data)} ONUs")
@@ -602,7 +602,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         poll_olt,
                         olt.ip_address,
                         olt.username,
-                        olt.password
+                        decrypt_sensitive(olt.password)  # Decrypt password for SSH
                     )
 
                     # Update OLT status
@@ -1119,7 +1119,7 @@ def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Ses
         name=olt_data.name,
         ip_address=olt_data.ip_address,
         username=olt_data.username,
-        password=olt_data.password,
+        password=encrypt_sensitive(olt_data.password),  # Encrypt password
         model=olt_data.model,
         pon_ports=olt_data.pon_ports
     )
@@ -1155,7 +1155,7 @@ def update_olt(olt_id: int, olt_data: OLTUpdate, user: User = Depends(require_ad
     if olt_data.username is not None:
         olt.username = olt_data.username
     if olt_data.password is not None:
-        olt.password = olt_data.password
+        olt.password = encrypt_sensitive(olt_data.password)  # Encrypt password
     if olt_data.model is not None:
         olt.model = olt_data.model
     if olt_data.pon_ports is not None:
@@ -1224,7 +1224,7 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                 get_opm_data_via_ssh,
                 olt.ip_address,
                 olt.username,
-                olt.password
+                decrypt_sensitive(olt.password)  # Decrypt password for SSH
             )
             if opm_data:
                 logger.info(f"SSH OPM: got optical data for {len(opm_data)} ONUs")
@@ -1621,7 +1621,7 @@ async def update_onu(onu_id: int, data: dict, background_tasks: BackgroundTasks,
         # Sync to OLT in background (non-blocking)
         background_tasks.add_task(
             sync_onu_description_to_olt,
-            olt.ip_address, olt.username, olt.password,
+            olt.ip_address, olt.username, decrypt_sensitive(olt.password),  # Decrypt password
             onu.pon_port, onu.onu_id, new_desc or ""
         )
         logger.info(f"Queued background sync for ONU {onu_id} to OLT {olt.name}")
@@ -1809,7 +1809,7 @@ def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = De
         connector = OLTConnector(
             ip=olt.ip_address,
             username=olt.username or 'admin',
-            password=olt.password or 'admin'
+            password=decrypt_sensitive(olt.password) or 'admin'  # Decrypt password
         )
 
         success = connector.reboot_onu(onu.pon_port, onu.onu_id)
