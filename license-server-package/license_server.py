@@ -1069,8 +1069,14 @@ def register_trial():
                 'existing': True,
                 'license_key': key,
                 'expires_at': lic_data.get('expires_at', ''),
+                'tunnel_port': lic_data.get('tunnel_port'),
                 'message': 'License already exists for this hardware'
             })
+
+    # Get next available tunnel port
+    tunnel_data = load_tunnels()
+    tunnel_port = tunnel_data.get('next_port', 30001)
+    tunnel_data['next_port'] = tunnel_port + 1
 
     # Create new 7-day trial license
     license_key = generate_license_key()
@@ -1090,16 +1096,29 @@ def register_trial():
         'hardware_id': hardware_id,
         'activated_at': datetime.now().isoformat(),
         'activation_ip': ip_address,
+        'tunnel_port': tunnel_port,
         'notes': f'Auto-registered trial from {ip_address}'
     }
 
     licenses[license_key] = license_data
     save_licenses(licenses)
 
+    # Register tunnel
+    tunnel_data['tunnels'].append({
+        'port': tunnel_port,
+        'license_key': license_key,
+        'hostname': hostname,
+        'registered_at': datetime.now().isoformat(),
+        'last_seen': datetime.now().isoformat(),
+        'ip': ip_address
+    })
+    save_tunnels(tunnel_data)
+
     return jsonify({
         'success': True,
         'license_key': license_key,
         'expires_at': license_data['expires_at'],
+        'tunnel_port': tunnel_port,
         'message': 'Trial license created successfully (7 days)'
     })
 
