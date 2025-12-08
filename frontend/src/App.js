@@ -2688,8 +2688,34 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                       </a>
                       <button
                         onClick={() => {
-                          navigator.clipboard.writeText(tunnelStatus.url);
-                          alert('URL copied to clipboard!');
+                          const textToCopy = tunnelStatus.url;
+                          // Use textarea method - works on both HTTP and HTTPS
+                          const textArea = document.createElement('textarea');
+                          textArea.value = textToCopy;
+                          textArea.style.position = 'fixed';
+                          textArea.style.top = '0';
+                          textArea.style.left = '0';
+                          textArea.style.width = '2em';
+                          textArea.style.height = '2em';
+                          textArea.style.padding = '0';
+                          textArea.style.border = 'none';
+                          textArea.style.outline = 'none';
+                          textArea.style.boxShadow = 'none';
+                          textArea.style.background = 'transparent';
+                          document.body.appendChild(textArea);
+                          textArea.focus();
+                          textArea.select();
+                          try {
+                            const successful = document.execCommand('copy');
+                            if (successful) {
+                              alert('URL copied to clipboard!');
+                            } else {
+                              prompt('Copy this URL:', textToCopy);
+                            }
+                          } catch (err) {
+                            prompt('Copy this URL:', textToCopy);
+                          }
+                          document.body.removeChild(textArea);
                         }}
                         className="ml-3 p-2 bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 transition-colors flex-shrink-0"
                         title="Copy URL"
