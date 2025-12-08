@@ -9,6 +9,7 @@
 #                ./install.sh
 #
 #   DESCRIPTION: One-click installer for OLT Manager System
+#                Includes automatic 7-day free trial registration
 #
 #       OPTIONS: --uninstall    Remove OLT Manager
 #                --update       Update existing installation
@@ -28,19 +29,25 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
+LICENSE_SERVER="http://109.110.185.70"
 INSTALL_DIR="/opt/olt-manager"
 FRONTEND_DIR="/var/www/olt-manager"
 REPO_URL="https://github.com/mmdelhajj/OLT-MANAGER.git"
 SERVICE_NAME="olt-backend"
+
+# License variables
+LICENSE_KEY=""
+HARDWARE_ID=""
+TRIAL_EXPIRES=""
 
 # Print banner
 print_banner() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════════════╗"
     echo "║                                                               ║"
-    echo "║              OLT MANAGER - Installation Script                ║"
+    echo "║              OLT MANAGER - Installation                       ║"
     echo "║                                                               ║"
-    echo "║   Manage your OLTs and ONUs with ease                         ║"
+    echo "║              7-Day FREE Trial Included!                       ║"
     echo "║                                                               ║"
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -51,6 +58,54 @@ print_status() { echo -e "${BLUE}[*]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
+
+# Get unique hardware ID
+get_hardware_id() {
+    local machine_id=$(cat /etc/machine-id 2>/dev/null || echo "")
+    local cpu_id=$(cat /proc/cpuinfo 2>/dev/null | grep -m1 "Serial\|model name" | md5sum | cut -d' ' -f1 || echo "")
+    local mac=$(ip link show 2>/dev/null | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':' || echo "")
+
+    HARDWARE_ID=$(echo "${machine_id}${cpu_id}${mac}" | md5sum | cut -d' ' -f1)
+    HARDWARE_ID="OLT-${HARDWARE_ID:0:8}-${HARDWARE_ID:8:8}-${HARDWARE_ID:16:8}"
+    HARDWARE_ID=$(echo "$HARDWARE_ID" | tr '[:lower:]' '[:upper:]')
+}
+
+# Register with license server and get trial
+register_trial() {
+    print_status "Registering with license server..."
+
+    get_hardware_id
+
+    HOSTNAME=$(hostname)
+    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo 'unknown')
+
+    # Try to register and get trial license
+    RESPONSE=$(curl -s --connect-timeout 10 -X POST "${LICENSE_SERVER}/api/register-trial" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"hardware_id\": \"$HARDWARE_ID\",
+            \"hostname\": \"$HOSTNAME\",
+            \"ip_address\": \"$PUBLIC_IP\"
+        }" 2>/dev/null)
+
+    if echo "$RESPONSE" | grep -q '"success":true'; then
+        LICENSE_KEY=$(echo "$RESPONSE" | grep -o '"license_key":"[^"]*"' | cut -d'"' -f4)
+        TRIAL_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4 | cut -d'T' -f1)
+
+        print_success "Trial license activated!"
+        print_success "License Key: $LICENSE_KEY"
+        print_success "Trial expires: $TRIAL_EXPIRES"
+    elif echo "$RESPONSE" | grep -q '"existing":true'; then
+        LICENSE_KEY=$(echo "$RESPONSE" | grep -o '"license_key":"[^"]*"' | cut -d'"' -f4)
+        TRIAL_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4 | cut -d'T' -f1)
+        print_success "Existing license found: $LICENSE_KEY"
+    else
+        print_warning "Could not connect to license server"
+        print_warning "Installing in offline mode"
+        LICENSE_KEY="OFFLINE-${HARDWARE_ID}"
+        TRIAL_EXPIRES="Offline Mode"
+    fi
+}
 
 # Check if running as root
 check_root() {
@@ -152,6 +207,13 @@ setup_backend() {
 
     # Create uploads directory
     mkdir -p uploads
+
+    # Save license information
+    mkdir -p /etc/olt-manager
+    echo "$LICENSE_KEY" > /etc/olt-manager/license.key
+    echo "$HARDWARE_ID" > /etc/olt-manager/hardware.id
+    chmod 600 /etc/olt-manager/license.key
+    chmod 600 /etc/olt-manager/hardware.id
 
     print_success "Backend setup complete"
 }
@@ -323,14 +385,20 @@ print_complete() {
     echo ""
     echo -e "  ${CYAN}Default Login:${NC}"
     echo -e "  → Username: ${YELLOW}admin${NC}"
-    echo -e "  → Password: ${YELLOW}admin${NC}"
+    echo -e "  → Password: ${YELLOW}admin123${NC}"
+    echo ""
+    echo -e "  ${CYAN}License Information:${NC}"
+    echo -e "  → License Key: ${YELLOW}$LICENSE_KEY${NC}"
+    echo -e "  → Hardware ID: ${YELLOW}$HARDWARE_ID${NC}"
+    echo -e "  → Trial Expires: ${YELLOW}$TRIAL_EXPIRES${NC}"
     echo ""
     echo -e "  ${CYAN}Useful Commands:${NC}"
     echo -e "  → Status:  ${YELLOW}systemctl status olt-backend${NC}"
     echo -e "  → Logs:    ${YELLOW}journalctl -u olt-backend -f${NC}"
     echo -e "  → Restart: ${YELLOW}systemctl restart olt-backend${NC}"
     echo ""
-    echo -e "  ${CYAN}Installation Directory:${NC} $INSTALL_DIR"
+    echo -e "  ${YELLOW}To upgrade after trial:${NC}"
+    echo -e "  → Contact your vendor with your Hardware ID"
     echo ""
     echo -e "  ${RED}⚠ Please change the default password after first login!${NC}"
     echo ""
@@ -361,6 +429,7 @@ main() {
 
     check_root
     detect_os
+    register_trial
 
     echo ""
     print_status "Starting installation..."
