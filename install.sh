@@ -202,7 +202,7 @@ setup_backend() {
     source venv/bin/activate
     pip install --upgrade pip -q
     pip install -r requirements.txt -q
-    pip install bcrypt python-jose[cryptography] pysnmp -q
+    pip install bcrypt python-jose[cryptography] pysnmp requests -q
     deactivate
 
     # Create uploads directory
