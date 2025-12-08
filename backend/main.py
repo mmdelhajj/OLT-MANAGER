@@ -142,7 +142,7 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
             return
 
         api_url = settings.get('whatsapp_api_url', '').strip()
-        secret = settings.get('whatsapp_secret', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
         account = settings.get('whatsapp_account', '').strip()
 
         # Parse recipients (supports both old single recipient and new multiple format)
@@ -2703,9 +2703,12 @@ async def publish_update(
 def get_settings(db: Session = Depends(get_db)):
     """Get all settings (public - for page name and refresh time)"""
     settings = db.query(Settings).all()
+    # Keys that are stored encrypted
+    sensitive_keys = ["whatsapp_secret", "trap_community"]
     result = {}
     for s in settings:
-        result[s.key] = s.value
+        # Decrypt sensitive values when reading
+        result[s.key] = decrypt_sensitive(s.value) if s.key in sensitive_keys else s.value
     # Return defaults if not set
     if "system_name" not in result:
         result["system_name"] = "OLT Manager"
@@ -2745,15 +2748,21 @@ def update_settings(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     allowed_keys = ["system_name", "page_name", "refresh_interval", "polling_interval", "whatsapp_enabled",
-                    "whatsapp_api_url", "whatsapp_secret", "whatsapp_account", "whatsapp_recipients"]
+                    "whatsapp_api_url", "whatsapp_secret", "whatsapp_account", "whatsapp_recipients",
+                    "trap_enabled", "trap_port", "trap_community"]
+    # Keys that should be encrypted when stored
+    sensitive_keys = ["whatsapp_secret", "trap_community"]
+
     for key, value in data.items():
         if key not in allowed_keys:
             continue
+        # Encrypt sensitive values before storing
+        store_value = encrypt_sensitive(str(value)) if key in sensitive_keys else str(value)
         setting = db.query(Settings).filter(Settings.key == key).first()
         if setting:
-            setting.value = str(value)
+            setting.value = store_value
         else:
-            setting = Settings(key=key, value=str(value))
+            setting = Settings(key=key, value=store_value)
             db.add(setting)
     db.commit()
     return {"message": "Settings updated successfully"}

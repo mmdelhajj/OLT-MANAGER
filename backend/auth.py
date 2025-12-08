@@ -11,8 +11,41 @@ from sqlalchemy.orm import Session
 
 from models import User, get_db
 
-# Generate a random secret key (in production, use environment variable)
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", secrets.token_hex(32))
+
+def get_or_create_jwt_secret() -> str:
+    """Get JWT secret from file, or create and persist a new one"""
+    secret_file = "/etc/olt-manager/jwt.secret"
+
+    # Try to read existing secret
+    try:
+        if os.path.exists(secret_file):
+            with open(secret_file, 'r') as f:
+                secret = f.read().strip()
+                if secret:
+                    return secret
+    except Exception:
+        pass
+
+    # Check environment variable
+    env_secret = os.environ.get("JWT_SECRET_KEY")
+    if env_secret:
+        return env_secret
+
+    # Generate new secret and persist it
+    new_secret = secrets.token_hex(32)
+    try:
+        os.makedirs("/etc/olt-manager", exist_ok=True)
+        with open(secret_file, 'w') as f:
+            f.write(new_secret)
+        os.chmod(secret_file, 0o600)  # Only root can read
+    except Exception:
+        pass  # If we can't persist, use in-memory (will regenerate on restart)
+
+    return new_secret
+
+
+# Get or create persistent JWT secret key
+SECRET_KEY = get_or_create_jwt_secret()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
