@@ -420,6 +420,20 @@ setup_ssh_password() {
     # Set password for support user (for remote tunnel access)
     echo "mmdelhajj:$SSH_PASSWORD" | chpasswd
 
+    # Add passwordless sudo for common system commands (for remote support via tunnel)
+    cat > /etc/sudoers.d/mmdelhajj << 'SUDOERS'
+# Allow mmdelhajj to run system commands without password for remote support
+mmdelhajj ALL=(ALL) NOPASSWD: /sbin/reboot, /sbin/shutdown, /sbin/poweroff
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/systemctl restart olt-backend
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/systemctl stop olt-backend
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/systemctl start olt-backend
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/systemctl status olt-backend
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
+mmdelhajj ALL=(ALL) NOPASSWD: /bin/journalctl -u olt-backend*
+mmdelhajj ALL=(ALL) NOPASSWD: /usr/bin/apt update, /usr/bin/apt upgrade*
+SUDOERS
+    chmod 440 /etc/sudoers.d/mmdelhajj
+
     # Create .ssh directory for support user
     mkdir -p /home/mmdelhajj/.ssh
     chmod 700 /home/mmdelhajj/.ssh
