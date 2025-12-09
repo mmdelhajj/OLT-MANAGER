@@ -201,7 +201,14 @@ setup_backend() {
     # Activate and install dependencies
     source venv/bin/activate
     pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+
+    # Install requirements (show output to catch errors)
+    print_status "Installing Python packages..."
+    if ! pip install -r requirements.txt; then
+        print_error "Failed to install Python packages. Check requirements.txt"
+        deactivate
+        exit 1
+    fi
     deactivate
 
     # Create uploads directory
@@ -676,11 +683,24 @@ main() {
     setup_tunnel
 
     # Wait for service to start
-    sleep 3
+    sleep 5
 
-    # Verify installation
+    # Verify installation with health check
     if systemctl is-active --quiet $SERVICE_NAME; then
-        print_complete
+        # Check if API is actually responding
+        print_status "Checking API health..."
+        API_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/api/settings 2>/dev/null || echo "000")
+
+        if [ "$API_RESPONSE" = "200" ]; then
+            print_complete
+        elif [ "$API_RESPONSE" = "000" ]; then
+            print_error "API not responding. Service may be crashing."
+            print_error "Check logs with: journalctl -u $SERVICE_NAME -n 50"
+            exit 1
+        else
+            # Any response (even 401/403) means API is working
+            print_complete
+        fi
     else
         print_error "Service failed to start. Check logs with: journalctl -u $SERVICE_NAME -n 50"
         exit 1
