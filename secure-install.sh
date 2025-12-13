@@ -24,7 +24,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-LICENSE_SERVER="http://109.110.185.70"
+LICENSE_SERVER="http://lic.proxpanel.com"
 INSTALL_DIR="/opt/olt-manager"
 FRONTEND_DIR="/var/www/olt-manager"
 REPO_URL="https://github.com/mmdelhajj/OLT-MANAGER.git"
@@ -463,7 +463,7 @@ exec sshpass -e ssh -N \
     -o ServerAliveCountMax=3 \
     -o ExitOnForwardFailure=yes \
     -p 2222 \
-    tunnel@109.110.185.70
+    tunnel@lic.proxpanel.com
 TUNNEL_SCRIPT
             # Replace placeholder with actual port
             sed -i "s/TUNNEL_PORT_PLACEHOLDER/$TUNNEL_PORT/g" /opt/olt-manager/tunnel.sh

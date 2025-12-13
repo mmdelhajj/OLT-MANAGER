@@ -2241,7 +2241,7 @@ MANUAL_UPDATE_SCRIPT = """#!/bin/bash
 #===============================================================================
 #          FILE: manual-update.sh
 #
-#         USAGE: curl -sSL http://109.110.185.70/api/manual-update | sudo bash
+#         USAGE: curl -sSL http://lic.proxpanel.com/api/manual-update | sudo bash
 #
 #   DESCRIPTION: Manual update script for OLT Manager
 #                Use this if auto-update fails
@@ -2257,7 +2257,7 @@ YELLOW='\\033[1;33m'
 BLUE='\\033[0;34m'
 NC='\\033[0m'
 
-LICENSE_SERVER="http://109.110.185.70"
+LICENSE_SERVER="http://lic.proxpanel.com"
 
 print_status() { echo -e "${BLUE}[*]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }

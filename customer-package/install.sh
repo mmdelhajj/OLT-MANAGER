@@ -1,7 +1,7 @@
 #!/bin/bash
 # OLT Manager Installation Script
 
-LICENSE_SERVER="http://109.110.185.70"
+LICENSE_SERVER="http://lic.proxpanel.com"
 
 echo "================================"
 echo "  OLT Manager Installation"

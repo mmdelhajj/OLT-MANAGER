@@ -86,7 +86,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/var/lib/olt-manager
-Environment=LICENSE_SERVER_URL=http://109.110.185.70
+Environment=LICENSE_SERVER_URL=http://lic.proxpanel.com
 ExecStart=/opt/olt-manager/olt-manager-backend
 Restart=always
 RestartSec=5

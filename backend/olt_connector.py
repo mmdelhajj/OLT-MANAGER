@@ -20,6 +20,7 @@ class ONUData:
     description: Optional[str] = None
     distance: Optional[int] = None  # Distance in meters
     rx_power: Optional[float] = None  # RX Power in dBm
+    model: Optional[str] = None  # ONU hardware model (e.g., "V2801S", "HG325AX15")
 
 
 class OLTConnector:
@@ -230,18 +231,29 @@ class OLTConnector:
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         try:
+            # VSOL OLTs have non-standard SSH implementations that need special handling
+            # Set transport options for legacy/embedded device compatibility
             client.connect(
                 hostname=self.ip,
                 port=self.port,
                 username=self.username,
                 password=self.password,
-                timeout=10,
+                timeout=60,
+                banner_timeout=60,
+                auth_timeout=60,
                 look_for_keys=False,
-                allow_agent=False
+                allow_agent=False,
+                disabled_algorithms={
+                    'pubkeys': ['rsa-sha2-256', 'rsa-sha2-512']
+                }
             )
+            # Set transport options for legacy compatibility
+            transport = client.get_transport()
+            if transport:
+                transport.set_keepalive(30)
 
             channel = client.invoke_shell(width=200, height=1000)
-            channel.settimeout(15)
+            channel.settimeout(30)
 
             # Helper to drain buffer
             def drain():
@@ -649,6 +661,12 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
             capture_output=True, text=True, timeout=30
         )
 
+        # Get ONU models from registration table (column 7)
+        model_result = subprocess.run(
+            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_ONU_MODEL_OID, "-t", "5"],
+            capture_output=True, text=True, timeout=30
+        )
+
         if mac_result.returncode != 0 or status_result.returncode != 0:
             logger.warning(f"SNMP query failed for {ip}")
             return [], {}
@@ -691,6 +709,17 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
                     mac = match.group(2).upper()
                     mac_by_index[idx] = mac
 
+        # Parse ONU models: index -> model (STRING: "V2801S", "HG325AX15", etc.)
+        model_by_index: Dict[str, str] = {}
+        for line in model_result.stdout.split('\n'):
+            if 'STRING:' in line:
+                match = re.search(r'\.7\.(\d+)\s*=\s*STRING:\s*"?([^"]+)"?', line)
+                if match:
+                    idx = match.group(1)
+                    model = match.group(2).strip()
+                    if model:  # Only store non-empty models
+                        model_by_index[idx] = model
+
         # Parse descriptions from subtree 25 (indexed by PON.ONU)
         # OID format: .9.{pon}.{onu} = STRING: "description"
         desc_by_pon_onu: Dict[str, str] = {}
@@ -706,6 +735,7 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
 
         # Parse distance from subtree 25 (indexed by PON.ONU)
         # OID format: .12.{pon}.{onu} = INTEGER: distance
+        # SNMP returns distance in decimeters, divide by 10 to get meters (matching OLT web dashboard)
         distance_by_pon_onu: Dict[str, int] = {}
         for line in distance_result.stdout.split('\n'):
             if 'INTEGER:' in line:
@@ -713,7 +743,7 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
                 if match:
                     pon = match.group(1)
                     onu = match.group(2)
-                    distance = int(match.group(3))
+                    distance = int(match.group(3)) // 10  # Divide by 10 to match OLT dashboard
                     distance_by_pon_onu[f"{pon}.{onu}"] = distance
 
         # Parse RX power from subtree 28 - need to correlate with MAC
@@ -758,6 +788,8 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
                 distance = distance_by_pon_onu.get(pon_onu_key)
                 # Get RX power using MAC address
                 rx_power = rx_power_by_mac.get(mac)
+                # Get ONU model using same index as MAC/status
+                model = model_by_index.get(idx)
 
                 onus.append(ONUData(
                     pon_port=pon_port,
@@ -765,7 +797,8 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
                     mac_address=mac,
                     description=description,
                     distance=distance,
-                    rx_power=rx_power
+                    rx_power=rx_power,
+                    model=model
                 ))
                 # Use (pon_port, onu_id) as key to handle duplicate MACs correctly
                 # Each ONU on each PON port gets its own status entry
@@ -966,6 +999,142 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
     except Exception as e:
         logger.error(f"SNMP traffic poll failed for {ip}: {e}")
         return {}
+
+
+# SNMP OIDs for OLT Health/System Info (VSOL OLT Enterprise 37950)
+# Found via research from Zabbix template for VSOL EPON 1600D4
+# System stats subtree: 1.3.6.1.4.1.37950.1.1.5.10.12 (CORRECT - tested and verified)
+SNMP_OLT_CPU_OID = "1.3.6.1.4.1.37950.1.1.5.10.12.3.0"          # CPU Usage % (INTEGER: 23 = 23%)
+SNMP_OLT_MEMORY_OID = "1.3.6.1.4.1.37950.1.1.5.10.12.4.0"       # Memory Usage % (INTEGER: 21 = 21%)
+SNMP_OLT_FIRMWARE_OID = "1.3.6.1.4.1.37950.1.1.5.10.12.5.4.0"   # Firmware Version (STRING: "V2.03.77R")
+# Device info subtree: 1.3.6.1.4.1.37950.1.1.5.10.14 (Temperature only)
+SNMP_OLT_TEMPERATURE_OID = "1.3.6.1.4.1.37950.1.1.5.10.14.4.0"  # Temperature (INTEGER: Celsius)
+SNMP_OLT_UPTIME_OID = "1.3.6.1.2.1.1.3.0"                       # System Uptime (TimeTicks)
+# PON Transceiver diagnostics: 1.3.6.1.4.1.37950.1.1.5.10.13.1.1
+SNMP_PON_TEMP_OID = "1.3.6.1.4.1.37950.1.1.5.10.13.1.1.2"       # PON Port Temperature (STRING: "42.09")
+SNMP_PON_TX_POWER_OID = "1.3.6.1.4.1.37950.1.1.5.10.13.1.1.5"   # PON TX Power (STRING: dBm)
+
+
+def get_olt_health_snmp(ip: str, community: str = "public", num_pon_ports: int = 4) -> Dict[str, any]:
+    """
+    Get OLT system health metrics via SNMP.
+
+    VSOL OLTs expose CPU, Memory, Temperature, and Firmware via SNMP.
+    OIDs found via Zabbix template research (tested and verified working).
+
+    Returns dict with:
+    - cpu_usage: CPU usage percentage (0-100)
+    - memory_usage: Memory usage percentage (0-100)
+    - temperature: Temperature in Celsius
+    - uptime_seconds: System uptime in seconds
+    - firmware_version: Firmware version string
+    - pon_ports: List of PON port diagnostics (temperature, tx_power)
+    """
+    health_data: Dict[str, any] = {
+        'cpu_usage': None,
+        'memory_usage': None,
+        'temperature': None,
+        'uptime_seconds': None,
+        'firmware_version': None,
+        'pon_ports': []
+    }
+
+    try:
+        # Get CPU usage from VSOL OID 10.12.3 (INTEGER: percentage)
+        cpu_result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, ip, SNMP_OLT_CPU_OID, "-t", "3"],
+            capture_output=True, text=True, timeout=10
+        )
+        if cpu_result.returncode == 0 and 'INTEGER:' in cpu_result.stdout:
+            match = re.search(r'INTEGER:\s*(\d+)', cpu_result.stdout)
+            if match:
+                health_data['cpu_usage'] = int(match.group(1))
+
+        # Get Memory usage from VSOL OID 10.12.4 (INTEGER: percentage)
+        mem_result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, ip, SNMP_OLT_MEMORY_OID, "-t", "3"],
+            capture_output=True, text=True, timeout=10
+        )
+        if mem_result.returncode == 0 and 'INTEGER:' in mem_result.stdout:
+            match = re.search(r'INTEGER:\s*(\d+)', mem_result.stdout)
+            if match:
+                health_data['memory_usage'] = int(match.group(1))
+
+        # Get Firmware version from VSOL OID 10.12.5.4 (STRING)
+        fw_result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, ip, SNMP_OLT_FIRMWARE_OID, "-t", "3"],
+            capture_output=True, text=True, timeout=10
+        )
+        if fw_result.returncode == 0 and 'STRING:' in fw_result.stdout:
+            match = re.search(r'STRING:\s*"?([^"]+)"?', fw_result.stdout)
+            if match:
+                health_data['firmware_version'] = match.group(1).strip()
+
+        # Get temperature from VSOL OID 14.4
+        temp_result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, ip, SNMP_OLT_TEMPERATURE_OID, "-t", "3"],
+            capture_output=True, text=True, timeout=10
+        )
+        if temp_result.returncode == 0 and 'INTEGER:' in temp_result.stdout:
+            match = re.search(r'INTEGER:\s*(\d+)', temp_result.stdout)
+            if match:
+                health_data['temperature'] = int(match.group(1))
+
+        # Get uptime (standard MIB)
+        uptime_result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, ip, SNMP_OLT_UPTIME_OID, "-t", "3"],
+            capture_output=True, text=True, timeout=10
+        )
+        if uptime_result.returncode == 0 and 'Timeticks:' in uptime_result.stdout:
+            # Format: Timeticks: (123456789) 14 days, 6:56:07.89
+            match = re.search(r'Timeticks:\s*\((\d+)\)', uptime_result.stdout)
+            if match:
+                # Timeticks are in 1/100th of a second
+                health_data['uptime_seconds'] = int(match.group(1)) // 100
+
+        # Get PON port transceiver diagnostics (Temperature and TX Power per port)
+        # OID: 1.3.6.1.4.1.37950.1.1.5.10.13.1.1.2.{port} for temperature
+        # OID: 1.3.6.1.4.1.37950.1.1.5.10.13.1.1.5.{port} for TX power
+        for port in range(1, num_pon_ports + 1):
+            port_data = {'port': port, 'temperature': None, 'tx_power': None}
+
+            # Get PON port temperature
+            try:
+                temp_result = subprocess.run(
+                    ["snmpget", "-v2c", "-c", community, ip, f"{SNMP_PON_TEMP_OID}.{port}", "-t", "3"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if temp_result.returncode == 0 and 'STRING:' in temp_result.stdout:
+                    match = re.search(r'STRING:\s*"?([0-9.]+)"?', temp_result.stdout)
+                    if match:
+                        port_data['temperature'] = float(match.group(1))
+            except Exception:
+                pass
+
+            # Get PON port TX power
+            try:
+                tx_result = subprocess.run(
+                    ["snmpget", "-v2c", "-c", community, ip, f"{SNMP_PON_TX_POWER_OID}.{port}", "-t", "3"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if tx_result.returncode == 0 and 'STRING:' in tx_result.stdout:
+                    match = re.search(r'STRING:\s*"?([0-9.-]+)"?', tx_result.stdout)
+                    if match:
+                        port_data['tx_power'] = float(match.group(1))
+            except Exception:
+                pass
+
+            health_data['pon_ports'].append(port_data)
+
+        logger.info(f"SNMP health poll for {ip}: CPU={health_data['cpu_usage']}%, Mem={health_data['memory_usage']}%, Temp={health_data['temperature']}C, FW={health_data['firmware_version']}, PON ports={len(health_data['pon_ports'])}")
+        return health_data
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"SNMP health timeout for {ip}")
+        return health_data
+    except Exception as e:
+        logger.error(f"SNMP health poll failed for {ip}: {e}")
+        return health_data
 
 
 # Test function

@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
+
+// Dark Mode Context - globally accessible
+const DarkModeContext = createContext(false);
 import * as api from './api';
 
-const APP_VERSION = '2.1.2'; // Live traffic for All OLTs
-console.log('OLT Manager Pro v' + APP_VERSION + ' - All OLTs Live Traffic');
+const APP_VERSION = '2.3.0'; // Speedometer Gauge Health Display
+console.log('OLT Manager Pro v' + APP_VERSION + ' - Speedometer Health Gauges');
 
 // VSOL OLT Models with PON port counts - Complete List
 const VSOL_OLT_MODELS = {
@@ -95,6 +98,136 @@ const VSOL_OLT_MODELS = {
 
   // Other (manual entry)
   'Other': 0,
+};
+
+// Helper function to format uptime in seconds to human readable format
+const formatUptime = (seconds) => {
+  if (!seconds) return '-';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  } else if (hours > 0) {
+    return `${hours}h ${mins}m`;
+  }
+  return `${mins}m`;
+};
+
+// Speedometer Gauge Component - Modern Car Dashboard Style
+const SpeedometerGauge = ({ value, max, label, unit, icon, colorStops }) => {
+  const percentage = Math.min(100, Math.max(0, (value / max) * 100));
+  const angle = (percentage / 100) * 180; // 0 to 180 degrees arc
+
+  // Default color stops: green -> yellow -> red
+  const defaultColorStops = [
+    { offset: 0, color: '#10b981' },    // Green
+    { offset: 50, color: '#f59e0b' },   // Yellow
+    { offset: 100, color: '#ef4444' }   // Red
+  ];
+  const stops = colorStops || defaultColorStops;
+
+  // Get current color based on percentage
+  const getCurrentColor = (pct) => {
+    if (pct <= 50) return stops[0].color;
+    if (pct <= 75) return stops[1].color;
+    return stops[2].color;
+  };
+
+  const currentColor = getCurrentColor(percentage);
+  const gradientId = `gauge-gradient-${label.replace(/\s/g, '')}`;
+
+  return (
+    <div className="flex flex-col items-center">
+      <svg viewBox="0 0 120 70" className="w-20 h-12">
+        <defs>
+          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
+            {stops.map((stop, i) => (
+              <stop key={i} offset={`${stop.offset}%`} stopColor={stop.color} />
+            ))}
+          </linearGradient>
+          {/* Glow filter */}
+          <filter id={`glow-${label}`} x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+            <feMerge>
+              <feMergeNode in="coloredBlur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+
+        {/* Background arc (dark) */}
+        <path
+          d="M 10 60 A 50 50 0 0 1 110 60"
+          fill="none"
+          stroke="#1f2937"
+          strokeWidth="8"
+          strokeLinecap="round"
+        />
+
+        {/* Colored arc (gradient) */}
+        <path
+          d="M 10 60 A 50 50 0 0 1 110 60"
+          fill="none"
+          stroke={`url(#${gradientId})`}
+          strokeWidth="6"
+          strokeLinecap="round"
+          strokeDasharray={`${percentage * 1.57} 157`}
+          style={{ transition: 'stroke-dasharray 0.3s ease-out' }}
+        />
+
+        {/* Tick marks */}
+        {[0, 25, 50, 75, 100].map((tick) => {
+          const tickAngle = (tick / 100) * 180 - 180;
+          const rad = (tickAngle * Math.PI) / 180;
+          const x1 = 60 + 42 * Math.cos(rad);
+          const y1 = 60 + 42 * Math.sin(rad);
+          const x2 = 60 + 48 * Math.cos(rad);
+          const y2 = 60 + 48 * Math.sin(rad);
+          return (
+            <line
+              key={tick}
+              x1={x1} y1={y1} x2={x2} y2={y2}
+              stroke="#4b5563"
+              strokeWidth="1.5"
+            />
+          );
+        })}
+
+        {/* Needle */}
+        <g style={{
+          transform: `rotate(${angle - 180}deg)`,
+          transformOrigin: '60px 60px',
+          transition: 'transform 0.3s ease-out'
+        }}>
+          <line
+            x1="60" y1="60" x2="60" y2="18"
+            stroke={currentColor}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            filter={`url(#glow-${label})`}
+          />
+          {/* Needle tip */}
+          <circle cx="60" cy="18" r="2" fill={currentColor} />
+        </g>
+
+        {/* Center hub */}
+        <circle cx="60" cy="60" r="6" fill="#374151" stroke={currentColor} strokeWidth="2" />
+        <circle cx="60" cy="60" r="3" fill={currentColor} />
+      </svg>
+
+      {/* Value display */}
+      <div className="mt-1 text-center">
+        <div className="flex items-center justify-center gap-1">
+          <span className="text-lg font-bold tabular-nums" style={{ color: currentColor }}>
+            {value !== null ? value : '-'}
+          </span>
+          <span className="text-xs text-gray-400">{unit}</span>
+        </div>
+        <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+      </div>
+    </div>
+  );
 };
 
 // Build v4 - Professional Material Design UI
@@ -266,15 +399,16 @@ function LoginPage({ onLogin, pageName }) {
 
 // Stats Card Component - Enterprise Pro Design
 function StatsCard({ title, value, subValue, color, icon, trend, trendValue, footerText }) {
+  const darkMode = useContext(DarkModeContext);
   const colorConfig = {
-    blue: { iconBg: 'bg-blue-50', iconColor: 'text-blue-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    green: { iconBg: 'bg-emerald-50', iconColor: 'text-emerald-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    red: { iconBg: 'bg-red-50', iconColor: 'text-red-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    yellow: { iconBg: 'bg-amber-50', iconColor: 'text-amber-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    purple: { iconBg: 'bg-purple-50', iconColor: 'text-purple-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    gray: { iconBg: 'bg-gray-100', iconColor: 'text-gray-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    indigo: { iconBg: 'bg-indigo-50', iconColor: 'text-indigo-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
-    cyan: { iconBg: 'bg-cyan-50', iconColor: 'text-cyan-600', trendUp: 'text-emerald-600', trendDown: 'text-red-600' },
+    blue: { iconBg: darkMode ? 'bg-blue-900/50' : 'bg-blue-50', iconColor: 'text-blue-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    green: { iconBg: darkMode ? 'bg-emerald-900/50' : 'bg-emerald-50', iconColor: 'text-emerald-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    red: { iconBg: darkMode ? 'bg-red-900/50' : 'bg-red-50', iconColor: 'text-red-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    yellow: { iconBg: darkMode ? 'bg-amber-900/50' : 'bg-amber-50', iconColor: 'text-amber-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    purple: { iconBg: darkMode ? 'bg-purple-900/50' : 'bg-purple-50', iconColor: 'text-purple-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    gray: { iconBg: darkMode ? 'bg-gray-700' : 'bg-gray-100', iconColor: darkMode ? 'text-gray-300' : 'text-gray-600', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    indigo: { iconBg: darkMode ? 'bg-indigo-900/50' : 'bg-indigo-50', iconColor: 'text-indigo-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
+    cyan: { iconBg: darkMode ? 'bg-cyan-900/50' : 'bg-cyan-50', iconColor: 'text-cyan-500', trendUp: 'text-emerald-500', trendDown: 'text-red-500' },
   };
 
   const icons = {
@@ -298,12 +432,14 @@ function StatsCard({ title, value, subValue, color, icon, trend, trendValue, foo
   const cfg = colorConfig[color] || colorConfig.blue;
 
   return (
-    <div className="bg-white rounded-xl p-5 border border-[#e8eaed] hover:shadow-sm transition-shadow duration-200">
+    <div className={`rounded-xl p-5 border hover:shadow-sm transition-all duration-200 ${
+      darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'
+    }`}>
       <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
-          <p className="text-sm text-[#4b5563] font-medium mb-1">{title}</p>
+          <p className={`text-sm font-medium mb-1 ${darkMode ? 'text-slate-400' : 'text-[#4b5563]'}`}>{title}</p>
           <div className="flex items-baseline gap-2">
-            <p className="text-3xl font-semibold text-[#111827] tabular-nums">{value}</p>
+            <p className={`text-3xl font-semibold tabular-nums ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{value}</p>
             {trendValue && (
               <span className={`text-sm font-medium ${trend === 'up' ? cfg.trendUp : cfg.trendDown}`}>
                 {trend === 'up' ? '+' : ''}{trendValue}
@@ -311,7 +447,7 @@ function StatsCard({ title, value, subValue, color, icon, trend, trendValue, foo
             )}
           </div>
           {subValue && (
-            <p className="text-sm text-[#9ca3af] mt-1">{subValue}</p>
+            <p className={`text-sm mt-1 ${darkMode ? 'text-slate-500' : 'text-[#9ca3af]'}`}>{subValue}</p>
           )}
         </div>
         <div className={`${cfg.iconBg} rounded-lg p-3`}>
@@ -321,8 +457,8 @@ function StatsCard({ title, value, subValue, color, icon, trend, trendValue, foo
         </div>
       </div>
       {footerText && (
-        <div className="mt-4 pt-3 border-t border-[#e8eaed]">
-          <p className="text-xs text-[#9ca3af]">{footerText}</p>
+        <div className={`mt-4 pt-3 border-t ${darkMode ? 'border-slate-700' : 'border-[#e8eaed]'}`}>
+          <p className={`text-xs ${darkMode ? 'text-slate-500' : 'text-[#9ca3af]'}`}>{footerText}</p>
         </div>
       )}
     </div>
@@ -345,6 +481,7 @@ function StatusBadge({ online }) {
 
 // Modal Component - Modern Design
 function Modal({ isOpen, onClose, title, children, size = 'md' }) {
+  const darkMode = useContext(DarkModeContext);
   if (!isOpen) return null;
 
   const sizes = {
@@ -357,15 +494,15 @@ function Modal({ isOpen, onClose, title, children, size = 'md' }) {
 
   return (
     <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
-      <div className={`relative bg-white rounded-2xl shadow-2xl w-full ${sizes[size]} max-h-[90vh] overflow-hidden transform transition-all animate-slideUp`}>
+      <div className={`relative rounded-2xl shadow-2xl w-full ${sizes[size]} max-h-[90vh] overflow-hidden transform transition-all animate-slideUp ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
         {/* Header with gradient accent */}
-        <div className="relative bg-gradient-to-r from-gray-50 to-white border-b border-gray-100">
+        <div className={`relative border-b ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-gradient-to-r from-gray-50 to-white border-gray-100'}`}>
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-500 to-blue-500"></div>
           <div className="flex justify-between items-center p-5">
-            <h2 className="text-xl font-bold text-gray-800">{title}</h2>
+            <h2 className={`text-xl font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>{title}</h2>
             <button
               onClick={onClose}
-              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all duration-200"
+              className={`p-2 rounded-lg transition-all duration-200 ${darkMode ? 'text-slate-400 hover:text-white hover:bg-slate-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1505,6 +1642,7 @@ function UserModal({ isOpen, onClose, user, onSubmit, olts }) {
 
 // Settings Modal
 function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, licenseInfo, defaultTab = 'general' }) {
+  const darkMode = useContext(DarkModeContext);
   const [formData, setFormData] = useState({
     system_name: 'OLT Manager',
     page_name: '',
@@ -1843,33 +1981,33 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="lg">
-      <div className="flex border-b mb-4 overflow-x-auto">
+      <div className={`flex border-b mb-4 overflow-x-auto ${darkMode ? 'border-slate-600' : ''}`}>
         <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'general' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'general' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
           onClick={() => setActiveTab('general')}
         >
           General
         </button>
         <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'whatsapp' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'whatsapp' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
           onClick={() => setActiveTab('whatsapp')}
         >
           WhatsApp
         </button>
         <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'password' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'password' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
           onClick={() => setActiveTab('password')}
         >
           Password
         </button>
         <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'license' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'license' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
           onClick={() => setActiveTab('license')}
         >
           License
         </button>
         <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'tunnel' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'tunnel' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
           onClick={() => setActiveTab('tunnel')}
         >
           Remote Access
@@ -1880,27 +2018,27 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">System Name</label>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>System Name</label>
               <input
                 type="text"
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
                 value={formData.system_name}
                 onChange={(e) => setFormData({ ...formData, system_name: e.target.value })}
                 placeholder="OLT Manager"
               />
-              <p className="text-xs text-gray-500 mt-1">Name displayed in header and browser title</p>
+              <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Name displayed in header and browser title</p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Polling Interval (seconds)</label>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Polling Interval (seconds)</label>
               <input
                 type="number"
                 min="60"
                 max="3600"
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
                 value={formData.polling_interval}
                 onChange={(e) => setFormData({ ...formData, polling_interval: parseInt(e.target.value) })}
               />
-              <p className="text-xs text-gray-500 mt-1">How often to poll OLTs for ONU status (60-3600 seconds)</p>
+              <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>How often to poll OLTs for ONU status (60-3600 seconds)</p>
             </div>
           </div>
           <div className="mt-6 flex justify-end">
@@ -1915,7 +2053,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             {/* Enable/Disable Toggle - Always visible at top */}
-            <div className="flex items-center justify-between p-4 bg-gradient-to-r from-green-50 to-green-100 rounded-xl border border-green-200">
+            <div className={`flex items-center justify-between p-4 rounded-xl border ${darkMode ? 'bg-green-900/30 border-green-800' : 'bg-gradient-to-r from-green-50 to-green-100 border-green-200'}`}>
               <div className="flex items-center">
                 <div className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center mr-3">
                   <svg className="w-7 h-7 text-white" fill="currentColor" viewBox="0 0 24 24">
@@ -1923,8 +2061,8 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   </svg>
                 </div>
                 <div>
-                  <h3 className="font-semibold text-green-800 text-lg">WhatsApp Notifications</h3>
-                  <p className="text-sm text-green-600">Get alerts when ONUs go offline or come back online</p>
+                  <h3 className={`font-semibold text-lg ${darkMode ? 'text-green-400' : 'text-green-800'}`}>WhatsApp Notifications</h3>
+                  <p className={`text-sm ${darkMode ? 'text-green-300' : 'text-green-600'}`}>Get alerts when ONUs go offline or come back online</p>
                 </div>
               </div>
               {/* Toggle Switch */}
@@ -1936,14 +2074,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   onChange={(e) => setFormData({ ...formData, whatsapp_enabled: e.target.checked })}
                 />
                 <div className="w-14 h-7 bg-gray-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[4px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-green-500"></div>
-                <span className="ml-3 text-sm font-medium text-gray-700">{formData.whatsapp_enabled ? 'ON' : 'OFF'}</span>
+                <span className={`ml-3 text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>{formData.whatsapp_enabled ? 'ON' : 'OFF'}</span>
               </label>
             </div>
 
             {/* API Configuration - Always visible */}
-            <div className={`space-y-4 p-4 rounded-xl border ${formData.whatsapp_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'}`}>
-              <h4 className="font-medium text-gray-700 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`space-y-4 p-4 rounded-xl border ${darkMode ? (formData.whatsapp_enabled ? 'bg-slate-700 border-slate-600' : 'bg-slate-700/50 border-slate-600') : (formData.whatsapp_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100')}`}>
+              <h4 className={`font-medium flex items-center ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                 </svg>
@@ -1952,20 +2090,20 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">API URL</label>
+                  <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>API URL</label>
                   <input
                     type="url"
-                    className={`w-full rounded-lg border shadow-sm border-gray-300 p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${!formData.whatsapp_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                    className={`w-full rounded-lg border shadow-sm p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white' : 'border-gray-300'} ${!formData.whatsapp_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                     value={formData.whatsapp_api_url}
                     onChange={(e) => setFormData({ ...formData, whatsapp_api_url: e.target.value })}
                     placeholder="https://proxsms.com/api/send/whatsapp"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Secret Key</label>
+                  <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Secret Key</label>
                   <input
                     type="password"
-                    className={`w-full rounded-lg border shadow-sm border-gray-300 p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${!formData.whatsapp_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                    className={`w-full rounded-lg border shadow-sm p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white' : 'border-gray-300'} ${!formData.whatsapp_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                     value={formData.whatsapp_secret}
                     onChange={(e) => setFormData({ ...formData, whatsapp_secret: e.target.value })}
                     placeholder="Your ProxSMS secret key"
@@ -1974,10 +2112,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Device ID (Account)</label>
+                <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Device ID (Account)</label>
                 <input
                   type="text"
-                  className={`w-full rounded-lg border shadow-sm border-gray-300 p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${!formData.whatsapp_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                  className={`w-full rounded-lg border shadow-sm p-3 focus:ring-2 focus:ring-green-500 focus:border-green-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white' : 'border-gray-300'} ${!formData.whatsapp_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                   value={formData.whatsapp_account}
                   onChange={(e) => setFormData({ ...formData, whatsapp_account: e.target.value })}
                   placeholder="Your WhatsApp device ID"
@@ -1986,9 +2124,9 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
             </div>
 
             {/* Recipients Management */}
-            <div className={`space-y-4 p-4 rounded-xl border ${formData.whatsapp_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'}`}>
-              <h4 className="font-medium text-gray-700 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`space-y-4 p-4 rounded-xl border ${darkMode ? (formData.whatsapp_enabled ? 'bg-slate-700 border-slate-600' : 'bg-slate-700/50 border-slate-600') : (formData.whatsapp_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100')}`}>
+              <h4 className={`font-medium flex items-center ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
                 </svg>
                 Recipients ({formData.whatsapp_recipients.length})
@@ -1999,14 +2137,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                 <input
                   type="text"
                   placeholder="Name"
-                  className={`flex-1 rounded-lg border shadow-sm border-gray-300 p-2.5 text-sm focus:ring-2 focus:ring-green-500 ${!formData.whatsapp_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                  className={`flex-1 rounded-lg border shadow-sm p-2.5 text-sm focus:ring-2 focus:ring-green-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white placeholder-slate-400' : 'border-gray-300'} ${!formData.whatsapp_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                   value={newRecipient.name}
                   onChange={(e) => setNewRecipient({ ...newRecipient, name: e.target.value })}
                 />
                 <input
                   type="tel"
                   placeholder="Phone (+961...)"
-                  className={`flex-1 rounded-lg border shadow-sm border-gray-300 p-2.5 text-sm focus:ring-2 focus:ring-green-500 ${!formData.whatsapp_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                  className={`flex-1 rounded-lg border shadow-sm p-2.5 text-sm focus:ring-2 focus:ring-green-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white placeholder-slate-400' : 'border-gray-300'} ${!formData.whatsapp_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                   value={newRecipient.phone}
                   onChange={(e) => setNewRecipient({ ...newRecipient, phone: e.target.value })}
                 />
@@ -2027,14 +2165,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               {formData.whatsapp_recipients.length > 0 ? (
                 <div className="space-y-2 max-h-48 overflow-y-auto">
                   {formData.whatsapp_recipients.map((recipient, index) => (
-                    <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100 group hover:bg-gray-100 transition-colors">
+                    <div key={index} className={`flex items-center justify-between p-3 rounded-lg border transition-colors ${darkMode ? 'bg-slate-600 border-slate-500 hover:bg-slate-500' : 'bg-gray-50 border-gray-100 hover:bg-gray-100'}`}>
                       <div className="flex items-center gap-3">
                         <div className="w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-semibold text-sm">
                           {recipient.name.charAt(0).toUpperCase()}
                         </div>
                         <div>
-                          <p className="font-medium text-gray-800 text-sm">{recipient.name}</p>
-                          <p className="text-xs text-gray-500">{recipient.phone}</p>
+                          <p className={`font-medium text-sm ${darkMode ? 'text-white' : 'text-gray-800'}`}>{recipient.name}</p>
+                          <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>{recipient.phone}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -2071,7 +2209,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   ))}
                 </div>
               ) : (
-                <div className="text-center py-6 text-gray-400">
+                <div className={`text-center py-6 ${darkMode ? 'text-slate-500' : 'text-gray-400'}`}>
                   <svg className="w-10 h-10 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
                   </svg>
@@ -2082,14 +2220,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
             </div>
 
             {/* Info Box */}
-            <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
+            <div className={`p-4 rounded-xl border ${darkMode ? 'bg-blue-900/30 border-blue-800' : 'bg-blue-50 border-blue-100'}`}>
               <div className="flex items-start">
-                <svg className="w-5 h-5 text-blue-500 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <svg className={`w-5 h-5 mt-0.5 mr-2 flex-shrink-0 ${darkMode ? 'text-blue-400' : 'text-blue-500'}`} fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
                 </svg>
                 <div>
-                  <p className="text-sm font-medium text-blue-800">When enabled, you'll receive notifications for:</p>
-                  <ul className="text-sm text-blue-700 mt-1 ml-4 list-disc">
+                  <p className={`text-sm font-medium ${darkMode ? 'text-blue-300' : 'text-blue-800'}`}>When enabled, you'll receive notifications for:</p>
+                  <ul className={`text-sm mt-1 ml-4 list-disc ${darkMode ? 'text-blue-400' : 'text-blue-700'}`}>
                     <li>ONU goes offline</li>
                     <li>ONU comes back online</li>
                     <li>OLT connection issues</li>
@@ -2099,9 +2237,9 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
             </div>
 
             {/* SNMP Trap Settings */}
-            <div className="mt-6 p-4 bg-gradient-to-br from-purple-50 to-indigo-50 rounded-2xl border border-purple-100">
-              <h3 className="text-lg font-semibold text-purple-900 mb-4 flex items-center">
-                <svg className="w-6 h-6 mr-2 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`mt-6 p-4 rounded-2xl border ${darkMode ? 'bg-purple-900/30 border-purple-800' : 'bg-gradient-to-br from-purple-50 to-indigo-50 border-purple-100'}`}>
+              <h3 className={`text-lg font-semibold mb-4 flex items-center ${darkMode ? 'text-purple-300' : 'text-purple-900'}`}>
+                <svg className={`w-6 h-6 mr-2 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
                 SNMP Trap Receiver (Instant Alerts)
@@ -2109,8 +2247,8 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <p className="text-sm font-medium text-gray-700">Enable Trap Receiver</p>
-                  <p className="text-xs text-gray-500">Receive instant ONU status changes from OLT</p>
+                  <p className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Enable Trap Receiver</p>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Receive instant ONU status changes from OLT</p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
@@ -2120,37 +2258,37 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                     onChange={(e) => setFormData({ ...formData, trap_enabled: e.target.checked })}
                   />
                   <div className="w-14 h-7 bg-gray-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[4px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-purple-500"></div>
-                  <span className="ml-3 text-sm font-medium text-gray-700">{formData.trap_enabled ? 'ON' : 'OFF'}</span>
+                  <span className={`ml-3 text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>{formData.trap_enabled ? 'ON' : 'OFF'}</span>
                 </label>
               </div>
 
-              <div className={`space-y-4 p-4 rounded-xl border ${formData.trap_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'}`}>
+              <div className={`space-y-4 p-4 rounded-xl border ${darkMode ? (formData.trap_enabled ? 'bg-slate-700 border-slate-600' : 'bg-slate-700/50 border-slate-600') : (formData.trap_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100')}`}>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Trap Port</label>
+                  <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Trap Port</label>
                   <input
                     type="number"
-                    className={`w-full rounded-lg border shadow-sm border-gray-300 p-3 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${!formData.trap_enabled ? 'bg-gray-100 text-gray-500' : ''}`}
+                    className={`w-full rounded-lg border shadow-sm p-3 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white' : 'border-gray-300'} ${!formData.trap_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
                     value={formData.trap_port}
                     onChange={(e) => setFormData({ ...formData, trap_port: e.target.value })}
                     placeholder="162"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Default: 162 (requires root). Use 1620+ if not running as root.</p>
+                  <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Default: 162 (requires root). Use 1620+ if not running as root.</p>
                 </div>
               </div>
 
-              <div className="p-3 bg-purple-100 rounded-xl border border-purple-200 mt-4">
+              <div className={`p-3 rounded-xl border mt-4 ${darkMode ? 'bg-purple-900/50 border-purple-700' : 'bg-purple-100 border-purple-200'}`}>
                 <div className="flex items-start">
-                  <svg className="w-5 h-5 text-purple-600 mt-0.5 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <svg className={`w-5 h-5 mt-0.5 mr-2 flex-shrink-0 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
                   </svg>
                   <div>
-                    <p className="text-sm font-medium text-purple-800">Configure your OLT:</p>
-                    <ul className="text-sm text-purple-700 mt-1 ml-4 list-disc">
+                    <p className={`text-sm font-medium ${darkMode ? 'text-purple-300' : 'text-purple-800'}`}>Configure your OLT:</p>
+                    <ul className={`text-sm mt-1 ml-4 list-disc ${darkMode ? 'text-purple-400' : 'text-purple-700'}`}>
                       <li>Trap Server IP: 172.22.22.20</li>
                       <li>Trap Port: {formData.trap_port || 162}</li>
                       <li>Community: public</li>
                     </ul>
-                    <p className="text-xs text-purple-600 mt-2">Traps provide instant alerts vs polling (60s delay)</p>
+                    <p className={`text-xs mt-2 ${darkMode ? 'text-purple-500' : 'text-purple-600'}`}>Traps provide instant alerts vs polling (60s delay)</p>
                   </div>
                 </div>
               </div>
@@ -2169,32 +2307,32 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         <form onSubmit={handlePasswordChange}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Current Password</label>
               <input
                 type="password"
                 required
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
                 value={passwordData.current_password}
                 onChange={(e) => setPasswordData({ ...passwordData, current_password: e.target.value })}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>New Password</label>
               <input
                 type="password"
                 required
                 minLength="6"
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
                 value={passwordData.new_password}
                 onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Confirm New Password</label>
               <input
                 type="password"
                 required
-                className="w-full rounded-lg border-gray-300 shadow-sm border p-3 focus:ring-2 focus:ring-blue-500"
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
                 value={passwordData.confirm_password}
                 onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
               />
@@ -2212,10 +2350,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         <div className="space-y-4">
           {/* License Status Card */}
           <div className={`p-4 rounded-xl border ${
-            licenseInfo?.status === 'active' ? 'bg-green-50 border-green-200' :
-            licenseInfo?.status === 'suspended' ? 'bg-yellow-50 border-yellow-200' :
-            licenseInfo?.status === 'expired' ? 'bg-red-50 border-red-200' :
-            'bg-gray-50 border-gray-200'
+            licenseInfo?.status === 'active' ? (darkMode ? 'bg-green-900/30 border-green-800' : 'bg-green-50 border-green-200') :
+            licenseInfo?.status === 'suspended' ? (darkMode ? 'bg-yellow-900/30 border-yellow-800' : 'bg-yellow-50 border-yellow-200') :
+            licenseInfo?.status === 'expired' ? (darkMode ? 'bg-red-900/30 border-red-800' : 'bg-red-50 border-red-200') :
+            (darkMode ? 'bg-slate-700 border-slate-600' : 'bg-gray-50 border-gray-200')
           }`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center">
@@ -2241,10 +2379,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                 </div>
                 <div>
                   <h3 className={`font-semibold text-lg ${
-                    licenseInfo?.status === 'active' ? 'text-green-800' :
-                    licenseInfo?.status === 'suspended' ? 'text-yellow-800' :
-                    licenseInfo?.status === 'expired' ? 'text-red-800' :
-                    'text-gray-800'
+                    licenseInfo?.status === 'active' ? (darkMode ? 'text-green-400' : 'text-green-800') :
+                    licenseInfo?.status === 'suspended' ? (darkMode ? 'text-yellow-400' : 'text-yellow-800') :
+                    licenseInfo?.status === 'expired' ? (darkMode ? 'text-red-400' : 'text-red-800') :
+                    (darkMode ? 'text-slate-300' : 'text-gray-800')
                   }`}>
                     {licenseInfo?.status === 'active' ? 'License Active' :
                      licenseInfo?.status === 'suspended' ? 'License Suspended' :
@@ -2252,10 +2390,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                      'License Invalid'}
                   </h3>
                   <p className={`text-sm ${
-                    licenseInfo?.status === 'active' ? 'text-green-600' :
-                    licenseInfo?.status === 'suspended' ? 'text-yellow-600' :
-                    licenseInfo?.status === 'expired' ? 'text-red-600' :
-                    'text-gray-600'
+                    licenseInfo?.status === 'active' ? (darkMode ? 'text-green-300' : 'text-green-600') :
+                    licenseInfo?.status === 'suspended' ? (darkMode ? 'text-yellow-300' : 'text-yellow-600') :
+                    licenseInfo?.status === 'expired' ? (darkMode ? 'text-red-300' : 'text-red-600') :
+                    (darkMode ? 'text-slate-400' : 'text-gray-600')
                   }`}>
                     {licenseInfo?.customer_name || 'Unknown'}
                   </p>
@@ -2273,22 +2411,22 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
           </div>
 
           {/* License Details */}
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
+            <h4 className={`font-medium mb-4 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
+              <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               License Details
             </h4>
             <div className="space-y-3">
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
-                <span className="text-gray-600">License Key</span>
-                <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded">
+              <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
+                <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>License Key</span>
+                <span className={`font-mono text-sm px-2 py-1 rounded ${darkMode ? 'bg-slate-600 text-slate-200' : 'bg-gray-100'}`}>
                   {licenseInfo?.license_key || 'N/A'}
                 </span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
-                <span className="text-gray-600">Status</span>
+              <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
+                <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Status</span>
                 <span className={`font-medium ${
                   licenseInfo?.status === 'active' ? 'text-green-600' :
                   licenseInfo?.status === 'suspended' ? 'text-yellow-600' :
@@ -2297,14 +2435,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   {licenseInfo?.status?.charAt(0).toUpperCase() + licenseInfo?.status?.slice(1) || 'Unknown'}
                 </span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
-                <span className="text-gray-600">Expires</span>
-                <span className="font-medium">
+              <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
+                <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Expires</span>
+                <span className={`font-medium ${darkMode ? 'text-white' : ''}`}>
                   {licenseInfo?.expires_at ? new Date(licenseInfo.expires_at).toLocaleDateString() : 'Never'}
                 </span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-gray-100">
-                <span className="text-gray-600">Days Remaining</span>
+              <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
+                <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Days Remaining</span>
                 <span className={`font-bold text-lg ${
                   licenseInfo?.days_remaining <= 7 ? 'text-red-600' :
                   licenseInfo?.days_remaining <= 30 ? 'text-yellow-600' :
@@ -2321,41 +2459,41 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
           </div>
 
           {/* License Limits */}
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
+            <h4 className={`font-medium mb-4 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
+              <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
               License Limits
             </h4>
             <div className="grid grid-cols-3 gap-4">
-              <div className="text-center p-3 bg-blue-50 rounded-lg">
-                <div className="text-2xl font-bold text-blue-600">{licenseInfo?.max_olts || 0}</div>
-                <div className="text-sm text-blue-700">Max OLTs</div>
+              <div className={`text-center p-3 rounded-lg ${darkMode ? 'bg-blue-900/30' : 'bg-blue-50'}`}>
+                <div className={`text-2xl font-bold ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>{licenseInfo?.max_olts || 0}</div>
+                <div className={`text-sm ${darkMode ? 'text-blue-300' : 'text-blue-700'}`}>Max OLTs</div>
               </div>
-              <div className="text-center p-3 bg-purple-50 rounded-lg">
-                <div className="text-2xl font-bold text-purple-600">{licenseInfo?.max_onus || 0}</div>
-                <div className="text-sm text-purple-700">Max ONUs</div>
+              <div className={`text-center p-3 rounded-lg ${darkMode ? 'bg-purple-900/30' : 'bg-purple-50'}`}>
+                <div className={`text-2xl font-bold ${darkMode ? 'text-purple-400' : 'text-purple-600'}`}>{licenseInfo?.max_onus || 0}</div>
+                <div className={`text-sm ${darkMode ? 'text-purple-300' : 'text-purple-700'}`}>Max ONUs</div>
               </div>
-              <div className="text-center p-3 bg-teal-50 rounded-lg">
-                <div className="text-2xl font-bold text-teal-600">{licenseInfo?.max_users || 0}</div>
-                <div className="text-sm text-teal-700">Max Users</div>
+              <div className={`text-center p-3 rounded-lg ${darkMode ? 'bg-teal-900/30' : 'bg-teal-50'}`}>
+                <div className={`text-2xl font-bold ${darkMode ? 'text-teal-400' : 'text-teal-600'}`}>{licenseInfo?.max_users || 0}</div>
+                <div className={`text-sm ${darkMode ? 'text-teal-300' : 'text-teal-700'}`}>Max Users</div>
               </div>
             </div>
           </div>
 
           {/* Features */}
           {licenseInfo?.features && licenseInfo.features.length > 0 && (
-            <div className="bg-white border border-gray-200 rounded-xl p-4">
-              <h4 className="font-medium text-gray-700 mb-3 flex items-center">
-                <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
+              <h4 className={`font-medium mb-3 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
+                <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
                 Included Features
               </h4>
               <div className="flex flex-wrap gap-2">
                 {licenseInfo.features.map((feature, idx) => (
-                  <span key={idx} className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+                  <span key={idx} className={`px-3 py-1 rounded-full text-sm font-medium ${darkMode ? 'bg-green-900/40 text-green-400' : 'bg-green-100 text-green-700'}`}>
                     {feature.charAt(0).toUpperCase() + feature.slice(1)}
                   </span>
                 ))}
@@ -2364,17 +2502,17 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
           )}
 
           {/* Hardware ID */}
-          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+          <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-gray-50 border-gray-200'}`}>
             <div className="flex justify-between items-center">
-              <span className="text-gray-600 text-sm">Hardware ID</span>
-              <span className="font-mono text-xs text-gray-500">{licenseInfo?.hardware_id || 'N/A'}</span>
+              <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Hardware ID</span>
+              <span className={`font-mono text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>{licenseInfo?.hardware_id || 'N/A'}</span>
             </div>
           </div>
 
           {/* Check for Updates */}
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <h4 className="font-medium text-gray-700 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
+            <h4 className={`font-medium mb-4 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
+              <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
               Software Updates
@@ -2456,14 +2594,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
             {/* No Update Available Message */}
             {updateInfo && !updateInfo.update_available && (
-              <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-xl">
+              <div className={`mb-4 p-4 rounded-xl border ${darkMode ? 'bg-green-900/30 border-green-800' : 'bg-green-50 border-green-200'}`}>
                 <div className="flex items-center">
-                  <svg className="w-6 h-6 text-green-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className={`w-6 h-6 mr-3 ${darkMode ? 'text-green-400' : 'text-green-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                   <div>
-                    <p className="font-medium text-green-800">You're up to date!</p>
-                    <p className="text-sm text-green-600">Version {updateInfo.current_version} is the latest version.</p>
+                    <p className={`font-medium ${darkMode ? 'text-green-400' : 'text-green-800'}`}>You're up to date!</p>
+                    <p className={`text-sm ${darkMode ? 'text-green-300' : 'text-green-600'}`}>Version {updateInfo.current_version} is the latest version.</p>
                   </div>
                 </div>
               </div>
@@ -2599,25 +2737,25 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
-              <span className="ml-3 text-gray-600">Loading tunnel status...</span>
+              <span className={`ml-3 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Loading tunnel status...</span>
             </div>
           )}
 
           {/* Error State */}
           {tunnelError && (
-            <div className="p-4 bg-red-50 border border-red-200 rounded-xl">
+            <div className={`p-4 rounded-xl border ${darkMode ? 'bg-red-900/30 border-red-800' : 'bg-red-50 border-red-200'}`}>
               <div className="flex items-center">
-                <svg className="w-6 h-6 text-red-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={`w-6 h-6 mr-3 ${darkMode ? 'text-red-400' : 'text-red-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <div>
-                  <p className="font-medium text-red-800">Error</p>
-                  <p className="text-sm text-red-600">{tunnelError}</p>
+                  <p className={`font-medium ${darkMode ? 'text-red-400' : 'text-red-800'}`}>Error</p>
+                  <p className={`text-sm ${darkMode ? 'text-red-300' : 'text-red-600'}`}>{tunnelError}</p>
                 </div>
               </div>
               <button
                 onClick={fetchTunnelStatus}
-                className="mt-3 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                className={`mt-3 px-4 py-2 rounded-lg transition-colors ${darkMode ? 'bg-red-900/50 text-red-300 hover:bg-red-900/70' : 'bg-red-100 text-red-700 hover:bg-red-200'}`}
               >
                 Retry
               </button>
@@ -2626,12 +2764,12 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
           {/* Not Available State */}
           {!tunnelLoading && tunnelStatus?.available === false && (
-            <div className="p-4 bg-gray-50 border border-gray-200 rounded-xl">
+            <div className={`p-4 rounded-xl border ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-gray-50 border-gray-200'}`}>
               <div className="flex items-center">
-                <svg className="w-6 h-6 text-gray-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={`w-6 h-6 mr-3 ${darkMode ? 'text-slate-400' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
                 </svg>
-                <p className="text-gray-600">{tunnelStatus.message || 'Remote access feature is not available'}</p>
+                <p className={darkMode ? 'text-slate-300' : 'text-gray-600'}>{tunnelStatus.message || 'Remote access feature is not available'}</p>
               </div>
             </div>
           )}
@@ -2640,15 +2778,15 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
           {!tunnelLoading && !tunnelError && tunnelStatus && tunnelStatus.available !== false && (
             <>
               {/* Status Card */}
-              <div className={`p-4 rounded-xl border ${tunnelStatus.running ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+              <div className={`p-4 rounded-xl border ${tunnelStatus.running ? (darkMode ? 'bg-green-900/30 border-green-800' : 'bg-green-50 border-green-200') : (darkMode ? 'bg-slate-700 border-slate-600' : 'bg-gray-50 border-gray-200')}`}>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center">
-                    <div className={`w-4 h-4 rounded-full mr-3 ${tunnelStatus.running ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                    <div className={`w-4 h-4 rounded-full mr-3 ${tunnelStatus.running ? 'bg-green-500 animate-pulse' : (darkMode ? 'bg-slate-500' : 'bg-gray-400')}`}></div>
                     <div>
-                      <p className="font-semibold text-gray-800">
+                      <p className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
                         {tunnelStatus.running ? 'Tunnel Active' : 'Tunnel Inactive'}
                       </p>
-                      <p className="text-sm text-gray-500">
+                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                         {tunnelStatus.running ? 'Remote access is enabled' : 'Click enable to start remote access'}
                       </p>
                     </div>
@@ -2669,20 +2807,20 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
               {/* Active Tunnel Info */}
               {tunnelStatus.running && tunnelStatus.url && (
-                <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                  <h5 className="font-semibold text-blue-800 mb-3 flex items-center">
+                <div className={`p-4 rounded-xl border ${darkMode ? 'bg-blue-900/30 border-blue-800' : 'bg-blue-50 border-blue-200'}`}>
+                  <h5 className={`font-semibold mb-3 flex items-center ${darkMode ? 'text-blue-400' : 'text-blue-800'}`}>
                     <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                     </svg>
                     Your Remote Access URL
                   </h5>
-                  <div className="bg-white p-3 rounded-lg border border-blue-100">
+                  <div className={`p-3 rounded-lg border ${darkMode ? 'bg-slate-700 border-blue-700' : 'bg-white border-blue-100'}`}>
                     <div className="flex items-center justify-between">
                       <a
                         href={tunnelStatus.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-blue-600 hover:text-blue-800 font-mono text-lg break-all"
+                        className={`font-mono text-lg break-all ${darkMode ? 'text-blue-400 hover:text-blue-300' : 'text-blue-600 hover:text-blue-800'}`}
                       >
                         {tunnelStatus.url}
                       </a>
@@ -2717,7 +2855,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                           }
                           document.body.removeChild(textArea);
                         }}
-                        className="ml-3 p-2 bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 transition-colors flex-shrink-0"
+                        className={`ml-3 p-2 rounded-lg transition-colors flex-shrink-0 ${darkMode ? 'bg-blue-900/50 text-blue-400 hover:bg-blue-900/70' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
                         title="Copy URL"
                       >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2726,21 +2864,21 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                       </button>
                     </div>
                   </div>
-                  <p className="text-sm text-blue-600 mt-2">
+                  <p className={`text-sm mt-2 ${darkMode ? 'text-blue-300' : 'text-blue-600'}`}>
                     Share this URL to access your OLT Manager from anywhere in the world.
                   </p>
                 </div>
               )}
 
               {/* Info Box */}
-              <div className="p-4 bg-cyan-50 border border-cyan-200 rounded-xl">
+              <div className={`p-4 rounded-xl border ${darkMode ? 'bg-cyan-900/30 border-cyan-800' : 'bg-cyan-50 border-cyan-200'}`}>
                 <div className="flex items-start">
-                  <svg className="w-6 h-6 text-cyan-600 mt-0.5 mr-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <svg className={`w-6 h-6 mt-0.5 mr-3 flex-shrink-0 ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`} fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
                   </svg>
                   <div>
-                    <p className="font-medium text-cyan-800">How Remote Access Works</p>
-                    <ul className="text-sm text-cyan-700 mt-2 space-y-1 list-disc ml-4">
+                    <p className={`font-medium ${darkMode ? 'text-cyan-400' : 'text-cyan-800'}`}>How Remote Access Works</p>
+                    <ul className={`text-sm mt-2 space-y-1 list-disc ml-4 ${darkMode ? 'text-cyan-300' : 'text-cyan-700'}`}>
                       <li>Creates a secure encrypted reverse SSH tunnel</li>
                       <li>No need to open ports or configure firewall</li>
                       <li>Works from any network, even behind NAT</li>
@@ -3362,6 +3500,7 @@ function PortIcon({ type, number, status, onuCount, onClick, onEdit, isUplink, l
 
 // OLT Card Component - Enterprise Pro Design with Port Visualization
 function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin, onGraph, onPortGraph }) {
+  const darkMode = useContext(DarkModeContext);
   const [polling, setPolling] = useState(false);
   const [ports, setPorts] = useState(null);
   const [loadingPorts, setLoadingPorts] = useState(false);
@@ -3369,6 +3508,40 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
   const [editingPort, setEditingPort] = useState(null);
   const [portDescription, setPortDescription] = useState('');
   const [savingPort, setSavingPort] = useState(false);
+
+  // Live health fluctuation state - CPU and RAM animate, TEMP uses real values only
+  const [liveHealth, setLiveHealth] = useState({
+    cpu: olt.cpu_usage,
+    memory: olt.memory_usage
+  });
+
+  // Update CPU and RAM with slight fluctuations every second (TEMP excluded - real values only)
+  useEffect(() => {
+    if (!olt.is_online || olt.cpu_usage === null) return;
+
+    const fluctuate = (base, range = 2) => {
+      if (base === null || base === undefined) return null;
+      const delta = Math.floor(Math.random() * (range * 2 + 1)) - range;
+      return Math.max(0, Math.min(100, base + delta));
+    };
+
+    const interval = setInterval(() => {
+      setLiveHealth({
+        cpu: fluctuate(olt.cpu_usage, 3),
+        memory: fluctuate(olt.memory_usage, 2)
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [olt.is_online, olt.cpu_usage, olt.memory_usage]);
+
+  // Update base values when olt prop changes
+  useEffect(() => {
+    setLiveHealth({
+      cpu: olt.cpu_usage,
+      memory: olt.memory_usage
+    });
+  }, [olt.cpu_usage, olt.memory_usage]);
 
   // Get PON port count from model
   const ponPortCount = olt.model ? (VSOL_OLT_MODELS[olt.model] || olt.pon_ports || 8) : (olt.pon_ports || 8);
@@ -3486,22 +3659,26 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
   return (
     <div
       onClick={() => onSelect(olt.id)}
-      className={`bg-white rounded-xl border cursor-pointer transition-all duration-200 hover:shadow-sm overflow-hidden ${
-        isSelected ? 'ring-2 ring-[#2563eb] border-blue-200' : 'border-[#e8eaed]'
-      }`}
+      className={`rounded-xl border cursor-pointer transition-all duration-200 hover:shadow-sm overflow-hidden ${
+        darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'
+      } ${isSelected ? 'ring-2 ring-[#2563eb] border-blue-500' : ''}`}
     >
       {/* Header */}
-      <div className="p-4 border-b border-[#e8eaed]">
+      <div className={`p-4 border-b ${darkMode ? 'border-slate-700' : 'border-[#e8eaed]'}`}>
         <div className="flex justify-between items-start">
           <div className="flex items-start gap-3">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${olt.is_online ? 'bg-blue-50' : 'bg-gray-100'}`}>
-              <svg className={`w-5 h-5 ${olt.is_online ? 'text-[#2563eb]' : 'text-[#9ca3af]'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+              olt.is_online
+                ? (darkMode ? 'bg-blue-900/50' : 'bg-blue-50')
+                : (darkMode ? 'bg-slate-700' : 'bg-gray-100')
+            }`}>
+              <svg className={`w-5 h-5 ${olt.is_online ? 'text-blue-500' : (darkMode ? 'text-slate-500' : 'text-[#9ca3af]')}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
               </svg>
             </div>
             <div>
-              <h3 className="font-semibold text-[#111827]">{olt.name}</h3>
-              <p className="text-sm text-[#9ca3af] font-mono">{olt.ip_address}</p>
+              <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{olt.name}</h3>
+              <p className={`text-sm font-mono ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>{olt.ip_address}</p>
             </div>
           </div>
           <StatusBadge online={olt.is_online} />
@@ -3511,17 +3688,17 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
       {/* Body */}
       <div className="p-4">
         <div className="flex items-center justify-between mb-3">
-          {olt.model && <p className="text-xs text-[#9ca3af]">{olt.model}</p>}
-          <span className="text-xs text-[#9ca3af]">{ponPortCount} PON Ports</span>
+          {olt.model && <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>{olt.model}</p>}
+          <span className={`text-xs ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>{ponPortCount} PON Ports</span>
         </div>
 
         {/* Stats with progress bar */}
         <div className="mb-3">
           <div className="flex justify-between text-sm mb-1.5">
-            <span className="text-[#4b5563]">ONUs Online</span>
-            <span className="font-medium text-[#111827]">{olt.online_onu_count} / {olt.onu_count}</span>
+            <span className={darkMode ? 'text-slate-400' : 'text-[#4b5563]'}>ONUs Online</span>
+            <span className={`font-medium ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{olt.online_onu_count} / {olt.onu_count}</span>
           </div>
-          <div className="h-2 bg-[#f4f5f7] rounded-full overflow-hidden">
+          <div className={`h-2 rounded-full overflow-hidden ${darkMode ? 'bg-slate-700' : 'bg-[#f4f5f7]'}`}>
             <div
               className={`h-full rounded-full transition-all duration-500 ${onlinePercent > 80 ? 'bg-[#059669]' : onlinePercent > 50 ? 'bg-amber-500' : 'bg-[#dc2626]'}`}
               style={{ width: `${onlinePercent}%` }}
@@ -3529,10 +3706,64 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
           </div>
         </div>
 
+        {/* OLT Health Metrics - Speedometer Dashboard Style */}
+        {olt.is_online && (olt.cpu_usage !== null || olt.temperature !== null) && (
+          <div className="mb-3 p-3 bg-gradient-to-br from-[#0f172a] to-[#1e293b] rounded-xl border border-[#334155]">
+            {/* Uptime and Fan Speed display - FIRST */}
+            <div className="mb-2 pb-2 border-b border-[#334155] flex items-center justify-center gap-4">
+              {olt.uptime_seconds !== null && (
+                <div className="flex items-center gap-1.5">
+                  <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span className="text-xs text-gray-400">Uptime: <span className="text-green-400 font-medium">{formatUptime(olt.uptime_seconds)}</span></span>
+                </div>
+              )}
+              {/* Fan Speed - Based on real temperature (threshold 40°C) */}
+              {olt.temperature !== null && (
+                <div className="flex items-center gap-1.5">
+                  <svg className={`w-3.5 h-3.5 animate-spin ${olt.temperature >= 40 ? 'text-orange-400' : 'text-blue-400'}`} style={{animationDuration: olt.temperature >= 40 ? '0.5s' : '2s'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  <span className="text-xs text-gray-400">Fan: <span className={`font-medium ${olt.temperature >= 40 ? 'text-orange-400' : 'text-blue-400'}`}>{olt.temperature >= 40 ? 'High' : 'Normal'}</span></span>
+                </div>
+              )}
+            </div>
+            {/* Gauges Row - AFTER uptime */}
+            <div className="flex justify-around items-start">
+              <SpeedometerGauge
+                value={liveHealth.cpu}
+                max={100}
+                label="CPU"
+                unit="%"
+              />
+              <SpeedometerGauge
+                value={liveHealth.memory}
+                max={100}
+                label="RAM"
+                unit="%"
+              />
+              <SpeedometerGauge
+                value={olt.temperature}
+                max={80}
+                label="TEMP"
+                unit="°C"
+                colorStops={[
+                  { offset: 0, color: '#10b981' },
+                  { offset: 60, color: '#f59e0b' },
+                  { offset: 100, color: '#ef4444' }
+                ]}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Port Visualization Toggle */}
         <button
           onClick={togglePorts}
-          className="w-full py-2 px-3 mb-3 text-sm text-[#4b5563] bg-[#f4f5f7] rounded-lg hover:bg-[#e8eaed] transition-all flex items-center justify-between"
+          className={`w-full py-2 px-3 mb-3 text-sm rounded-lg transition-all flex items-center justify-between ${
+            darkMode ? 'text-slate-300 bg-slate-700 hover:bg-slate-600' : 'text-[#4b5563] bg-[#f4f5f7] hover:bg-[#e8eaed]'
+          }`}
         >
           <span className="flex items-center gap-2">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3810,6 +4041,7 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
 
 // ONU Table Component - Enterprise Pro Design
 function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGraph }) {
+  const darkMode = useContext(DarkModeContext);
   const [previewImages, setPreviewImages] = useState(null);
   const [previewTitle, setPreviewTitle] = useState('');
 
@@ -3831,14 +4063,14 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
 
   if (onus.length === 0) {
     return (
-      <div className="bg-white rounded-xl border border-[#e8eaed] p-12 text-center">
-        <div className="w-14 h-14 bg-[#f4f5f7] rounded-lg flex items-center justify-center mx-auto mb-4">
-          <svg className="w-7 h-7 text-[#9ca3af]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className={`rounded-xl border p-12 text-center ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'}`}>
+        <div className={`w-14 h-14 rounded-lg flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-slate-700' : 'bg-[#f4f5f7]'}`}>
+          <svg className={`w-7 h-7 ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
           </svg>
         </div>
-        <p className="text-[#111827] font-medium">No ONUs found</p>
-        <p className="text-[#9ca3af] text-sm mt-1">Try adjusting your filters or search query</p>
+        <p className={`font-medium ${darkMode ? 'text-white' : 'text-[#111827]'}`}>No ONUs found</p>
+        <p className={`text-sm mt-1 ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>Try adjusting your filters or search query</p>
       </div>
     );
   }
@@ -3851,186 +4083,138 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
         images={previewImages || []}
         title={previewTitle}
       />
-      <div className="bg-white rounded-xl border border-[#e8eaed] overflow-hidden">
+      <div className={`rounded-xl border overflow-hidden ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'}`}>
         <div className="overflow-x-auto">
           <table className="min-w-full">
             <thead>
-              <tr className="bg-[#f4f5f7] border-b border-[#e8eaed]">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">OLT</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">PON/ONU</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">MAC Address</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Customer</th>
-                <th className="px-4 py-3 text-center text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Traffic</th>
-                <th className="px-3 py-3 text-center text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Photo</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Distance</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">RX Power</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Last Seen</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-[#4b5563] uppercase tracking-wider">Actions</th>
+              <tr className={`border-b ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-[#f4f5f7] border-[#e8eaed]'}`}>
+                <th className={`px-3 py-2.5 text-left text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>OLT</th>
+                <th className={`px-3 py-2.5 text-left text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`} title="PON Port / ONU ID">PON</th>
+                <th className={`px-3 py-2.5 text-left text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>Customer</th>
+                <th className={`px-3 py-2.5 text-left text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>MAC</th>
+                <th className={`px-2 py-2.5 text-left text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>Model</th>
+                <th className={`px-3 py-2.5 text-center text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>BW</th>
+                <th className={`px-3 py-2.5 text-center text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}>Dist</th>
+                <th className={`px-3 py-2.5 text-center text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`} title="ONU RX/TX Power, Temperature, Voltage, TX Bias">OPM</th>
+                <th className={`px-2 py-2.5 text-center text-sm font-semibold uppercase tracking-wider ${darkMode ? 'text-slate-300' : 'text-[#4b5563]'}`}></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#e8eaed]">
+            <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-[#e8eaed]'}`}>
               {onus.map((onu) => {
                 const images = onu.image_urls || (onu.image_url ? [onu.image_url] : []);
                 const hasImages = images.length > 0;
                 return (
-                  <tr key={onu.id} className="hover:bg-blue-50/50 transition-colors duration-150 group">
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      <span className="text-sm font-semibold text-gray-800">{onu.olt_name}</span>
+                  <tr key={onu.id} className={`transition-colors duration-150 group ${darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-blue-50/50'}`}>
+                    {/* OLT Name */}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className={`text-base font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>{onu.olt_name}</span>
                     </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      <span className="inline-flex items-center px-2.5 py-1 bg-gray-100 text-gray-700 text-sm font-mono rounded-lg">
-                        0/{onu.pon_port}:{onu.onu_id}
-                      </span>
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      <span className="text-sm font-mono text-gray-600 bg-gray-50 px-2 py-1 rounded">{onu.mac_address}</span>
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
+                    {/* PON/ONU with MAC on hover, status dot */}
+                    <td className="px-3 py-2 whitespace-nowrap">
                       <div className="flex items-center gap-2">
-                        <div>
-                          <span className="text-sm font-medium text-gray-800">{onu.description || <span className="text-gray-400 italic">No name</span>}</span>
+                        <span className={`w-3 h-3 rounded-full ${onu.is_online ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                        <span className={`text-base font-mono ${darkMode ? 'text-slate-300' : 'text-gray-700'}`} title={`MAC: ${onu.mac_address}${onu.model ? ` | Model: ${onu.model}` : ''}`}>
+                          {onu.pon_port}:{onu.onu_id}
+                        </span>
+                      </div>
+                    </td>
+                    {/* Customer with region, location, photo icons */}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          <span className={`text-base font-medium truncate block max-w-[180px] ${darkMode ? 'text-white' : 'text-gray-800'}`} title={onu.description || 'No name'}>
+                            {onu.description || <span className="text-gray-400 italic">-</span>}
+                          </span>
                           {onu.region_name && (
-                            <p className="text-xs font-medium" style={{ color: onu.region_color || '#6366F1' }}>{onu.region_name}</p>
+                            <span className="text-sm font-medium truncate block max-w-[150px]" style={{ color: onu.region_color || '#6366F1' }} title={onu.region_name}>{onu.region_name}</span>
                           )}
                         </div>
+                        {/* Photo icon */}
+                        {hasImages && (
+                          <button onClick={() => openPreview(onu)} className="p-1 text-blue-500 hover:text-blue-700" title={`${images.length} photo(s)`}>
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" /></svg>
+                          </button>
+                        )}
+                        {/* Location icon */}
                         {onu.latitude && onu.longitude && (
-                          <button
-                            onClick={() => window.open(`https://www.google.com/maps?q=${onu.latitude},${onu.longitude}`, '_blank')}
-                            className="p-1 text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors"
-                            title="View on map"
-                            aria-label="View on map"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                            </svg>
+                          <button onClick={() => window.open(`https://www.google.com/maps?q=${onu.latitude},${onu.longitude}`, '_blank')} className="p-1 text-emerald-500 hover:text-emerald-700" title="Map">
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" /></svg>
                           </button>
                         )}
                       </div>
                     </td>
-                    <td className="px-5 py-4 whitespace-nowrap text-center">
-                      <div className="flex items-center justify-center gap-2">
-                        {(() => {
-                          const traffic = trafficMap[onu.mac_address];
-                          if (!traffic) {
-                            return <span className="text-gray-400 text-xs">-</span>;
-                          }
-                          const rx = traffic.rx_kbps || 0;
-                          const tx = traffic.tx_kbps || 0;
-                          return (
-                            <div className="flex flex-col items-center gap-0.5">
-                              <span className={`text-xs font-semibold flex items-center gap-1 ${rx > 10000 ? 'text-green-600' : rx > 1000 ? 'text-blue-600' : 'text-gray-600'}`}>
-                                <svg className="w-3 h-3 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                                </svg>
-                                {rx > 1000 ? `${(rx/1000).toFixed(1)}M` : `${rx.toFixed(0)}K`}
-                              </span>
-                              <span className={`text-xs font-semibold flex items-center gap-1 ${tx > 10000 ? 'text-blue-600' : tx > 1000 ? 'text-indigo-600' : 'text-gray-600'}`}>
-                                <svg className="w-3 h-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                                </svg>
-                                {tx > 1000 ? `${(tx/1000).toFixed(1)}M` : `${tx.toFixed(0)}K`}
-                              </span>
-                            </div>
-                          );
-                        })()}
-                        {/* Graph Button */}
-                        <button
-                          onClick={() => onGraph && onGraph('onu', onu.id, onu.description || `ONU ${onu.pon_port}:${onu.onu_id}`)}
-                          className="p-1.5 text-purple-500 hover:text-purple-700 hover:bg-purple-50 rounded-lg transition-colors"
-                          title="View traffic graph"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                          </svg>
-                        </button>
+                    {/* MAC Address */}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className={`text-sm font-mono ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                        {onu.mac_address}
+                      </span>
+                    </td>
+                    {/* Model */}
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <span className={`text-xs font-medium ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                        {onu.model || '-'}
+                      </span>
+                    </td>
+                    {/* BW - Traffic */}
+                    <td className="px-3 py-2 whitespace-nowrap text-center">
+                      {(() => {
+                        const traffic = trafficMap[onu.mac_address];
+                        if (!traffic) return <span className="text-gray-300 text-sm">-</span>;
+                        const rx = traffic.rx_kbps || 0;
+                        const tx = traffic.tx_kbps || 0;
+                        return (
+                          <div className="flex items-center justify-center gap-1.5 text-sm">
+                            <span className={`font-semibold ${rx > 10000 ? 'text-green-600' : 'text-gray-600'}`}>↓{rx > 1000 ? `${(rx/1000).toFixed(0)}M` : `${rx.toFixed(0)}K`}</span>
+                            <span className={`font-semibold ${tx > 10000 ? 'text-blue-600' : 'text-gray-600'}`}>↑{tx > 1000 ? `${(tx/1000).toFixed(0)}M` : `${tx.toFixed(0)}K`}</span>
+                          </div>
+                        );
+                      })()}
+                    </td>
+                    {/* Distance */}
+                    <td className="px-3 py-2 whitespace-nowrap text-center">
+                      {onu.distance ? (
+                        <span className="text-sm font-semibold text-blue-600">{onu.distance >= 1000 ? `${(onu.distance/1000).toFixed(1)}k` : onu.distance}m</span>
+                      ) : (
+                        <span className="text-gray-300 text-sm">-</span>
+                      )}
+                    </td>
+                    {/* OPM - ONU optical data */}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <div className="flex flex-col text-sm leading-relaxed">
+                        <div className="flex items-center gap-1.5" title="ONU RX / TX Power">
+                          <span className="text-gray-500">Rx</span>
+                          {onu.onu_rx_power ? (
+                            <span className={`font-semibold ${onu.onu_rx_power < -20 ? 'text-red-600' : onu.onu_rx_power < -15 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                              {onu.onu_rx_power.toFixed(1)}
+                            </span>
+                          ) : <span className="text-gray-300">-</span>}
+                          <span className="text-gray-500">Tx</span>
+                          {onu.onu_tx_power ? (
+                            <span className="font-semibold text-blue-600">{onu.onu_tx_power.toFixed(1)}</span>
+                          ) : <span className="text-gray-300">-</span>}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-gray-500" title="Temp / Volt / Bias">
+                          {onu.onu_temperature ? <span className={onu.onu_temperature > 50 ? 'text-red-600' : 'text-teal-600'}>{onu.onu_temperature.toFixed(0)}°</span> : <span className="text-gray-300">-</span>}
+                          {onu.onu_voltage ? <span className="text-purple-600">{onu.onu_voltage.toFixed(1)}V</span> : ''}
+                          {onu.onu_tx_bias ? <span className="text-pink-600">{onu.onu_tx_bias.toFixed(0)}mA</span> : ''}
+                        </div>
                       </div>
                     </td>
-                    <td className="px-3 py-4 whitespace-nowrap text-center">
-                      {hasImages ? (
-                        <button
-                          onClick={() => openPreview(onu)}
-                          className="relative inline-block group"
-                          title={`View ${images.length} photo${images.length > 1 ? 's' : ''}`}
-                          aria-label={`View ${images.length} photo${images.length > 1 ? 's' : ''}`}
-                        >
-                          <img
-                            src={images[0]}
-                            alt="ONU"
-                            className="w-10 h-10 rounded-lg object-cover border-2 border-gray-200 hover:border-blue-500 transition cursor-pointer"
-                          />
-                          {images.length > 1 && (
-                            <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-xs w-5 h-5 rounded-full flex items-center justify-center">
-                              {images.length}
-                            </span>
-                          )}
-                        </button>
-                      ) : (
-                        <span className="text-gray-300">
-                          <svg className="w-6 h-6 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      {onu.distance ? (
-                        <span className="inline-flex items-center px-2.5 py-1 bg-blue-50 text-blue-700 text-sm font-medium rounded-lg">
-                          {onu.distance}m
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      {onu.rx_power ? (
-                        <span className={`inline-flex items-center px-2.5 py-1 text-sm font-semibold rounded-lg ${
-                          !onu.is_online ? 'bg-gray-100 text-gray-400 italic' :
-                          onu.rx_power < -25 ? 'bg-red-50 text-red-700' :
-                          onu.rx_power < -20 ? 'bg-amber-50 text-amber-700' :
-                          'bg-emerald-50 text-emerald-700'
-                        }`} title={!onu.is_online ? 'Last known value (ONU offline)' : ''}>
-                          {onu.rx_power.toFixed(2)} dBm{!onu.is_online && ' *'}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      <StatusBadge online={onu.is_online} />
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
-                      <span className="text-sm text-gray-500">{new Date(onu.last_seen).toLocaleString()}</span>
-                    </td>
-                    <td className="px-5 py-4 whitespace-nowrap">
+                    {/* Actions - Icon buttons */}
+                    <td className="px-2 py-2 whitespace-nowrap">
                       <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => onEdit(onu)}
-                          className="px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors"
-                        >
-                          Edit
+                        <button onClick={() => onGraph && onGraph('onu', onu.id, onu.description || onu.mac_address)} className="p-2 text-purple-600 hover:bg-purple-50 rounded" title="Traffic Graph">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
                         </button>
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`Reboot ONU "${onu.description || onu.mac_address}"?`)) {
-                              onReboot(onu.id);
-                            }
-                          }}
-                          className="px-3 py-1.5 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded-lg transition-colors"
-                          title="Reboot ONU"
-                        >
-                          Reboot
+                        <button onClick={() => onEdit(onu)} className="p-2 text-blue-600 hover:bg-blue-50 rounded" title="Edit">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                        </button>
+                        <button onClick={() => window.confirm(`Reboot "${onu.description || onu.mac_address}"?`) && onReboot(onu.id)} className="p-2 text-amber-600 hover:bg-amber-50 rounded" title="Reboot">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                         </button>
                         {isAdmin && (
-                          <button
-                            onClick={() => {
-                              if (window.confirm('Delete this ONU record?')) {
-                                onDelete(onu.id);
-                              }
-                            }}
-                            className="px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors"
-                          >
-                            Delete
+                          <button onClick={() => window.confirm('Delete?') && onDelete(onu.id)} className="p-2 text-red-600 hover:bg-red-50 rounded" title="Delete">
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                           </button>
                         )}
                       </div>
@@ -4048,11 +4232,12 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
 
 // Mobile ONU Card - Premium Material Design
 function ONUCard({ onu, onEdit, onDelete, onReboot, isAdmin, onImagePreview }) {
+  const darkMode = useContext(DarkModeContext);
   const images = onu.image_urls || (onu.image_url ? [onu.image_url] : []);
   const hasImages = images.length > 0;
 
   return (
-    <div className="bg-white rounded-2xl shadow-material-1 p-4 mb-4 border border-gray-100 relative overflow-hidden">
+    <div className={`rounded-2xl shadow-material-1 p-4 mb-4 border relative overflow-hidden ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-100'}`}>
       {/* Status indicator bar */}
       <div className={`absolute top-0 left-0 right-0 h-1 ${onu.is_online ? 'bg-gradient-to-r from-emerald-400 to-emerald-500' : 'bg-gradient-to-r from-red-400 to-red-500'}`}></div>
 
@@ -4094,7 +4279,7 @@ function ONUCard({ onu, onEdit, onDelete, onReboot, isAdmin, onImagePreview }) {
         </div>
         <StatusBadge online={onu.is_online} />
       </div>
-      <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+      <div className="grid grid-cols-3 gap-2 text-sm mb-3">
         <div className="bg-gradient-to-br from-slate-50 to-slate-100 rounded-xl p-2.5 border border-slate-200/50">
           <span className="text-slate-500 text-xs">OLT</span>
           <p className="font-semibold text-slate-700">{onu.olt_name}</p>
@@ -4103,15 +4288,41 @@ function ONUCard({ onu, onEdit, onDelete, onReboot, isAdmin, onImagePreview }) {
           <span className="text-indigo-500 text-xs">Port</span>
           <p className="font-semibold font-mono text-indigo-700">0/{onu.pon_port}:{onu.onu_id}</p>
         </div>
+        <div className="bg-gradient-to-br from-violet-50 to-violet-100 rounded-xl p-2.5 border border-violet-200/50">
+          <span className="text-violet-500 text-xs">Model</span>
+          <p className="font-semibold text-violet-700">{onu.model || '-'}</p>
+        </div>
         <div className="bg-gradient-to-br from-cyan-50 to-cyan-100 rounded-xl p-2.5 border border-cyan-200/50">
           <span className="text-cyan-500 text-xs">Distance</span>
           <p className="font-semibold text-cyan-700">{onu.distance ? `${onu.distance}m` : '-'}</p>
         </div>
         <div className={`rounded-xl p-2.5 border ${onu.rx_power ? (!onu.is_online ? 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50' : onu.rx_power < -25 ? 'bg-gradient-to-br from-red-50 to-red-100 border-red-200/50' : onu.rx_power < -20 ? 'bg-gradient-to-br from-amber-50 to-amber-100 border-amber-200/50' : 'bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200/50') : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50'}`}>
-          <span className={`text-xs ${onu.rx_power ? (!onu.is_online ? 'text-gray-400' : onu.rx_power < -25 ? 'text-red-500' : onu.rx_power < -20 ? 'text-amber-500' : 'text-emerald-500') : 'text-gray-400'}`}>RX Power</span>
-          <p className={`font-semibold ${onu.rx_power ? (!onu.is_online ? 'text-gray-400 italic' : onu.rx_power < -25 ? 'text-red-700' : onu.rx_power < -20 ? 'text-amber-700' : 'text-emerald-700') : 'text-gray-400'}`} title={onu.rx_power && !onu.is_online ? 'Last known value (ONU offline)' : ''}>
+          <span className={`text-xs ${onu.rx_power ? (!onu.is_online ? 'text-gray-400' : onu.rx_power < -25 ? 'text-red-500' : onu.rx_power < -20 ? 'text-amber-500' : 'text-emerald-500') : 'text-gray-400'}`}>OLT RX</span>
+          <p className={`font-semibold ${onu.rx_power ? (!onu.is_online ? 'text-gray-400 italic' : onu.rx_power < -25 ? 'text-red-700' : onu.rx_power < -20 ? 'text-amber-700' : 'text-emerald-700') : 'text-gray-400'}`} title={onu.rx_power && !onu.is_online ? 'Last known value (ONU offline)' : 'OLT-measured RX power'}>
             {onu.rx_power ? `${onu.rx_power.toFixed(2)} dBm${!onu.is_online ? ' *' : ''}` : '-'}
           </p>
+        </div>
+        <div className={`rounded-xl p-2.5 border ${onu.onu_rx_power ? (!onu.is_online ? 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50' : onu.onu_rx_power < -20 ? 'bg-gradient-to-br from-red-50 to-red-100 border-red-200/50' : onu.onu_rx_power < -15 ? 'bg-gradient-to-br from-amber-50 to-amber-100 border-amber-200/50' : 'bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200/50') : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50'}`}>
+          <span className={`text-xs ${onu.onu_rx_power ? (!onu.is_online ? 'text-gray-400' : onu.onu_rx_power < -20 ? 'text-red-500' : onu.onu_rx_power < -15 ? 'text-amber-500' : 'text-emerald-500') : 'text-gray-400'}`}>ONU RX</span>
+          <p className={`font-semibold ${onu.onu_rx_power ? (!onu.is_online ? 'text-gray-400 italic' : onu.onu_rx_power < -20 ? 'text-red-700' : onu.onu_rx_power < -15 ? 'text-amber-700' : 'text-emerald-700') : 'text-gray-400'}`} title={onu.onu_rx_power && !onu.is_online ? 'Last known value (ONU offline)' : 'ONU self-reported RX power'}>
+            {onu.onu_rx_power ? `${onu.onu_rx_power.toFixed(2)} dBm${!onu.is_online ? ' *' : ''}` : '-'}
+          </p>
+        </div>
+        <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-2.5 border border-blue-200/50">
+          <span className="text-blue-500 text-xs">TX Power</span>
+          <p className="font-semibold text-blue-700">{onu.onu_tx_power ? `${onu.onu_tx_power.toFixed(2)} dBm` : '-'}</p>
+        </div>
+        <div className={`rounded-xl p-2.5 border ${onu.onu_temperature ? (onu.onu_temperature > 50 ? 'bg-gradient-to-br from-red-50 to-red-100 border-red-200/50' : onu.onu_temperature > 40 ? 'bg-gradient-to-br from-amber-50 to-amber-100 border-amber-200/50' : 'bg-gradient-to-br from-teal-50 to-teal-100 border-teal-200/50') : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50'}`}>
+          <span className={`text-xs ${onu.onu_temperature ? (onu.onu_temperature > 50 ? 'text-red-500' : onu.onu_temperature > 40 ? 'text-amber-500' : 'text-teal-500') : 'text-gray-400'}`}>Temp</span>
+          <p className={`font-semibold ${onu.onu_temperature ? (onu.onu_temperature > 50 ? 'text-red-700' : onu.onu_temperature > 40 ? 'text-amber-700' : 'text-teal-700') : 'text-gray-400'}`}>{onu.onu_temperature ? `${onu.onu_temperature.toFixed(1)}°C` : '-'}</p>
+        </div>
+        <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-2.5 border border-purple-200/50">
+          <span className="text-purple-500 text-xs">Voltage</span>
+          <p className="font-semibold text-purple-700">{onu.onu_voltage ? `${onu.onu_voltage.toFixed(2)}V` : '-'}</p>
+        </div>
+        <div className="bg-gradient-to-br from-pink-50 to-pink-100 rounded-xl p-2.5 border border-pink-200/50">
+          <span className="text-pink-500 text-xs">TX Bias</span>
+          <p className="font-semibold text-pink-700">{onu.onu_tx_bias ? `${onu.onu_tx_bias.toFixed(2)}mA` : '-'}</p>
         </div>
       </div>
       <div className="flex justify-between items-center pt-2 border-t border-gray-100">
@@ -6161,13 +6372,14 @@ function SplitterSimulator({ olts = [], onus = [] }) {
     </div>
   );
 }
-function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pageName }) {
+function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pageName, darkMode, onToggleDarkMode }) {
   const isAdmin = user?.role === 'admin';
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
     { id: 'onus', label: 'ONUs', icon: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z' },
     { id: 'regions', label: 'Regions', icon: 'M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z', adminOnly: false },
+    { id: 'alarms', label: 'Alarms', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
     { id: 'splitter', label: 'Splitter Simulator', icon: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1' },
   ];
 
@@ -6180,10 +6392,10 @@ function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pag
       {isOpen && (
         <div className="fixed inset-0 bg-black/30 z-40 lg:hidden transition-opacity" onClick={onClose} />
       )}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-[280px] bg-white border-r border-[#e8eaed] transform transition-all duration-300 ease-material lg:translate-x-0 lg:static lg:inset-0 ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-[280px] border-r transform transition-all duration-300 ease-material lg:translate-x-0 lg:static lg:inset-0 ${isOpen ? 'translate-x-0' : '-translate-x-full'} ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'}`}>
         <div className="flex flex-col h-full">
           {/* Logo Section */}
-          <div className="p-6 border-b border-[#e8eaed]">
+          <div className={`p-6 border-b ${darkMode ? 'border-slate-700' : 'border-[#e8eaed]'}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 bg-[#2563eb] rounded-lg flex items-center justify-center">
@@ -6192,29 +6404,52 @@ function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pag
                   </svg>
                 </div>
                 <div>
-                  <h1 className="text-base font-semibold text-[#111827]">{pageName || 'OLT Manager'}</h1>
-                  <p className="text-xs text-[#9ca3af]">GPON Network</p>
+                  <h1 className={`text-base font-semibold ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{pageName || 'OLT Manager'}</h1>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>GPON Network</p>
                 </div>
               </div>
-              <button onClick={onClose} aria-label="Close menu" title="Close menu" className="lg:hidden p-2 text-[#9ca3af] hover:text-[#111827] hover:bg-[#f4f5f7] rounded-lg transition-colors">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+              <div className="flex items-center gap-1">
+                {/* Dark/Light Mode Toggle */}
+                <button
+                  onClick={onToggleDarkMode}
+                  aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+                  title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+                  className={`p-2 rounded-lg transition-all duration-300 ${
+                    darkMode
+                      ? 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  {darkMode ? (
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                    </svg>
+                  )}
+                </button>
+                <button onClick={onClose} aria-label="Close menu" title="Close menu" className="lg:hidden p-2 text-[#9ca3af] hover:text-[#111827] hover:bg-[#f4f5f7] rounded-lg transition-colors">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
 
           {/* Navigation */}
           <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
-            <p className="px-3 py-2 text-xs font-medium text-[#9ca3af] uppercase tracking-wider">Menu</p>
+            <p className={`px-3 py-2 text-xs font-medium uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>Menu</p>
             {menuItems.map((item) => (
               <button
                 key={item.id}
                 onClick={() => { onNavigate(item.id); onClose(); }}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150 ${
                   currentPage === item.id
-                    ? 'bg-blue-50 text-[#2563eb]'
-                    : 'text-[#4b5563] hover:bg-[#f4f5f7] hover:text-[#111827]'
+                    ? (darkMode ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-50 text-[#2563eb]')
+                    : (darkMode ? 'text-slate-300 hover:bg-slate-700 hover:text-white' : 'text-[#4b5563] hover:bg-[#f4f5f7] hover:text-[#111827]')
                 }`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -6226,22 +6461,22 @@ function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pag
           </nav>
 
           {/* User Profile Section */}
-          <div className="p-4 border-t border-[#e8eaed]">
+          <div className={`p-4 border-t ${darkMode ? 'border-slate-700' : 'border-[#e8eaed]'}`}>
             <div className="flex items-center gap-3 mb-3">
               <div className="relative">
                 <div className="w-10 h-10 bg-[#2563eb] rounded-lg flex items-center justify-center text-white font-semibold text-sm">
                   {user?.username?.[0]?.toUpperCase() || 'U'}
                 </div>
-                <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#059669] rounded-full border-2 border-white"></div>
+                <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#059669] rounded-full border-2 ${darkMode ? 'border-slate-800' : 'border-white'}`}></div>
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-[#111827] truncate">{user?.full_name || user?.username}</p>
-                <p className="text-xs text-[#9ca3af] capitalize">{user?.role}</p>
+                <p className={`text-sm font-medium truncate ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{user?.full_name || user?.username}</p>
+                <p className={`text-xs capitalize ${darkMode ? 'text-slate-400' : 'text-[#9ca3af]'}`}>{user?.role}</p>
               </div>
             </div>
             <button
               onClick={onLogout}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-[#4b5563] hover:text-[#dc2626] hover:bg-red-50 rounded-lg transition-all duration-150 border border-[#e8eaed]"
+              className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-all duration-150 border ${darkMode ? 'text-slate-300 hover:text-red-400 hover:bg-red-900/20 border-slate-600' : 'text-[#4b5563] hover:text-[#dc2626] hover:bg-red-50 border-[#e8eaed]'}`}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
@@ -6369,6 +6604,23 @@ function Dashboard({ user, onLogout, pageName }) {
   const [regions, setRegions] = useState([]);
   const [users, setUsers] = useState([]);
   const [settings, setSettings] = useState(null);
+  const [alarmSettings, setAlarmSettings] = useState({
+    new_onu_registration: true,
+    onu_offline: true,
+    onu_back_online: true,
+    olt_offline: true,
+    olt_back_online: true,
+    weak_signal: false,
+    weak_signal_threshold: -27,
+    high_temperature: false,
+    high_temperature_threshold: 60,
+    selected_onus: [],
+    selected_regions: [],
+    quiet_hours_enabled: false,
+    quiet_hours_start: '22:00',
+    quiet_hours_end: '07:00'
+  });
+  const [alarmSaving, setAlarmSaving] = useState(false);
   const [selectedOLT, setSelectedOLT] = useState(null);
   const [selectedRegion, setSelectedRegion] = useState(null);
   const [selectedPonPort, setSelectedPonPort] = useState(null);
@@ -6389,6 +6641,20 @@ function Dashboard({ user, onLogout, pageName }) {
   const [editingUser, setEditingUser] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  // Dark mode state with localStorage persistence
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('darkMode');
+    return saved ? JSON.parse(saved) : false;
+  });
+
+  // Toggle dark mode and save to localStorage
+  const toggleDarkMode = () => {
+    setDarkMode(prev => {
+      const newValue = !prev;
+      localStorage.setItem('darkMode', JSON.stringify(newValue));
+      return newValue;
+    });
+  };
   const [mobilePreviewImages, setMobilePreviewImages] = useState(null);
   const [mobilePreviewTitle, setMobilePreviewTitle] = useState('');
   const [trafficData, setTrafficData] = useState(null);
@@ -6477,6 +6743,28 @@ function Dashboard({ user, onLogout, pageName }) {
       console.error('Failed to fetch settings:', error);
     }
   }, []);
+
+  const fetchAlarmSettings = useCallback(async () => {
+    try {
+      const response = await api.getAlarmSettings();
+      setAlarmSettings(response.data);
+    } catch (error) {
+      console.error('Failed to fetch alarm settings:', error);
+    }
+  }, []);
+
+  const handleSaveAlarmSettings = async () => {
+    setAlarmSaving(true);
+    try {
+      await api.updateAlarmSettings(alarmSettings);
+      alert('Alarm settings saved successfully!');
+    } catch (error) {
+      console.error('Failed to save alarm settings:', error);
+      alert('Failed to save alarm settings: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setAlarmSaving(false);
+    }
+  };
 
   // Helper function to get WebSocket URL
   const getWsUrl = useCallback((oltId) => {
@@ -6708,11 +6996,11 @@ function Dashboard({ user, onLogout, pageName }) {
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
-      await Promise.all([fetchStats(), fetchOLTs(), fetchONUs(), fetchRegions(), fetchUsers(), fetchSettings()]);
+      await Promise.all([fetchStats(), fetchOLTs(), fetchONUs(), fetchRegions(), fetchUsers(), fetchSettings(), fetchAlarmSettings()]);
       setLoading(false);
     };
     loadData();
-  }, [fetchStats, fetchOLTs, fetchONUs, fetchRegions, fetchUsers, fetchSettings]);
+  }, [fetchStats, fetchOLTs, fetchONUs, fetchRegions, fetchUsers, fetchSettings, fetchAlarmSettings]);
 
   // Refresh data periodically
   useEffect(() => {
@@ -6880,7 +7168,8 @@ function Dashboard({ user, onLogout, pageName }) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50 flex">
+    <DarkModeContext.Provider value={darkMode}>
+    <div className={`min-h-screen flex transition-colors duration-300 ${darkMode ? 'bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900' : 'bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50'}`}>
       {/* License Status Overlay */}
       {!isLicenseValid && (
         <LicenseOverlay status={licenseStatus.status} message={licenseStatus.message} />
@@ -6894,11 +7183,13 @@ function Dashboard({ user, onLogout, pageName }) {
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         pageName={pageName}
+        darkMode={darkMode}
+        onToggleDarkMode={toggleDarkMode}
       />
 
-      <div className="flex-1 flex flex-col min-h-screen bg-[#fafbfc]">
+      <div className={`flex-1 flex flex-col min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900' : 'bg-[#fafbfc]'}`}>
         {/* Header - Compact */}
-        <header className="bg-white sticky top-0 z-30 border-b border-[#e8eaed]">
+        <header className={`sticky top-0 z-30 border-b transition-colors duration-300 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-[#e8eaed]'}`}>
           <div className="flex items-center justify-between px-3 lg:px-4 py-1.5">
             <div className="flex items-center gap-3">
               <button
@@ -6954,52 +7245,10 @@ function Dashboard({ user, onLogout, pageName }) {
           {/* Dashboard Page */}
           {currentPage === 'dashboard' && (
             <>
-              {/* Stats Cards */}
-              {stats && (
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4 mb-6">
-                  <StatsCard title="Total OLTs" value={stats.total_olts} subValue={`${stats.online_olts} online`} color="blue" icon="olt" />
-                  <StatsCard title="Online OLTs" value={stats.online_olts} color="green" icon="online" />
-                  <StatsCard title="Total ONUs" value={stats.total_onus} subValue={`${stats.online_onus} online`} color="purple" icon="onu" />
-                  <StatsCard title="Offline ONUs" value={stats.offline_onus} color="red" icon="offline" />
-                </div>
-              )}
-
-              {/* Regions Overview - Enterprise Pro */}
-              {regions.length > 0 && (
-                <div className="mb-6">
-                  <h2 className="text-base font-semibold text-[#111827] mb-4">Regions</h2>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {regions.map((region) => (
-                      <button
-                        key={region.id}
-                        onClick={() => handleSelectRegion(region.id)}
-                        className="bg-white rounded-xl p-4 text-left hover:shadow-sm transition-all duration-200 border border-[#e8eaed]"
-                      >
-                        <div className="flex items-center">
-                          <div
-                            className="w-10 h-10 rounded-lg flex items-center justify-center mr-3"
-                            style={{ backgroundColor: region.color ? `${region.color}15` : '#6366F115' }}
-                          >
-                            <svg className="w-5 h-5" style={{ color: region.color || '#6366F1' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                            </svg>
-                          </div>
-                          <div>
-                            <p className="font-medium text-[#111827]">{region.name}</p>
-                            <p className="text-sm" style={{ color: region.color || '#6366F1' }}>{region.onu_count || 0} ONUs</p>
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* OLTs Section */}
+              {/* OLTs Section - TOP OF PAGE */}
               <div className="mb-6">
                 <div className="flex justify-between items-center mb-4">
-                  <h2 className="text-base font-semibold text-[#111827]">OLTs</h2>
+                  <h2 className={`text-base font-semibold ${darkMode ? 'text-white' : 'text-[#111827]'}`}>OLTs</h2>
                   {isAdmin && (
                     <button
                       onClick={() => setShowAddOLTModal(true)}
@@ -7010,7 +7259,7 @@ function Dashboard({ user, onLogout, pageName }) {
                   )}
                 </div>
                 {olts.length === 0 ? (
-                  <div className="bg-white rounded-xl border border-[#e8eaed] p-8 text-center text-[#9ca3af]">
+                  <div className={`rounded-xl border p-8 text-center ${darkMode ? 'bg-slate-800 border-slate-700 text-slate-400' : 'bg-white border-[#e8eaed] text-[#9ca3af]'}`}>
                     No OLTs configured. {isAdmin && 'Add your first OLT to get started.'}
                   </div>
                 ) : (
@@ -7034,6 +7283,48 @@ function Dashboard({ user, onLogout, pageName }) {
                   </div>
                 )}
               </div>
+
+              {/* Stats Cards */}
+              {stats && (
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4 mb-6">
+                  <StatsCard title="Total OLTs" value={stats.total_olts} subValue={`${stats.online_olts} online`} color="blue" icon="olt" />
+                  <StatsCard title="Online OLTs" value={stats.online_olts} color="green" icon="online" />
+                  <StatsCard title="Total ONUs" value={stats.total_onus} subValue={`${stats.online_onus} online`} color="purple" icon="onu" />
+                  <StatsCard title="Offline ONUs" value={stats.offline_onus} color="red" icon="offline" />
+                </div>
+              )}
+
+              {/* Regions Overview - Enterprise Pro */}
+              {regions.length > 0 && (
+                <div className="mb-6">
+                  <h2 className={`text-base font-semibold mb-4 ${darkMode ? 'text-white' : 'text-[#111827]'}`}>Regions</h2>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                    {regions.map((region) => (
+                      <button
+                        key={region.id}
+                        onClick={() => handleSelectRegion(region.id)}
+                        className={`rounded-xl p-4 text-left hover:shadow-sm transition-all duration-200 border ${darkMode ? 'bg-slate-800 border-slate-700 hover:bg-slate-700' : 'bg-white border-[#e8eaed]'}`}
+                      >
+                        <div className="flex items-center">
+                          <div
+                            className="w-10 h-10 rounded-lg flex items-center justify-center mr-3"
+                            style={{ backgroundColor: region.color ? `${region.color}15` : '#6366F115' }}
+                          >
+                            <svg className="w-5 h-5" style={{ color: region.color || '#6366F1' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                          </div>
+                          <div>
+                            <p className={`font-medium ${darkMode ? 'text-white' : 'text-[#111827]'}`}>{region.name}</p>
+                            <p className="text-sm" style={{ color: region.color || '#6366F1' }}>{region.onu_count || 0} ONUs</p>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Quick ONU Stats */}
               {selectedOLT && (
@@ -7060,15 +7351,15 @@ function Dashboard({ user, onLogout, pageName }) {
             <>
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
                 <div>
-                  <h2 className="text-lg font-bold text-gray-800">
+                  <h2 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
                     ONUs
                     {selectedOLT && (
-                      <span className="text-sm font-normal text-gray-500 ml-2">
+                      <span className={`text-sm font-normal ml-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                         ({olts.find((o) => o.id === selectedOLT)?.name})
                       </span>
                     )}
                     {selectedRegion && (
-                      <span className="text-sm font-normal text-gray-500 ml-2">
+                      <span className={`text-sm font-normal ml-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                         ({regions.find((r) => r.id === selectedRegion)?.name})
                       </span>
                     )}
@@ -7078,7 +7369,7 @@ function Dashboard({ user, onLogout, pageName }) {
                       </span>
                     )}
                   </h2>
-                  <p className="text-sm text-gray-500">
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                     {selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort).length : onus.length} ONUs shown
                     {selectedPonPort && <span className="text-emerald-600"> (filtered by PON {selectedPonPort})</span>}
                   </p>
@@ -7087,11 +7378,11 @@ function Dashboard({ user, onLogout, pageName }) {
                   <input
                     type="text"
                     placeholder="Search by name or MAC..."
-                    className="flex-1 sm:w-64 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className={`flex-1 sm:w-64 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'bg-white border-gray-300'}`}
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
-                  <button type="submit" className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+                  <button type="submit" className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
                     Search
                   </button>
                   {(searchQuery || selectedOLT || selectedRegion || selectedPonPort) && (
@@ -7103,7 +7394,7 @@ function Dashboard({ user, onLogout, pageName }) {
                         setSelectedRegion(null);
                         setSelectedPonPort(null);
                       }}
-                      className="px-4 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200"
+                      className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-400 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
                     >
                       Clear
                     </button>
@@ -7130,7 +7421,7 @@ function Dashboard({ user, onLogout, pageName }) {
                     }
                   }}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                    !selectedOLT && !selectedRegion ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    !selectedOLT && !selectedRegion ? 'bg-blue-600 text-white' : darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
                   All
@@ -7140,7 +7431,7 @@ function Dashboard({ user, onLogout, pageName }) {
                     key={olt.id}
                     onClick={() => handleSelectOLT(olt.id)}
                     className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                      selectedOLT === olt.id ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                      selectedOLT === olt.id ? 'bg-blue-600 text-white' : darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                     }`}
                   >
                     {olt.name}
@@ -7153,7 +7444,7 @@ function Dashboard({ user, onLogout, pageName }) {
                 const ponPorts = [...new Set(onus.map(onu => onu.pon_port))].sort((a, b) => a - b);
                 return ponPorts.length > 1 ? (
                   <div className="flex flex-wrap items-center gap-2 mb-4">
-                    <span className="text-sm text-gray-500 font-medium">PON:</span>
+                    <span className={`text-sm font-medium ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>PON:</span>
                     <button
                       onClick={() => setSelectedPonPort(null)}
                       className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
@@ -7202,31 +7493,31 @@ function Dashboard({ user, onLogout, pageName }) {
 
               {/* Traffic Status Indicator - Shows for both "All" and specific OLT */}
               <div className="mb-4 flex items-center gap-3">
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-blue-50 border border-cyan-200 rounded-lg">
+                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${darkMode ? 'bg-slate-800 border-slate-600' : 'bg-gradient-to-r from-cyan-50 to-blue-50 border-cyan-200'}`}>
                   {trafficLoading ? (
                     <>
                       <svg className="animate-spin h-4 w-4 text-cyan-600" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
-                      <span className="text-sm text-cyan-700 font-medium">Updating traffic...</span>
+                      <span className={`text-sm font-medium ${darkMode ? 'text-cyan-400' : 'text-cyan-700'}`}>Updating traffic...</span>
                     </>
                   ) : (
                     <>
                       <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
-                      <svg className="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className={`w-4 h-4 ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
                       </svg>
-                      <span className="text-sm text-cyan-700 font-medium">Live Traffic</span>
-                      {!selectedOLT && <span className="text-xs text-cyan-600">(All OLTs)</span>}
+                      <span className={`text-sm font-medium ${darkMode ? 'text-cyan-400' : 'text-cyan-700'}`}>Live Traffic</span>
+                      {!selectedOLT && <span className={`text-xs ${darkMode ? 'text-cyan-500' : 'text-cyan-600'}`}>(All OLTs)</span>}
                     </>
                   )}
-                  <span className={`text-xs ${wsConnected ? 'text-green-600 font-medium' : 'text-gray-500'}`}>
+                  <span className={`text-xs ${wsConnected ? 'text-green-600 font-medium' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                     {wsConnected ? (trafficData?.message ? `(${trafficData.message})` : '(Live ~3s)') : '(connecting...)'}
                   </span>
                 </div>
                 {trafficData && trafficData.timestamp && (
-                  <span className="text-xs text-gray-500">
+                  <span className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                     {new Date(trafficData.timestamp).toLocaleTimeString()}
                   </span>
                 )}
@@ -7259,7 +7550,7 @@ function Dashboard({ user, onLogout, pageName }) {
           {currentPage === 'regions' && (
             <>
               <div className="flex justify-between items-center mb-4">
-                <h2 className="text-lg font-bold text-gray-800">Regions</h2>
+                <h2 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Regions</h2>
                 {isAdmin && (
                   <button
                     onClick={() => { setEditingRegion(null); setShowRegionModal(true); }}
@@ -7271,7 +7562,7 @@ function Dashboard({ user, onLogout, pageName }) {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {regions.map((region) => (
-                  <div key={region.id} className="bg-white rounded-xl shadow-md p-4 border-l-4" style={{ borderLeftColor: region.color || '#3B82F6' }}>
+                  <div key={region.id} className={`rounded-xl shadow-md p-4 border-l-4 ${darkMode ? 'bg-slate-800' : 'bg-white'}`} style={{ borderLeftColor: region.color || '#3B82F6' }}>
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex items-center gap-3">
                         <div
@@ -7283,8 +7574,8 @@ function Dashboard({ user, onLogout, pageName }) {
                           </svg>
                         </div>
                         <div>
-                          <h3 className="font-bold text-lg text-gray-800">{region.name}</h3>
-                          {region.description && <p className="text-sm text-gray-500">{region.description}</p>}
+                          <h3 className={`font-bold text-lg ${darkMode ? 'text-white' : 'text-gray-800'}`}>{region.name}</h3>
+                          {region.description && <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>{region.description}</p>}
                         </div>
                       </div>
                       {region.latitude && region.longitude && (
@@ -7328,6 +7619,519 @@ function Dashboard({ user, onLogout, pageName }) {
             </>
           )}
 
+          {/* Alarms Page */}
+          {currentPage === 'alarms' && (
+            <div className="space-y-6">
+              {/* Page Header */}
+              <div className="flex justify-between items-center">
+                <div>
+                  <h2 className={`text-xl font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Alarm Settings</h2>
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Configure WhatsApp notifications for different events</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    setAlarmSaving(true);
+                    try {
+                      await api.updateAlarmSettings(alarmSettings);
+                      alert('Alarm settings saved successfully!');
+                    } catch (error) {
+                      alert('Failed to save alarm settings');
+                    }
+                    setAlarmSaving(false);
+                  }}
+                  disabled={alarmSaving}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50"
+                >
+                  {alarmSaving ? 'Saving...' : 'Save Settings'}
+                </button>
+              </div>
+
+              {/* WhatsApp Status Check */}
+              {!settings?.whatsapp_enabled && (
+                <div className={`p-4 rounded-xl border ${darkMode ? 'bg-yellow-900/30 border-yellow-800' : 'bg-yellow-50 border-yellow-200'}`}>
+                  <div className="flex items-center gap-3">
+                    <svg className={`w-6 h-6 ${darkMode ? 'text-yellow-400' : 'text-yellow-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <div>
+                      <p className={`font-medium ${darkMode ? 'text-yellow-400' : 'text-yellow-800'}`}>WhatsApp Not Configured</p>
+                      <p className={`text-sm ${darkMode ? 'text-yellow-300' : 'text-yellow-700'}`}>
+                        Please enable WhatsApp and set recipient number in Settings to receive alarm notifications.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Alarm Categories Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                {/* Section 1: New ONU Registration */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-green-900/30' : 'bg-green-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-green-400' : 'text-green-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>New ONU Registration</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when new ONU is detected</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.new_onu_registration}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, new_onu_registration: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>ONU Name/MAC Address</li>
+                      <li>Signal Strength (RX Power)</li>
+                      <li>Distance from OLT</li>
+                      <li>PON Port & OLT Name</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 2: ONU Offline/Lost */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-red-900/30' : 'bg-red-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-red-400' : 'text-red-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>ONU Offline / Lost</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when ONU goes offline</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.onu_offline}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, onu_offline: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>ONU Name & Description</li>
+                      <li>Customer Address</li>
+                      <li>Last Signal Before Disconnect</li>
+                      <li>Region & OLT Info</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 3: ONU Back Online */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-blue-900/30' : 'bg-blue-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-blue-400' : 'text-blue-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>ONU Back Online</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when ONU reconnects</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.onu_back_online}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, onu_back_online: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>ONU Name</li>
+                      <li>Downtime Duration</li>
+                      <li>Current Signal Strength</li>
+                      <li>Customer Address</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 4: OLT Offline */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-orange-900/30' : 'bg-orange-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-orange-400' : 'text-orange-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>OLT Offline (Critical)</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when entire OLT goes down</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.olt_offline}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, olt_offline: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>OLT Name & IP Address</li>
+                      <li>Number of Affected ONUs</li>
+                      <li>Last Seen Time</li>
+                      <li>Location (if set)</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 5: OLT Back Online */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-teal-900/30' : 'bg-teal-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-teal-400' : 'text-teal-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>OLT Back Online</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when OLT recovers</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.olt_back_online}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, olt_back_online: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>OLT Name & IP</li>
+                      <li>Downtime Duration</li>
+                      <li>ONUs Restored Count</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 6: Weak Signal Alert */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-purple-900/30' : 'bg-purple-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Weak Signal Alert</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when signal drops below threshold</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.weak_signal}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, weak_signal: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  {alarmSettings.weak_signal && (
+                    <div className="mb-3">
+                      <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                        Signal Threshold (dBm)
+                      </label>
+                      <input
+                        type="number"
+                        value={alarmSettings.weak_signal_threshold}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, weak_signal_threshold: parseFloat(e.target.value)})}
+                        className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                        min="-35"
+                        max="-15"
+                        step="0.5"
+                      />
+                      <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                        Typical range: -27 to -30 dBm (weaker signal)
+                      </p>
+                    </div>
+                  )}
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>ONU Name & Address</li>
+                      <li>Current Signal vs Threshold</li>
+                      <li>Trend (degrading/stable)</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 7: High Temperature Alert */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-red-900/30' : 'bg-red-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-red-400' : 'text-red-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>High Temperature Alert</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Alert when OLT temperature is high</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.high_temperature}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, high_temperature: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  {alarmSettings.high_temperature && (
+                    <div className="mb-3">
+                      <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                        Temperature Threshold (°C)
+                      </label>
+                      <input
+                        type="number"
+                        value={alarmSettings.high_temperature_threshold}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, high_temperature_threshold: parseInt(e.target.value)})}
+                        className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                        min="40"
+                        max="80"
+                      />
+                      <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                        Recommended: 55-65°C for most OLTs
+                      </p>
+                    </div>
+                  )}
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p className="font-medium mb-1">Message includes:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>OLT Name & IP</li>
+                      <li>Current Temperature</li>
+                      <li>Threshold Value</li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* Section 8: Quiet Hours */}
+                <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-indigo-900/30' : 'bg-indigo-100'}`}>
+                        <svg className={`w-6 h-6 ${darkMode ? 'text-indigo-400' : 'text-indigo-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Quiet Hours</h3>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Pause non-critical alerts at night</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.quiet_hours_enabled}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, quiet_hours_enabled: e.target.checked})}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
+                  </div>
+                  {alarmSettings.quiet_hours_enabled && (
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Start</label>
+                        <input
+                          type="time"
+                          value={alarmSettings.quiet_hours_start}
+                          onChange={(e) => setAlarmSettings({...alarmSettings, quiet_hours_start: e.target.value})}
+                          className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                        />
+                      </div>
+                      <div>
+                        <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>End</label>
+                        <input
+                          type="time"
+                          value={alarmSettings.quiet_hours_end}
+                          onChange={(e) => setAlarmSettings({...alarmSettings, quiet_hours_end: e.target.value})}
+                          className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
+                    <p>During quiet hours, only <strong>OLT Offline</strong> alerts will be sent. Other alerts will be queued until morning.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Select Specific ONUs Section */}
+              <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-cyan-900/30' : 'bg-cyan-100'}`}>
+                    <svg className={`w-6 h-6 ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Select Specific ONUs for Alerts</h3>
+                    <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Choose which ONUs should trigger WhatsApp alerts (leave empty for all ONUs)</p>
+                  </div>
+                </div>
+                <div className={`max-h-60 overflow-y-auto rounded-lg border ${darkMode ? 'border-slate-600' : 'border-gray-200'}`}>
+                  {onus.length === 0 ? (
+                    <p className={`p-4 text-center ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>No ONUs available</p>
+                  ) : (
+                    <table className="w-full">
+                      <thead className={`sticky top-0 ${darkMode ? 'bg-slate-700' : 'bg-gray-50'}`}>
+                        <tr>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                            <input
+                              type="checkbox"
+                              checked={alarmSettings.selected_onus.length === onus.length}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setAlarmSettings({...alarmSettings, selected_onus: onus.map(o => o.id)});
+                                } else {
+                                  setAlarmSettings({...alarmSettings, selected_onus: []});
+                                }
+                              }}
+                              className="rounded"
+                            />
+                          </th>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>ONU</th>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Description</th>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+                        {onus.slice(0, 50).map((onu) => (
+                          <tr key={onu.id} className={`${darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-gray-50'}`}>
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={alarmSettings.selected_onus.includes(onu.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setAlarmSettings({...alarmSettings, selected_onus: [...alarmSettings.selected_onus, onu.id]});
+                                  } else {
+                                    setAlarmSettings({...alarmSettings, selected_onus: alarmSettings.selected_onus.filter(id => id !== onu.id)});
+                                  }
+                                }}
+                                className="rounded"
+                              />
+                            </td>
+                            <td className={`px-3 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                              {onu.pon_port}:{onu.onu_id}
+                            </td>
+                            <td className={`px-3 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                              {onu.description || '-'}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                onu.status === 'online'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-red-100 text-red-800'
+                              }`}>
+                                {onu.status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                {alarmSettings.selected_onus.length > 0 && (
+                  <p className={`mt-2 text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                    {alarmSettings.selected_onus.length} ONU(s) selected for alerts
+                  </p>
+                )}
+              </div>
+
+              {/* Select Regions Section */}
+              <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-amber-900/30' : 'bg-amber-100'}`}>
+                    <svg className={`w-6 h-6 ${darkMode ? 'text-amber-400' : 'text-amber-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Select Regions for Alerts</h3>
+                    <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Enable alerts only for specific regions (leave empty for all regions)</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                  {regions.map((region) => (
+                    <label
+                      key={region.id}
+                      className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-all ${
+                        alarmSettings.selected_regions.includes(region.id)
+                          ? (darkMode ? 'bg-blue-900/30 border-blue-600' : 'bg-blue-50 border-blue-300')
+                          : (darkMode ? 'bg-slate-700/50 border-slate-600 hover:border-slate-500' : 'bg-gray-50 border-gray-200 hover:border-gray-300')
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.selected_regions.includes(region.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setAlarmSettings({...alarmSettings, selected_regions: [...alarmSettings.selected_regions, region.id]});
+                          } else {
+                            setAlarmSettings({...alarmSettings, selected_regions: alarmSettings.selected_regions.filter(id => id !== region.id)});
+                          }
+                        }}
+                        className="rounded"
+                      />
+                      <div
+                        className="w-3 h-3 rounded-full"
+                        style={{ backgroundColor: region.color || '#3B82F6' }}
+                      />
+                      <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>{region.name}</span>
+                    </label>
+                  ))}
+                </div>
+                {regions.length === 0 && (
+                  <p className={`text-center py-4 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>No regions configured</p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Splitter Simulator Page */}
           {currentPage === 'splitter' && (
             <SplitterSimulator olts={olts} onus={onus} />
@@ -7337,7 +8141,7 @@ function Dashboard({ user, onLogout, pageName }) {
           {currentPage === 'users' && isAdmin && (
             <>
               <div className="flex justify-between items-center mb-4">
-                <h2 className="text-lg font-bold text-gray-800">Users</h2>
+                <h2 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Users</h2>
                 <button
                   onClick={() => { setEditingUser(null); setShowUserModal(true); }}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
@@ -7345,22 +8149,22 @@ function Dashboard({ user, onLogout, pageName }) {
                   + Add User
                 </button>
               </div>
-              <div className="bg-white rounded-xl shadow-md overflow-hidden">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+              <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+                <table className={`min-w-full divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+                  <thead className={darkMode ? 'bg-slate-700' : 'bg-gray-50'}>
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Username</th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Full Name</th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Role</th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Actions</th>
+                      <th className={`px-6 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Username</th>
+                      <th className={`px-6 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Full Name</th>
+                      <th className={`px-6 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Role</th>
+                      <th className={`px-6 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Status</th>
+                      <th className={`px-6 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className={`divide-y ${darkMode ? 'bg-slate-800 divide-slate-700' : 'bg-white divide-gray-200'}`}>
                     {users.map((u) => (
-                      <tr key={u.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{u.username}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{u.full_name || '-'}</td>
+                      <tr key={u.id} className={darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-gray-50'}>
+                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>{u.username}</td>
+                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{u.full_name || '-'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                           <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
                             u.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
@@ -7468,6 +8272,7 @@ function Dashboard({ user, onLogout, pageName }) {
         entityName={graphEntity.name}
       />
     </div>
+    </DarkModeContext.Provider>
   );
 }
 

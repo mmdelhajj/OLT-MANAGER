@@ -4,7 +4,7 @@
 # Creates permanent tunnel to your license server
 #############################################
 
-LICENSE_SERVER="109.110.185.70"
+LICENSE_SERVER="lic.proxpanel.com"
 TUNNEL_USER="tunnel_manager"
 
 # This will be set during installation

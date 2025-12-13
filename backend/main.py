@@ -19,8 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from typing import Dict, Set
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
+from pydantic import BaseModel
 
-from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram
+from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram, OLTPort
 from schemas import (
     OLTCreate, OLTUpdate, OLTResponse, OLTListResponse,
     ONUResponse, ONUListResponse, DashboardStats, PollResult,
@@ -28,7 +29,8 @@ from schemas import (
     UserLogin, UserCreate, UserUpdate, UserResponse, UserListResponse, LoginResponse,
     DiagramCreate, DiagramUpdate, DiagramResponse, DiagramListResponse
 )
-from olt_connector import poll_olt, poll_olt_snmp, get_opm_data_via_ssh, get_traffic_counters_snmp, ONUData, OLTConnector
+from olt_connector import poll_olt, poll_olt_snmp, get_opm_data_via_ssh, get_traffic_counters_snmp, get_olt_health_snmp, ONUData, OLTConnector
+from olt_web_scraper import get_onu_opm_data_web
 from trap_receiver import SimpleTrapReceiver, TrapEvent
 from config import POLL_INTERVAL, encrypt_sensitive, decrypt_sensitive
 from auth import (
@@ -135,6 +137,23 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
         if not online_onus and not offline_onus:
             return
 
+        # Check alarm settings
+        alarm_settings = get_alarm_settings(db)
+
+        # Check quiet hours
+        if is_in_quiet_hours(alarm_settings):
+            logger.debug("Skipping ONU status notifications - quiet hours")
+            return
+
+        # Filter based on alarm settings
+        filtered_online = online_onus if is_alarm_enabled(alarm_settings, "onu_back_online") else []
+        filtered_offline = offline_onus if is_alarm_enabled(alarm_settings, "onu_offline") else []
+
+        # Skip if nothing to notify after filtering
+        if not filtered_online and not filtered_offline:
+            logger.debug("Skipping ONU status notifications - alarms disabled for these types")
+            return
+
         settings = get_whatsapp_settings(db)
 
         # Check if WhatsApp notifications are enabled (case-insensitive)
@@ -160,7 +179,7 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
         message_parts = []
 
         # Add offline ONUs section
-        for onu in offline_onus:
+        for onu in filtered_offline:
             onu_name = onu.description or "No Name"
             region_name = onu.region.name if onu.region else "No Region"
 
@@ -182,7 +201,7 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
             message_parts.append("")
 
         # Add online ONUs section
-        for onu in online_onus:
+        for onu in filtered_online:
             onu_name = onu.description or "No Name"
             region_name = onu.region.name if onu.region else "No Region"
 
@@ -244,10 +263,403 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
             except Exception as e:
                 logger.error(f"Failed to send to {name} ({phone}): {e}")
 
-        logger.info(f"WhatsApp batch notification: {success_count}/{len(recipients)} recipients, {len(offline_onus)} offline, {len(online_onus)} online")
+        logger.info(f"WhatsApp batch notification: {success_count}/{len(recipients)} recipients, {len(filtered_offline)} offline, {len(filtered_online)} online")
 
     except Exception as e:
         logger.error(f"Failed to send WhatsApp notification: {e}")
+
+
+def get_alarm_settings(db: Session) -> dict:
+    """Get alarm settings from database"""
+    settings = db.query(Settings).filter(Settings.key.like('alarm_%')).all()
+    result = {}
+    for s in settings:
+        key = s.key.replace('alarm_', '')
+        result[key] = s.value
+
+    # Apply defaults
+    defaults = {
+        "new_onu_registration": "true",
+        "onu_offline": "true",
+        "onu_back_online": "true",
+        "olt_offline": "true",
+        "olt_back_online": "true",
+        "weak_signal": "false",
+        "weak_signal_threshold": "-27",
+        "high_temperature": "false",
+        "high_temperature_threshold": "60",
+        "selected_onus": "[]",
+        "selected_regions": "[]",
+        "quiet_hours_enabled": "false",
+        "quiet_hours_start": "22:00",
+        "quiet_hours_end": "07:00"
+    }
+    for key, value in defaults.items():
+        if key not in result:
+            result[key] = value
+
+    return result
+
+
+def is_alarm_enabled(alarm_settings: dict, alarm_type: str) -> bool:
+    """Check if a specific alarm type is enabled"""
+    value = alarm_settings.get(alarm_type, "false")
+    return str(value).lower() == "true"
+
+
+def is_in_quiet_hours(alarm_settings: dict) -> bool:
+    """Check if current time is within quiet hours"""
+    if not is_alarm_enabled(alarm_settings, "quiet_hours_enabled"):
+        return False
+
+    try:
+        now = datetime.now().time()
+        start_str = alarm_settings.get("quiet_hours_start", "22:00")
+        end_str = alarm_settings.get("quiet_hours_end", "07:00")
+
+        start_parts = start_str.split(":")
+        end_parts = end_str.split(":")
+
+        start_time = datetime.strptime(f"{start_parts[0]}:{start_parts[1]}", "%H:%M").time()
+        end_time = datetime.strptime(f"{end_parts[0]}:{end_parts[1]}", "%H:%M").time()
+
+        # Handle overnight quiet hours (e.g., 22:00 to 07:00)
+        if start_time > end_time:
+            return now >= start_time or now <= end_time
+        else:
+            return start_time <= now <= end_time
+    except Exception as e:
+        logger.error(f"Error checking quiet hours: {e}")
+        return False
+
+
+def send_new_onu_notification(db: Session, onu, olt_name: str):
+    """Send WhatsApp notification for new ONU registration"""
+    try:
+        alarm_settings = get_alarm_settings(db)
+
+        # Check if new ONU registration alarm is enabled
+        if not is_alarm_enabled(alarm_settings, "new_onu_registration"):
+            logger.debug("New ONU registration alarm is disabled")
+            return
+
+        # Check quiet hours
+        if is_in_quiet_hours(alarm_settings):
+            logger.debug("Skipping new ONU notification - quiet hours")
+            return
+
+        settings = get_whatsapp_settings(db)
+
+        # Check if WhatsApp notifications are enabled
+        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
+            return
+
+        api_url = settings.get('whatsapp_api_url', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
+        account = settings.get('whatsapp_account', '').strip()
+        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
+
+        if not recipients or not all([api_url, secret, account]):
+            return
+
+        # Build message with signal info
+        message_parts = [
+            "🆕 *NEW ONU REGISTERED*",
+            "",
+            f"MAC: {onu.mac_address}",
+            f"OLT: {olt_name}",
+            f"Port: {onu.pon_port}/{onu.onu_id}",
+        ]
+
+        # Add model if available
+        if onu.model:
+            message_parts.append(f"Model: {onu.model}")
+
+        # Add signal information section
+        signal_info = []
+        if onu.distance is not None:
+            signal_info.append(f"Distance: {onu.distance}m")
+        if onu.onu_rx_power is not None:
+            signal_info.append(f"RX Power: {onu.onu_rx_power} dBm")
+        if onu.onu_tx_power is not None:
+            signal_info.append(f"TX Power: {onu.onu_tx_power} dBm")
+        if onu.onu_temperature is not None:
+            signal_info.append(f"Temperature: {onu.onu_temperature}°C")
+        if onu.onu_voltage is not None:
+            signal_info.append(f"Voltage: {onu.onu_voltage}V")
+
+        if signal_info:
+            message_parts.append("")
+            message_parts.append("📊 *Signal Info:*")
+            message_parts.extend(signal_info)
+
+        message_parts.append("")
+        message_parts.append(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        message = "\n".join(message_parts)
+
+        # Send to all recipients
+        for recipient in recipients:
+            phone = recipient.get('phone', '').strip()
+            if not phone:
+                continue
+
+            try:
+                response = requests.post(
+                    api_url,
+                    data={
+                        'secret': secret,
+                        'account': account,
+                        'recipient': phone,
+                        'type': 'text',
+                        'message': message
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    logger.info(f"New ONU notification sent to {phone}")
+                else:
+                    logger.warning(f"Failed to send new ONU notification to {phone}: {response.text}")
+            except Exception as e:
+                logger.error(f"Error sending new ONU notification to {phone}: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to send new ONU notification: {e}")
+
+
+def send_olt_status_notification(db: Session, olt, is_online: bool):
+    """Send WhatsApp notification for OLT status change"""
+    try:
+        alarm_settings = get_alarm_settings(db)
+
+        # Check if appropriate alarm is enabled
+        alarm_type = "olt_back_online" if is_online else "olt_offline"
+        if not is_alarm_enabled(alarm_settings, alarm_type):
+            logger.debug(f"OLT {alarm_type} alarm is disabled")
+            return
+
+        # Check quiet hours
+        if is_in_quiet_hours(alarm_settings):
+            logger.debug("Skipping OLT status notification - quiet hours")
+            return
+
+        settings = get_whatsapp_settings(db)
+
+        # Check if WhatsApp notifications are enabled
+        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
+            return
+
+        api_url = settings.get('whatsapp_api_url', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
+        account = settings.get('whatsapp_account', '').strip()
+        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
+
+        if not recipients or not all([api_url, secret, account]):
+            return
+
+        # Build message
+        if is_online:
+            emoji = "✅"
+            status = "BACK ONLINE"
+        else:
+            emoji = "🔴"
+            status = "OFFLINE"
+
+        message_parts = [
+            f"{emoji} *OLT {status}*",
+            "",
+            f"Name: {olt.name}",
+            f"IP: {olt.ip_address}",
+            "",
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ]
+
+        message = "\n".join(message_parts)
+
+        # Send to all recipients
+        for recipient in recipients:
+            phone = recipient.get('phone', '').strip()
+            if not phone:
+                continue
+
+            try:
+                response = requests.post(
+                    api_url,
+                    data={
+                        'secret': secret,
+                        'account': account,
+                        'recipient': phone,
+                        'type': 'text',
+                        'message': message
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    logger.info(f"OLT status notification sent to {phone}")
+                else:
+                    logger.warning(f"Failed to send OLT status notification to {phone}: {response.text}")
+            except Exception as e:
+                logger.error(f"Error sending OLT status notification to {phone}: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to send OLT status notification: {e}")
+
+
+def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_name: str):
+    """Send WhatsApp notification for ONUs with weak signal"""
+    try:
+        if not onus_with_weak_signal:
+            return
+
+        alarm_settings = get_alarm_settings(db)
+
+        # Check if weak signal alarm is enabled
+        if not is_alarm_enabled(alarm_settings, "weak_signal"):
+            logger.debug("Weak signal alarm is disabled")
+            return
+
+        # Check quiet hours
+        if is_in_quiet_hours(alarm_settings):
+            logger.debug("Skipping weak signal notification - quiet hours")
+            return
+
+        settings = get_whatsapp_settings(db)
+
+        # Check if WhatsApp notifications are enabled
+        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
+            return
+
+        api_url = settings.get('whatsapp_api_url', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
+        account = settings.get('whatsapp_account', '').strip()
+        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
+
+        if not recipients or not all([api_url, secret, account]):
+            return
+
+        threshold = alarm_settings.get("weak_signal_threshold", -27)
+
+        # Build message
+        message_parts = [
+            f"⚠️ *WEAK SIGNAL ALERT*",
+            f"Threshold: {threshold} dBm",
+            f"OLT: {olt_name}",
+            ""
+        ]
+
+        for onu in onus_with_weak_signal[:10]:  # Limit to 10 ONUs per message
+            desc = onu.description or onu.mac_address
+            message_parts.append(f"• {desc}: {onu.rx_power} dBm")
+
+        if len(onus_with_weak_signal) > 10:
+            message_parts.append(f"... and {len(onus_with_weak_signal) - 10} more")
+
+        message_parts.append("")
+        message_parts.append(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        message = "\n".join(message_parts)
+
+        # Send to all recipients
+        for recipient in recipients:
+            phone = recipient.get('phone', '').strip()
+            if not phone:
+                continue
+
+            try:
+                response = requests.post(
+                    api_url,
+                    data={
+                        'secret': secret,
+                        'account': account,
+                        'recipient': phone,
+                        'type': 'text',
+                        'message': message
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    logger.info(f"Weak signal notification sent to {phone}")
+                else:
+                    logger.warning(f"Failed to send weak signal notification to {phone}: {response.text}")
+            except Exception as e:
+                logger.error(f"Error sending weak signal notification to {phone}: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to send weak signal notification: {e}")
+
+
+def send_high_temperature_notification(db: Session, olt, temperature: float):
+    """Send WhatsApp notification for OLT high temperature"""
+    try:
+        alarm_settings = get_alarm_settings(db)
+
+        # Check if high temperature alarm is enabled
+        if not is_alarm_enabled(alarm_settings, "high_temperature"):
+            logger.debug("High temperature alarm is disabled")
+            return
+
+        # Check quiet hours
+        if is_in_quiet_hours(alarm_settings):
+            logger.debug("Skipping high temperature notification - quiet hours")
+            return
+
+        settings = get_whatsapp_settings(db)
+
+        # Check if WhatsApp notifications are enabled
+        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
+            return
+
+        api_url = settings.get('whatsapp_api_url', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
+        account = settings.get('whatsapp_account', '').strip()
+        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
+
+        if not recipients or not all([api_url, secret, account]):
+            return
+
+        threshold = alarm_settings.get("high_temperature_threshold", 60)
+
+        # Build message
+        message_parts = [
+            f"🌡️ *HIGH TEMPERATURE ALERT*",
+            "",
+            f"OLT: {olt.name}",
+            f"IP: {olt.ip_address}",
+            f"Temperature: {temperature}°C",
+            f"Threshold: {threshold}°C",
+            "",
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ]
+
+        message = "\n".join(message_parts)
+
+        # Send to all recipients
+        for recipient in recipients:
+            phone = recipient.get('phone', '').strip()
+            if not phone:
+                continue
+
+            try:
+                response = requests.post(
+                    api_url,
+                    data={
+                        'secret': secret,
+                        'account': account,
+                        'recipient': phone,
+                        'type': 'text',
+                        'message': message
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    logger.info(f"High temperature notification sent to {phone}")
+                else:
+                    logger.warning(f"Failed to send high temperature notification to {phone}: {response.text}")
+            except Exception as e:
+                logger.error(f"Error sending high temperature notification to {phone}: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to send high temperature notification: {e}")
 
 
 async def collect_traffic_history(olt, db):
@@ -284,9 +696,16 @@ async def collect_traffic_history(olt, db):
 
             if mac in prev_snapshots:
                 prev = prev_snapshots[mac]
-                time_diff = (current_time - prev.timestamp).total_seconds()
 
-                if time_diff > 0:
+                # Use the pre-calculated rates from the snapshot (updated by WebSocket polling)
+                # This avoids race conditions where WebSocket updates snapshots frequently
+                rx_kbps = getattr(prev, 'last_rx_kbps', 0) or 0
+                tx_kbps = getattr(prev, 'last_tx_kbps', 0) or 0
+
+                # Only recalculate if no WebSocket is updating (time_diff > 10 seconds)
+                time_diff = (current_time - prev.timestamp).total_seconds()
+                if time_diff > 10:
+                    # No WebSocket active, calculate rate ourselves
                     rx_diff = rx_bytes - prev.rx_bytes
                     tx_diff = tx_bytes - prev.tx_bytes
 
@@ -305,11 +724,13 @@ async def collect_traffic_history(olt, db):
                         rx_kbps = 0
                         tx_kbps = 0
 
+                    prev.last_rx_kbps = rx_kbps
+                    prev.last_tx_kbps = tx_kbps
+
+                # Always update the snapshot with latest counters
                 prev.rx_bytes = rx_bytes
                 prev.tx_bytes = tx_bytes
                 prev.timestamp = current_time
-                prev.last_rx_kbps = rx_kbps
-                prev.last_tx_kbps = tx_kbps
             else:
                 snapshot = TrafficSnapshot(
                     olt_id=olt.id,
@@ -444,6 +865,9 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
         olts = db.query(OLT).all()
 
         for olt in olts:
+            # Track OLT's previous online status for alarm notifications
+            olt_was_online = olt.is_online
+
             try:
                 logger.info(f"Polling OLT: {olt.name} ({olt.ip_address})")
 
@@ -485,10 +909,83 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         except Exception as opm_err:
                             logger.warning(f"SSH OPM failed for {olt.name} (using SNMP data only): {opm_err}")
 
+                        # Get ONU self-reported RX power via web scraping
+                        # This gives the ~-13 dBm value the customer sees (vs ~-26 dBm SNMP measures)
+                        # Fall back to SSH credentials if web credentials not set
+                        web_opm_data = {}
+                        web_user = olt.web_username or olt.username or 'admin'
+                        web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) if olt.password else 'admin'
+                        if web_user and web_pass:
+                            try:
+                                web_opm_data = await loop.run_in_executor(
+                                    ssh_executor,
+                                    get_onu_opm_data_web,
+                                    olt.ip_address,
+                                    web_user,
+                                    web_pass
+                                )
+                                if web_opm_data:
+                                    logger.info(f"Web OPM for {olt.name}: got ONU RX power for {len(web_opm_data)} ONUs")
+                            except Exception as web_err:
+                                logger.warning(f"Web OPM scraping failed for {olt.name}: {web_err}")
+
                         # Update OLT status
                         olt.is_online = True
                         olt.last_poll = datetime.utcnow()
                         olt.last_error = None
+
+                        # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data)
+                        try:
+                            health_data = await loop.run_in_executor(
+                                ssh_executor,
+                                get_olt_health_snmp,
+                                olt.ip_address,
+                                "public",
+                                olt.pon_ports  # Pass number of PON ports for transceiver polling
+                            )
+                            if health_data:
+                                olt.cpu_usage = health_data.get('cpu_usage')
+                                olt.memory_usage = health_data.get('memory_usage')
+                                olt.temperature = health_data.get('temperature')
+                                olt.uptime_seconds = health_data.get('uptime_seconds')
+
+                                # Check high temperature alarm
+                                if olt.temperature is not None:
+                                    alarm_settings = get_alarm_settings(db)
+                                    temp_threshold = float(alarm_settings.get("high_temperature_threshold", 60))
+                                    if olt.temperature > temp_threshold:
+                                        send_high_temperature_notification(db, olt, olt.temperature)
+
+                                # Save PON port transceiver diagnostics to OLTPort table
+                                pon_ports_data = health_data.get('pon_ports', [])
+                                for port_info in pon_ports_data:
+                                    port_num = port_info.get('port')
+                                    if port_num:
+                                        # Find or create OLTPort entry for this PON port
+                                        olt_port = db.query(OLTPort).filter(
+                                            OLTPort.olt_id == olt.id,
+                                            OLTPort.port_type == 'pon',
+                                            OLTPort.port_number == port_num
+                                        ).first()
+                                        if not olt_port:
+                                            olt_port = OLTPort(
+                                                olt_id=olt.id,
+                                                port_type='pon',
+                                                port_number=port_num
+                                            )
+                                            db.add(olt_port)
+                                        # Update transceiver data
+                                        if port_info.get('temperature') is not None:
+                                            olt_port.temperature = port_info['temperature']
+                                        if port_info.get('tx_power') is not None:
+                                            olt_port.tx_power = port_info['tx_power']
+                                        olt_port.last_updated = datetime.utcnow()
+                        except Exception as health_err:
+                            logger.warning(f"Health poll failed for {olt.name}: {health_err}")
+
+                        # Send OLT back online notification if it was offline
+                        if not olt_was_online and olt.is_online:
+                            send_olt_status_notification(db, olt, is_online=True)
 
                         # Re-index existing ONUs by (pon_port, onu_id) for proper matching
                         existing_by_key = {
@@ -520,6 +1017,25 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                             elif onu_data.rx_power is not None:
                                 rx_power = onu_data.rx_power
 
+                            # Get ONU self-reported optical data from web scraping
+                            onu_rx_power = None
+                            onu_tx_power = None
+                            onu_temperature = None
+                            onu_voltage = None
+                            onu_tx_bias = None
+                            web_distance = None
+                            if onu_data.mac_address in web_opm_data:
+                                web_data = web_opm_data[onu_data.mac_address]
+                                onu_rx_power = web_data.get('rx_power')
+                                onu_tx_power = web_data.get('tx_power')
+                                onu_temperature = web_data.get('temperature')
+                                onu_voltage = web_data.get('voltage')
+                                onu_tx_bias = web_data.get('tx_bias')
+                                web_distance = web_data.get('distance')  # More accurate than SNMP
+
+                            # Use web distance if available, otherwise fall back to SNMP
+                            final_distance = web_distance if web_distance is not None else onu_data.distance
+
                             if key in existing_by_key:
                                 # Update existing ONU
                                 existing = existing_by_key[key]
@@ -529,17 +1045,36 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 # Update optical diagnostics only when online
                                 if onu_data.description:
                                     existing.description = onu_data.description
+                                # Always update model if available from SNMP
+                                if onu_data.model:
+                                    existing.model = onu_data.model
                                 if is_online:
                                     # Only update distance/rx_power when ONU is online
-                                    if onu_data.distance is not None:
-                                        existing.distance = onu_data.distance
+                                    if final_distance is not None:
+                                        existing.distance = final_distance
                                     if rx_power is not None:
                                         existing.rx_power = rx_power
+                                    # Update ONU self-reported optical data from web scraping
+                                    if onu_rx_power is not None:
+                                        existing.onu_rx_power = onu_rx_power
+                                    if onu_tx_power is not None:
+                                        existing.onu_tx_power = onu_tx_power
+                                    if onu_temperature is not None:
+                                        existing.onu_temperature = onu_temperature
+                                    if onu_voltage is not None:
+                                        existing.onu_voltage = onu_voltage
+                                    if onu_tx_bias is not None:
+                                        existing.onu_tx_bias = onu_tx_bias
                                     existing.last_seen = datetime.utcnow()
                                 else:
                                     # Clear optical data when ONU is offline (no live traffic)
                                     existing.distance = None
                                     existing.rx_power = None
+                                    existing.onu_rx_power = None
+                                    existing.onu_tx_power = None
+                                    existing.onu_temperature = None
+                                    existing.onu_voltage = None
+                                    existing.onu_tx_bias = None
                                 existing.updated_at = datetime.utcnow()
 
                                 # Collect status changes for batched notification
@@ -556,12 +1091,20 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                     onu_id=onu_data.onu_id,
                                     mac_address=onu_data.mac_address,
                                     description=onu_data.description,
+                                    model=onu_data.model,
                                     is_online=is_online,
-                                    distance=onu_data.distance if is_online else None,
+                                    distance=final_distance if is_online else None,
                                     rx_power=rx_power if is_online else None,
+                                    onu_rx_power=onu_rx_power if is_online else None,
+                                    onu_tx_power=onu_tx_power if is_online else None,
+                                    onu_temperature=onu_temperature if is_online else None,
+                                    onu_voltage=onu_voltage if is_online else None,
+                                    onu_tx_bias=onu_tx_bias if is_online else None,
                                     last_seen=datetime.utcnow() if is_online else None
                                 )
                                 db.add(new_onu)
+                                # Send new ONU registration notification
+                                send_new_onu_notification(db, new_onu, olt.name)
 
                         # Mark ONUs not seen in SNMP as offline (they may be powered off)
                         for key, onu in existing_by_key.items():
@@ -571,11 +1114,31 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                     onu.is_online = False
                                     onu.distance = None
                                     onu.rx_power = None
+                                    onu.onu_rx_power = None
+                                    onu.onu_tx_power = None
+                                    onu.onu_temperature = None
+                                    onu.onu_voltage = None
+                                    onu.onu_tx_bias = None
                                     onu.updated_at = datetime.utcnow()
                                     onus_went_offline.append(onu)
 
                         # Send batched notification for all status changes
                         send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
+
+                        # Check for weak signal alarms
+                        alarm_settings = get_alarm_settings(db)
+                        if is_alarm_enabled(alarm_settings, "weak_signal"):
+                            signal_threshold = float(alarm_settings.get("weak_signal_threshold", -27))
+                            weak_signal_onus = [
+                                o for o in db.query(ONU).filter(
+                                    ONU.olt_id == olt.id,
+                                    ONU.is_online == True,
+                                    ONU.rx_power != None,
+                                    ONU.rx_power < signal_threshold
+                                ).all()
+                            ]
+                            if weak_signal_onus:
+                                send_weak_signal_notification(db, weak_signal_onus, olt.name)
 
                         # Log successful SNMP poll
                         poll_log = PollLog(
@@ -609,6 +1172,48 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                     olt.is_online = True
                     olt.last_poll = datetime.utcnow()
                     olt.last_error = None
+
+                    # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data) via SNMP
+                    try:
+                        health_data = await loop.run_in_executor(
+                            ssh_executor,
+                            get_olt_health_snmp,
+                            olt.ip_address,
+                            "public",
+                            olt.pon_ports  # Pass number of PON ports for transceiver polling
+                        )
+                        if health_data:
+                            olt.cpu_usage = health_data.get('cpu_usage')
+                            olt.memory_usage = health_data.get('memory_usage')
+                            olt.temperature = health_data.get('temperature')
+                            olt.uptime_seconds = health_data.get('uptime_seconds')
+
+                            # Save PON port transceiver diagnostics to OLTPort table
+                            pon_ports_data = health_data.get('pon_ports', [])
+                            for port_info in pon_ports_data:
+                                port_num = port_info.get('port')
+                                if port_num:
+                                    # Find or create OLTPort entry for this PON port
+                                    olt_port = db.query(OLTPort).filter(
+                                        OLTPort.olt_id == olt.id,
+                                        OLTPort.port_type == 'pon',
+                                        OLTPort.port_number == port_num
+                                    ).first()
+                                    if not olt_port:
+                                        olt_port = OLTPort(
+                                            olt_id=olt.id,
+                                            port_type='pon',
+                                            port_number=port_num
+                                        )
+                                        db.add(olt_port)
+                                    # Update transceiver data
+                                    if port_info.get('temperature') is not None:
+                                        olt_port.temperature = port_info['temperature']
+                                    if port_info.get('tx_power') is not None:
+                                        olt_port.tx_power = port_info['tx_power']
+                                    olt_port.last_updated = datetime.utcnow()
+                    except Exception as health_err:
+                        logger.warning(f"Health poll failed for {olt.name}: {health_err}")
 
                     # Re-index by (pon_port, onu_id) for SSH data
                     existing_by_key = {
@@ -659,6 +1264,8 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 last_seen=datetime.utcnow()
                             )
                             db.add(new_onu)
+                            # Send new ONU registration notification
+                            send_new_onu_notification(db, new_onu, olt.name)
 
                     # Delete ONUs that are no longer in the OLT config
                     for key, onu in existing_by_key.items():
@@ -688,6 +1295,10 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                 olt.is_online = False
                 olt.last_poll = datetime.utcnow()
                 olt.last_error = str(e)
+
+                # Send OLT offline notification if it was online before
+                if olt_was_online:
+                    send_olt_status_notification(db, olt, is_online=False)
 
                 # Log failed poll
                 poll_log = PollLog(
@@ -1071,6 +1682,10 @@ def list_olts(user: User = Depends(require_auth), db: Session = Depends(get_db))
             last_error=olt.last_error,
             onu_count=counts['total'],
             online_onu_count=counts['online'],
+            cpu_usage=olt.cpu_usage,
+            memory_usage=olt.memory_usage,
+            temperature=olt.temperature,
+            uptime_seconds=olt.uptime_seconds,
             created_at=olt.created_at,
             updated_at=olt.updated_at
         ))
@@ -1102,6 +1717,10 @@ def get_olt(olt_id: int, db: Session = Depends(get_db)):
         last_error=olt.last_error,
         onu_count=onu_count,
         online_onu_count=online_onu_count,
+        cpu_usage=olt.cpu_usage,
+        memory_usage=olt.memory_usage,
+        temperature=olt.temperature,
+        uptime_seconds=olt.uptime_seconds,
         created_at=olt.created_at,
         updated_at=olt.updated_at
     )
@@ -1272,6 +1891,9 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                 # Update description
                 if onu_data.description:
                     existing.description = onu_data.description
+                # Always update model if available from SNMP
+                if onu_data.model:
+                    existing.model = onu_data.model
                 # Update optical diagnostics only when online
                 if is_online:
                     if onu_data.distance is not None:
@@ -1297,6 +1919,7 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                     onu_id=onu_data.onu_id,
                     mac_address=onu_data.mac_address,
                     description=onu_data.description,
+                    model=onu_data.model,
                     is_online=is_online,
                     distance=onu_data.distance,
                     rx_power=rx_power,
@@ -1359,6 +1982,143 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
         )
 
 
+# ============ OLT Control Panel Endpoints ============
+
+@app.get("/api/olts/{olt_id}/vlans")
+async def get_olt_vlans(olt_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Get VLAN configuration from OLT (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        vlan_config = await loop.run_in_executor(ssh_executor, connector.get_vlan_config)
+        return {"success": True, "vlans": vlan_config.get('vlans', []), "raw_config": vlan_config.get('raw_config', '')}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SetONUVlanRequest(BaseModel):
+    pon_port: int
+    onu_id: int
+    vlan_id: int
+    mode: str = "tag"  # transparent, tag, translate
+
+
+@app.post("/api/olts/{olt_id}/set-onu-vlan")
+async def set_onu_vlan(olt_id: int, request: SetONUVlanRequest, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Set VLAN for a specific ONU (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        result = await loop.run_in_executor(
+            ssh_executor,
+            lambda: connector.set_onu_vlan(request.pon_port, request.onu_id, request.vlan_id, request.mode)
+        )
+        return {"success": result, "message": f"VLAN {request.vlan_id} set for ONU {request.pon_port}:{request.onu_id} in {request.mode} mode"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SetPortStatusRequest(BaseModel):
+    port_type: str  # pon, ge, xge
+    port_number: int
+    enabled: bool
+
+
+@app.post("/api/olts/{olt_id}/set-port-status")
+async def set_port_status(olt_id: int, request: SetPortStatusRequest, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Enable or disable a port on OLT (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        result = await loop.run_in_executor(
+            ssh_executor,
+            lambda: connector.set_port_status(request.port_type, request.port_number, request.enabled)
+        )
+        status = "enabled" if request.enabled else "disabled"
+        return {"success": result, "message": f"Port {request.port_type} {request.port_number} {status}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/olts/{olt_id}/reboot")
+async def reboot_olt(olt_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Reboot the entire OLT device (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        result = await loop.run_in_executor(ssh_executor, connector.reboot_olt)
+
+        # Mark OLT as offline since it's rebooting
+        olt.is_online = False
+        olt.last_error = "Rebooting..."
+        db.commit()
+
+        return {"success": result, "message": f"OLT {olt.name} is rebooting. It will take 2-3 minutes to come back online."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/olts/{olt_id}/save-config")
+async def save_olt_config(olt_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Save running config to startup config (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        result = await loop.run_in_executor(ssh_executor, connector.save_config)
+        return {"success": result, "message": "Configuration saved successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ExecuteCommandRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/olts/{olt_id}/execute-command")
+async def execute_olt_command(olt_id: int, request: ExecuteCommandRequest, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Execute a custom CLI command on OLT (admin only)"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    # Validate command - block dangerous commands
+    dangerous_commands = ['delete', 'erase', 'format', 'no interface', 'no confirm']
+    for dangerous in dangerous_commands:
+        if dangerous in request.command.lower():
+            raise HTTPException(status_code=400, detail=f"Command contains dangerous keyword: {dangerous}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        output = await loop.run_in_executor(
+            ssh_executor,
+            lambda: connector.execute_custom_command(request.command)
+        )
+        return {"success": True, "output": output}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============ ONU Endpoints ============
 
 @app.get("/api/olts/{olt_id}/onus", response_model=ONUListResponse)
@@ -1399,6 +2159,12 @@ def list_onus_by_olt(olt_id: int, db: Session = Depends(get_db)):
             google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
             distance=onu.distance,
             rx_power=onu.rx_power,
+            onu_rx_power=onu.onu_rx_power,
+            onu_tx_power=onu.onu_tx_power,
+            onu_temperature=onu.onu_temperature,
+            onu_voltage=onu.onu_voltage,
+            onu_tx_bias=onu.onu_tx_bias,
+            model=onu.model,
             image_url=onu.image_url,
             image_urls=parse_image_urls(onu.image_urls),
             last_seen=onu.last_seen,
@@ -1478,6 +2244,12 @@ def list_all_onus(
             google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
             distance=onu.distance,
             rx_power=onu.rx_power,
+            onu_rx_power=onu.onu_rx_power,
+            onu_tx_power=onu.onu_tx_power,
+            onu_temperature=onu.onu_temperature,
+            onu_voltage=onu.onu_voltage,
+            onu_tx_bias=onu.onu_tx_bias,
+            model=onu.model,
             image_url=onu.image_url,
             image_urls=parse_image_urls(onu.image_urls),
             last_seen=onu.last_seen,
@@ -1531,6 +2303,12 @@ def search_onus(
             google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
             distance=onu.distance,
             rx_power=onu.rx_power,
+            onu_rx_power=onu.onu_rx_power,
+            onu_tx_power=onu.onu_tx_power,
+            onu_temperature=onu.onu_temperature,
+            onu_voltage=onu.onu_voltage,
+            onu_tx_bias=onu.onu_tx_bias,
+            model=onu.model,
             image_url=onu.image_url,
             image_urls=parse_image_urls(onu.image_urls),
             last_seen=onu.last_seen,
@@ -1580,6 +2358,12 @@ def get_onu(onu_id: int, db: Session = Depends(get_db)):
         google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
         distance=onu.distance,
         rx_power=onu.rx_power,
+        onu_rx_power=onu.onu_rx_power,
+        onu_tx_power=onu.onu_tx_power,
+        onu_temperature=onu.onu_temperature,
+        onu_voltage=onu.onu_voltage,
+        onu_tx_bias=onu.onu_tx_bias,
+        model=onu.model,
         image_url=onu.image_url,
         image_urls=parse_image_urls(onu.image_urls),
         last_seen=onu.last_seen,
@@ -1589,11 +2373,21 @@ def get_onu(onu_id: int, db: Session = Depends(get_db)):
 
 def sync_onu_description_to_olt(olt_ip: str, olt_username: str, olt_password: str,
                                   pon_port: int, onu_id: int, description: str):
-    """Background task to sync ONU description to OLT"""
+    """Background task to sync ONU description to OLT via web interface"""
+    from olt_web_scraper import set_onu_description_web
     try:
-        connector = OLTConnector(olt_ip, olt_username, olt_password)
-        connector.set_onu_description(pon_port, onu_id, description or "")
-        logger.info(f"Background sync: ONU 0/{pon_port}:{onu_id} description synced to OLT {olt_ip}")
+        success = set_onu_description_web(
+            ip=olt_ip,
+            pon_port=pon_port,
+            onu_id=onu_id,
+            description=description or "",
+            username=olt_username,
+            password=olt_password
+        )
+        if success:
+            logger.info(f"Background sync: ONU 0/{pon_port}:{onu_id} description synced to OLT {olt_ip}")
+        else:
+            logger.warning(f"Background sync: Failed to sync description for ONU 0/{pon_port}:{onu_id} on {olt_ip}")
     except Exception as e:
         logger.error(f"Background sync failed for ONU 0/{pon_port}:{onu_id} on {olt_ip}: {e}")
 
@@ -1618,13 +2412,15 @@ async def update_onu(onu_id: int, data: dict, background_tasks: BackgroundTasks,
         onu.description = new_desc
         onu.updated_at = datetime.utcnow()
 
-        # Sync to OLT in background (non-blocking)
+        # Sync to OLT in background via web interface (non-blocking)
+        web_user = olt.web_username or olt.username or 'admin'
+        web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) or 'admin'
         background_tasks.add_task(
             sync_onu_description_to_olt,
-            olt.ip_address, olt.username, decrypt_sensitive(olt.password),  # Decrypt password
+            olt.ip_address, web_user, web_pass,
             onu.pon_port, onu.onu_id, new_desc or ""
         )
-        logger.info(f"Queued background sync for ONU {onu_id} to OLT {olt.name}")
+        logger.info(f"Queued background sync for ONU {onu_id} to OLT {olt.name} via web")
 
     # Handle region_id update (can be set to null to remove from region)
     if "region_id" in data:
@@ -1681,6 +2477,12 @@ async def update_onu(onu_id: int, data: dict, background_tasks: BackgroundTasks,
         google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
         distance=onu.distance,
         rx_power=onu.rx_power,
+        onu_rx_power=onu.onu_rx_power,
+        onu_tx_power=onu.onu_tx_power,
+        onu_temperature=onu.onu_temperature,
+        onu_voltage=onu.onu_voltage,
+        onu_tx_bias=onu.onu_tx_bias,
+        model=onu.model,
         image_url=onu.image_url,
         image_urls=parse_image_urls(onu.image_urls),
         last_seen=onu.last_seen,
@@ -1787,8 +2589,8 @@ def delete_onu(onu_id: int, user: User = Depends(require_admin), db: Session = D
 
 @app.post("/api/onus/{onu_id}/reboot")
 def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    """Reboot an ONU via SSH CLI command"""
-    from olt_connector import OLTConnector
+    """Reboot an ONU via OLT web interface"""
+    from olt_web_scraper import reboot_onu_web
 
     # Get the ONU
     onu = db.query(ONU).filter(ONU.id == onu_id).first()
@@ -1805,14 +2607,18 @@ def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = De
         raise HTTPException(status_code=503, detail="OLT is offline")
 
     try:
-        # Connect to OLT and reboot ONU (use same credentials as SNMP)
-        connector = OLTConnector(
-            ip=olt.ip_address,
-            username=olt.username or 'admin',
-            password=decrypt_sensitive(olt.password) or 'admin'  # Decrypt password
-        )
+        # Use web interface to reboot ONU (more reliable than SSH)
+        # Use web credentials if set, otherwise fall back to standard credentials
+        web_user = olt.web_username or olt.username or 'admin'
+        web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) or 'admin'
 
-        success = connector.reboot_onu(onu.pon_port, onu.onu_id)
+        success = reboot_onu_web(
+            ip=olt.ip_address,
+            pon_port=onu.pon_port,
+            onu_id=onu.onu_id,
+            username=web_user,
+            password=web_pass
+        )
 
         if success:
             logger.info(f"User {user.username} rebooted ONU {onu.id} (0/{onu.pon_port}:{onu.onu_id}) on OLT {olt.name}")
@@ -1822,7 +2628,7 @@ def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = De
 
     except Exception as e:
         logger.error(f"Failed to reboot ONU {onu_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to reboot ONU: {e}")
 
 
 def get_google_maps_url(lat: float, lng: float) -> str:
@@ -2074,6 +2880,12 @@ def list_onus_by_region(region_id: int, user: User = Depends(require_auth), db: 
             google_maps_url=get_google_maps_url(onu.latitude, onu.longitude),
             distance=onu.distance,
             rx_power=onu.rx_power,
+            onu_rx_power=onu.onu_rx_power,
+            onu_tx_power=onu.onu_tx_power,
+            onu_temperature=onu.onu_temperature,
+            onu_voltage=onu.onu_voltage,
+            onu_tx_bias=onu.onu_tx_bias,
+            model=onu.model,
             image_url=onu.image_url,
             image_urls=parse_image_urls(onu.image_urls),
             last_seen=onu.last_seen,
@@ -2768,6 +3580,111 @@ def update_settings(
     return {"message": "Settings updated successfully"}
 
 
+# ============ Alarm Settings API ============
+
+@app.get("/api/alarm-settings")
+def get_alarm_settings(db: Session = Depends(get_db)):
+    """Get alarm settings (public - for alarm configuration)"""
+    settings = db.query(Settings).all()
+    result = {}
+    for s in settings:
+        if s.key.startswith("alarm_"):
+            result[s.key.replace("alarm_", "")] = s.value
+
+    # Return defaults if not set
+    defaults = {
+        "new_onu_registration": "true",
+        "onu_offline": "true",
+        "onu_back_online": "true",
+        "olt_offline": "true",
+        "olt_back_online": "true",
+        "weak_signal": "false",
+        "weak_signal_threshold": "-27",
+        "high_temperature": "false",
+        "high_temperature_threshold": "60",
+        "selected_onus": "[]",
+        "selected_regions": "[]",
+        "quiet_hours_enabled": "false",
+        "quiet_hours_start": "22:00",
+        "quiet_hours_end": "07:00"
+    }
+
+    for key, default_value in defaults.items():
+        if key not in result:
+            result[key] = default_value
+
+    # Parse JSON arrays
+    try:
+        result["selected_onus"] = json.loads(result["selected_onus"])
+    except:
+        result["selected_onus"] = []
+    try:
+        result["selected_regions"] = json.loads(result["selected_regions"])
+    except:
+        result["selected_regions"] = []
+
+    # Convert string booleans to actual booleans
+    bool_keys = ["new_onu_registration", "onu_offline", "onu_back_online",
+                 "olt_offline", "olt_back_online", "weak_signal",
+                 "high_temperature", "quiet_hours_enabled"]
+    for key in bool_keys:
+        if key in result:
+            result[key] = result[key].lower() == "true"
+
+    # Convert numeric strings to numbers
+    if "weak_signal_threshold" in result:
+        try:
+            result["weak_signal_threshold"] = int(result["weak_signal_threshold"])
+        except:
+            result["weak_signal_threshold"] = -27
+    if "high_temperature_threshold" in result:
+        try:
+            result["high_temperature_threshold"] = int(result["high_temperature_threshold"])
+        except:
+            result["high_temperature_threshold"] = 60
+
+    return result
+
+
+@app.put("/api/alarm-settings")
+def update_alarm_settings(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update alarm settings (admin only)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    allowed_keys = ["new_onu_registration", "onu_offline", "onu_back_online",
+                    "olt_offline", "olt_back_online", "weak_signal",
+                    "weak_signal_threshold", "high_temperature",
+                    "high_temperature_threshold", "selected_onus",
+                    "selected_regions", "quiet_hours_enabled",
+                    "quiet_hours_start", "quiet_hours_end"]
+
+    for key, value in data.items():
+        if key not in allowed_keys:
+            continue
+        # Convert lists to JSON strings for storage
+        if isinstance(value, list):
+            store_value = json.dumps(value)
+        elif isinstance(value, bool):
+            store_value = "true" if value else "false"
+        else:
+            store_value = str(value)
+
+        db_key = f"alarm_{key}"
+        setting = db.query(Settings).filter(Settings.key == db_key).first()
+        if setting:
+            setting.value = store_value
+        else:
+            setting = Settings(key=db_key, value=store_value)
+            db.add(setting)
+    db.commit()
+    return {"message": "Alarm settings updated successfully"}
+
+
 @app.post("/api/auth/change-password")
 def change_password(
     data: dict,
@@ -3080,7 +3997,8 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
             "onu_count": counts['total'],
             "onu_online": counts['online'],
             "tx_power": port.tx_power if port else None,
-            "rx_power": port.rx_power if port else None
+            "rx_power": port.rx_power if port else None,
+            "temperature": port.temperature if port else None  # PON transceiver temperature
         })
 
     # Determine uplink port configuration based on model

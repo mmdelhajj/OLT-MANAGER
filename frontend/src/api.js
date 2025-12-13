@@ -59,7 +59,7 @@ export const uploadONUImage = (id, file) => {
   });
 };
 export const deleteONUImage = (id, imageIndex = 0) => api.delete(`/api/onus/${id}/image?image_index=${imageIndex}`);
-export const rebootONU = (id) => api.post(`/api/onus/${id}/reboot`);
+export const rebootONU = (id) => api.post(`/api/onus/${id}/reboot`, {}, { timeout: 90000 });
 
 // Regions
 export const getRegions = () => api.get('/api/regions');
@@ -79,6 +79,10 @@ export const changePassword = (data) => api.post('/api/auth/change-password', da
 // Settings
 export const getSettings = () => api.get('/api/settings');
 export const updateSettings = (data) => api.put('/api/settings', data);
+
+// Alarm Settings
+export const getAlarmSettings = () => api.get('/api/alarm-settings');
+export const updateAlarmSettings = (data) => api.put('/api/alarm-settings', data);
 
 // License
 export const getLicenseInfo = () => api.get('/api/license');

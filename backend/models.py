@@ -51,6 +51,14 @@ class OLT(Base):
     is_online = Column(Boolean, default=False)
     last_poll = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
+    # Web interface credentials (for ONU OPM data scraping)
+    web_username = Column(String(100), nullable=True)  # Web login username (default: admin)
+    web_password = Column(String(255), nullable=True)  # Web login password
+    # Health metrics (from SNMP polling)
+    cpu_usage = Column(Integer, nullable=True)  # CPU usage percentage (0-100)
+    memory_usage = Column(Integer, nullable=True)  # Memory usage percentage (0-100)
+    temperature = Column(Integer, nullable=True)  # Temperature in Celsius
+    uptime_seconds = Column(Integer, nullable=True)  # Uptime in seconds
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -74,9 +82,17 @@ class ONU(Base):
     latitude = Column(Float, nullable=True)  # GPS latitude for customer location
     longitude = Column(Float, nullable=True)  # GPS longitude for customer location
     address = Column(String(500), nullable=True)  # Customer address
+    # ONU Hardware info (from SNMP)
+    model = Column(String(50), nullable=True)  # ONU model e.g. "V2801S", "V2801RD", "HG325AX15"
     # Optical diagnostics (from SNMP)
     distance = Column(Integer, nullable=True)  # Distance in meters
-    rx_power = Column(Float, nullable=True)  # RX Power in dBm (OLT receiving from ONU)
+    rx_power = Column(Float, nullable=True)  # RX Power in dBm (OLT receiving from ONU) - what OLT measures ~-26 dBm
+    # ONU self-reported optical data (from web scraping) - what customer sees
+    onu_rx_power = Column(Float, nullable=True)  # ONU RX Power ~-13 dBm
+    onu_tx_power = Column(Float, nullable=True)  # ONU TX Power in dBm
+    onu_temperature = Column(Float, nullable=True)  # ONU Temperature in Celsius
+    onu_voltage = Column(Float, nullable=True)  # ONU Supply Voltage in Volts
+    onu_tx_bias = Column(Float, nullable=True)  # ONU TX Bias Current in mA
     image_url = Column(String(500), nullable=True)  # Building/location image URL (legacy - single image)
     image_urls = Column(Text, nullable=True)  # JSON array of up to 3 image URLs
     missing_polls = Column(Integer, default=0)  # Counter for consecutive polls where ONU not found (for auto-delete)
@@ -159,6 +175,7 @@ class OLTPort(Base):
     onu_count = Column(Integer, default=0)  # For PON ports
     tx_power = Column(Float, nullable=True)  # Optical TX power in dBm
     rx_power = Column(Float, nullable=True)  # Optical RX power in dBm
+    temperature = Column(Float, nullable=True)  # PON transceiver temperature in Celsius
     speed = Column(String(20), nullable=True)  # Port speed e.g. "1G", "10G"
     last_updated = Column(DateTime, default=datetime.utcnow)
 
@@ -230,9 +247,77 @@ class User(Base):
     diagrams = relationship("Diagram", back_populates="owner")
 
 
+def run_migrations():
+    """Run database migrations for schema updates"""
+    import sqlite3
+    from config import DATABASE_URL
+
+    # Extract database path from URL
+    if 'sqlite' in DATABASE_URL:
+        db_path = DATABASE_URL.replace('sqlite:///', '')
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Get existing columns in olts table
+            cursor.execute("PRAGMA table_info(olts)")
+            existing_columns = {col[1] for col in cursor.fetchall()}
+
+            # Migrations for OLT health metrics (v1.2.0)
+            health_columns = [
+                ('cpu_usage', 'INTEGER'),
+                ('memory_usage', 'INTEGER'),
+                ('temperature', 'INTEGER'),
+                ('uptime_seconds', 'INTEGER')
+            ]
+
+            for col_name, col_type in health_columns:
+                if col_name not in existing_columns:
+                    print(f"[Migration] Adding column {col_name} to olts table...")
+                    cursor.execute(f"ALTER TABLE olts ADD COLUMN {col_name} {col_type}")
+
+            # Migrations for OLTPort temperature column (v1.3.0)
+            cursor.execute("PRAGMA table_info(olt_ports)")
+            port_columns = {col[1] for col in cursor.fetchall()}
+            if 'temperature' not in port_columns:
+                print("[Migration] Adding temperature column to olt_ports table...")
+                cursor.execute("ALTER TABLE olt_ports ADD COLUMN temperature REAL")
+
+            # Migrations for ONU model column (v1.4.0)
+            cursor.execute("PRAGMA table_info(onus)")
+            onu_columns = {col[1] for col in cursor.fetchall()}
+            if 'model' not in onu_columns:
+                print("[Migration] Adding model column to onus table...")
+                cursor.execute("ALTER TABLE onus ADD COLUMN model VARCHAR(50)")
+
+            # Migration for ONU RX Power (v1.5.0) - ONU self-reported RX power from web scraping
+            if 'onu_rx_power' not in onu_columns:
+                print("[Migration] Adding onu_rx_power column to onus table...")
+                cursor.execute("ALTER TABLE onus ADD COLUMN onu_rx_power REAL")
+
+            # Migration for OLT web credentials (v1.5.0) - for web scraping OPM data
+            cursor.execute("PRAGMA table_info(olts)")
+            olt_columns = {col[1] for col in cursor.fetchall()}
+            if 'web_username' not in olt_columns:
+                print("[Migration] Adding web_username column to olts table...")
+                cursor.execute("ALTER TABLE olts ADD COLUMN web_username VARCHAR(100)")
+            if 'web_password' not in olt_columns:
+                print("[Migration] Adding web_password column to olts table...")
+                cursor.execute("ALTER TABLE olts ADD COLUMN web_password VARCHAR(255)")
+
+            conn.commit()
+            conn.close()
+            print("[Migration] Database migrations completed successfully")
+        except Exception as e:
+            print(f"[Migration] Warning: Could not run migrations: {e}")
+
+
 def init_db():
     """Initialize database tables"""
     Base.metadata.create_all(bind=engine)
+    # Run migrations for existing databases
+    run_migrations()
 
 
 def get_db():

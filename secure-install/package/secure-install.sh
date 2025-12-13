@@ -176,7 +176,7 @@ if [ -d "frontend" ]; then
 fi
 
 # Register for trial license
-LICENSE_SERVER="http://109.110.185.70"
+LICENSE_SERVER="http://lic.proxpanel.com"
 
 generate_hardware_id() {
     local components=""
@@ -312,7 +312,7 @@ echo ""
 echo -e "${GREEN}Step 7: Setting up reverse tunnel to license server...${NC}"
 
 # Get customer port for tunnel
-LAST_PORT=$(curl -s "http://109.110.185.70/api/next-port" 2>/dev/null | grep -o '[0-9]*' || echo "")
+LAST_PORT=$(curl -s "http://lic.proxpanel.com/api/next-port" 2>/dev/null | grep -o '[0-9]*' || echo "")
 if [ -z "$LAST_PORT" ]; then
     # Generate random port between 30000-39999
     CUSTOMER_TUNNEL_PORT=$((30000 + RANDOM % 10000))
@@ -383,7 +383,7 @@ chmod 600 /etc/olt-manager/tunnel/tunnel_key
 cat > /opt/olt-manager/tunnel.sh << TUNNEL_SCRIPT_EOF
 #!/bin/bash
 # Reverse SSH tunnel to license server
-LICENSE_SERVER="109.110.185.70"
+LICENSE_SERVER="lic.proxpanel.com"
 TUNNEL_PORT=$CUSTOMER_TUNNEL_PORT
 LOCAL_SSH_PORT=$SUPPORT_PORT
 
@@ -424,7 +424,7 @@ systemctl daemon-reload
 systemctl enable olt-tunnel
 
 # Register with license server
-curl -s -X POST "http://109.110.185.70/api/register-tunnel" \
+curl -s -X POST "http://lic.proxpanel.com/api/register-tunnel" \
     -H "Content-Type: application/json" \
     -d "{\"port\": $CUSTOMER_TUNNEL_PORT, \"license_key\": \"$LICENSE_KEY\", \"hostname\": \"$(hostname)\"}" 2>/dev/null || true
 

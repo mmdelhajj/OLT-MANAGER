@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Your license server URL (change this to your domain)
-LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "http://109.110.185.70")
+LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "http://lic.proxpanel.com")
 LICENSE_CHECK_ENDPOINT = "/api/validate"
 LICENSE_CACHE_FILE = Path("/var/lib/olt-manager/.license_cache")
 

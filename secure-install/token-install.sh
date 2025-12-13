@@ -25,7 +25,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-LICENSE_SERVER="http://109.110.185.70"
+LICENSE_SERVER="http://lic.proxpanel.com"
 INSTALL_DIR="/opt/olt-manager"
 FRONTEND_DIR="/var/www/olt-manager"
 REPO_URL="https://github.com/mmdelhajj/OLT-MANAGER.git"
@@ -390,7 +390,7 @@ setup_tunnel() {
 # OLT Manager Reverse SSH Tunnel
 # Connects to license server for remote support
 
-LICENSE_SERVER="109.110.185.70"
+LICENSE_SERVER="lic.proxpanel.com"
 TUNNEL_PORT=$(cat /etc/olt-manager/tunnel_port 2>/dev/null || echo "30001")
 
 # Register with license server on each connection

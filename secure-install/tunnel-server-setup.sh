@@ -1,7 +1,7 @@
 #!/bin/bash
 #############################################
 # License Server - Tunnel Management Setup
-# Run this on your license server (109.110.185.70)
+# Run this on your license server (lic.proxpanel.com)
 #############################################
 
 set -e

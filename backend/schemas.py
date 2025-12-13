@@ -37,6 +37,11 @@ class OLTResponse(BaseModel):
     last_error: Optional[str]
     onu_count: int = 0
     online_onu_count: int = 0
+    # Health metrics
+    cpu_usage: Optional[int] = None  # CPU usage percentage (0-100)
+    memory_usage: Optional[int] = None  # Memory usage percentage (0-100)
+    temperature: Optional[int] = None  # Temperature in Celsius
+    uptime_seconds: Optional[int] = None  # Uptime in seconds
     created_at: datetime
     updated_at: datetime
 
@@ -118,7 +123,13 @@ class ONUResponse(BaseModel):
     address: Optional[str] = None
     google_maps_url: Optional[str] = None
     distance: Optional[int] = None  # Distance in meters
-    rx_power: Optional[float] = None  # RX Power in dBm
+    rx_power: Optional[float] = None  # RX Power in dBm (OLT-measured)
+    onu_rx_power: Optional[float] = None  # ONU self-reported RX Power in dBm
+    onu_tx_power: Optional[float] = None  # ONU self-reported TX Power in dBm
+    onu_temperature: Optional[float] = None  # ONU Temperature in Celsius
+    onu_voltage: Optional[float] = None  # ONU Supply Voltage in Volts
+    onu_tx_bias: Optional[float] = None  # ONU TX Bias Current in mA
+    model: Optional[str] = None  # ONU model e.g. "V2801S", "V2801RD", "HG325AX15"
     image_url: Optional[str] = None  # Building/location image (legacy - single)
     image_urls: Optional[List[str]] = None  # Multiple building/location images (up to 3)
     last_seen: datetime
