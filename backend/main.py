@@ -55,6 +55,12 @@ polling_task: Optional[asyncio.Task] = None
 trap_receiver: Optional[SimpleTrapReceiver] = None
 trap_task: Optional[asyncio.Task] = None
 
+# Weak signal alert tracking to prevent notification spam
+# Format: {onu_id: datetime_of_last_alert}
+# Alerts are suppressed for 1 hour after being sent
+weak_signal_alert_cache: Dict[int, datetime] = {}
+WEAK_SIGNAL_ALERT_COOLDOWN_HOURS = 1  # Don't re-alert for the same ONU within this time
+
 # WebSocket connection manager for live traffic
 class TrafficConnectionManager:
     """Manages WebSocket connections for live traffic updates"""
@@ -133,8 +139,12 @@ def parse_whatsapp_recipients(recipients_json: str) -> list:
 def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onus: list, olt_name: str):
     """Send a single WhatsApp notification for all ONU status changes in a poll cycle"""
     try:
+        # Log entry for debugging
+        logger.info(f"send_whatsapp_notification_batch called: {len(online_onus)} online, {len(offline_onus)} offline for {olt_name}")
+
         # Skip if no changes
         if not online_onus and not offline_onus:
+            logger.debug("No ONUs to notify about (both lists empty)")
             return
 
         # Check alarm settings
@@ -142,16 +152,26 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
 
         # Check quiet hours
         if is_in_quiet_hours(alarm_settings):
-            logger.debug("Skipping ONU status notifications - quiet hours")
+            logger.info("Skipping ONU status notifications - quiet hours")
             return
 
         # Filter based on alarm settings
-        filtered_online = online_onus if is_alarm_enabled(alarm_settings, "onu_back_online") else []
-        filtered_offline = offline_onus if is_alarm_enabled(alarm_settings, "onu_offline") else []
+        online_alarm_enabled = is_alarm_enabled(alarm_settings, "onu_back_online")
+        offline_alarm_enabled = is_alarm_enabled(alarm_settings, "onu_offline")
+        logger.info(f"Alarm settings - onu_back_online: {online_alarm_enabled}, onu_offline: {offline_alarm_enabled}")
+
+        filtered_online = online_onus if online_alarm_enabled else []
+        filtered_offline = offline_onus if offline_alarm_enabled else []
+
+        # Apply ONU/Region filtering based on alarm settings
+        filtered_online = filter_onus_by_selection(filtered_online, alarm_settings)
+        filtered_offline = filter_onus_by_selection(filtered_offline, alarm_settings)
+
+        logger.info(f"After filtering - online: {len(filtered_online)}, offline: {len(filtered_offline)}")
 
         # Skip if nothing to notify after filtering
         if not filtered_online and not filtered_offline:
-            logger.debug("Skipping ONU status notifications - alarms disabled for these types")
+            logger.info("Skipping ONU status notifications - alarms disabled for these types or no ONUs to notify")
             return
 
         settings = get_whatsapp_settings(db)
@@ -180,16 +200,27 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
 
         # Add offline ONUs section
         for onu in filtered_offline:
-            onu_name = onu.description or "No Name"
+            onu_name = onu.description if onu.description and onu.description.upper() != "NULL" else "No Name"
             region_name = onu.region.name if onu.region else "No Region"
 
             message_parts.append("🔴 *ONU OFFLINE*")
             message_parts.append("")
-            message_parts.append(f"Name: {onu_name}")
+            message_parts.append(f"Description: {onu_name}")
             message_parts.append(f"OLT: {olt_name}")
             message_parts.append(f"Region: {region_name}")
             message_parts.append(f"MAC: {onu.mac_address}")
             message_parts.append(f"Port: {onu.pon_port}/{onu.onu_id}")
+            # Add last signal before disconnect (prefer onu_rx_power from ONU, fallback to rx_power from OLT)
+            last_signal = onu.onu_rx_power if onu.onu_rx_power is not None else onu.rx_power
+            if last_signal is not None:
+                message_parts.append(f"Last Signal: {last_signal} dBm")
+            # Add last distance before disconnect
+            if onu.distance is not None:
+                distance_km = onu.distance / 1000 if onu.distance >= 1000 else None
+                if distance_km:
+                    message_parts.append(f"Last Distance: {distance_km:.2f} km ({onu.distance} m)")
+                else:
+                    message_parts.append(f"Last Distance: {onu.distance} m")
             if onu.latitude and onu.longitude:
                 message_parts.append(f"Location: https://maps.google.com/?q={onu.latitude},{onu.longitude}")
             if onu.address:
@@ -202,12 +233,12 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
 
         # Add online ONUs section
         for onu in filtered_online:
-            onu_name = onu.description or "No Name"
+            onu_name = onu.description if onu.description and onu.description.upper() != "NULL" else "No Name"
             region_name = onu.region.name if onu.region else "No Region"
 
             message_parts.append("🟢 *ONU ONLINE*")
             message_parts.append("")
-            message_parts.append(f"Name: {onu_name}")
+            message_parts.append(f"Description: {onu_name}")
             message_parts.append(f"OLT: {olt_name}")
             message_parts.append(f"Region: {region_name}")
             message_parts.append(f"MAC: {onu.mac_address}")
@@ -285,7 +316,8 @@ def get_alarm_settings(db: Session) -> dict:
         "olt_offline": "true",
         "olt_back_online": "true",
         "weak_signal": "false",
-        "weak_signal_threshold": "-27",
+        "weak_signal_threshold": "-25",
+        "weak_signal_lower_threshold": "-30",
         "high_temperature": "false",
         "high_temperature_threshold": "60",
         "selected_onus": "[]",
@@ -331,6 +363,67 @@ def is_in_quiet_hours(alarm_settings: dict) -> bool:
     except Exception as e:
         logger.error(f"Error checking quiet hours: {e}")
         return False
+
+
+def filter_onus_by_selection(onus: list, alarm_settings: dict) -> list:
+    """Filter ONUs based on selected_onus and selected_regions in alarm settings.
+
+    If no ONUs or regions are selected, returns all ONUs (no filtering).
+    If specific ONUs are selected, only those ONUs will pass the filter.
+    If specific regions are selected, only ONUs in those regions will pass the filter.
+    If both are selected, ONUs matching either criterion will pass.
+    """
+    selected_onus_raw = alarm_settings.get("selected_onus", "[]")
+    selected_regions_raw = alarm_settings.get("selected_regions", "[]")
+
+    logger.info(f"filter_onus_by_selection - raw selected_onus: {repr(selected_onus_raw)}, raw selected_regions: {repr(selected_regions_raw)}")
+
+    # Handle selected_onus - could be a list (already parsed) or a JSON string
+    if isinstance(selected_onus_raw, list):
+        selected_onus = selected_onus_raw
+    elif isinstance(selected_onus_raw, str) and selected_onus_raw:
+        try:
+            selected_onus = json.loads(selected_onus_raw)
+        except Exception as e:
+            logger.error(f"Failed to parse selected_onus: {e}")
+            selected_onus = []
+    else:
+        selected_onus = []
+
+    # Handle selected_regions - could be a list (already parsed) or a JSON string
+    if isinstance(selected_regions_raw, list):
+        selected_regions = selected_regions_raw
+    elif isinstance(selected_regions_raw, str) and selected_regions_raw:
+        try:
+            selected_regions = json.loads(selected_regions_raw)
+        except Exception as e:
+            logger.error(f"Failed to parse selected_regions: {e}")
+            selected_regions = []
+    else:
+        selected_regions = []
+
+    logger.info(f"filter_onus_by_selection - parsed selected_onus: {selected_onus}, parsed selected_regions: {selected_regions}")
+
+    # If no specific ONUs or regions are selected, return all ONUs
+    if not selected_onus and not selected_regions:
+        logger.info("No ONU/Region filtering configured - returning all ONUs")
+        return onus
+
+    logger.info(f"Applying ONU/Region filter - selected_onus: {selected_onus}, selected_regions: {selected_regions}")
+
+    def onu_matches_filter(onu):
+        # Check if ONU ID is in selected_onus list
+        if selected_onus and onu.id in selected_onus:
+            return True
+        # Check if ONU's region is in selected_regions list
+        if selected_regions and onu.region_id and onu.region_id in selected_regions:
+            return True
+        # Didn't match any selection
+        return False
+
+    filtered = [onu for onu in onus if onu_matches_filter(onu)]
+    logger.info(f"After ONU/Region filter: {len(filtered)} of {len(onus)} ONUs passed")
+    return filtered
 
 
 def send_new_onu_notification(db: Session, onu, olt_name: str):
@@ -505,8 +598,10 @@ def send_olt_status_notification(db: Session, olt, is_online: bool):
         logger.error(f"Failed to send OLT status notification: {e}")
 
 
-def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_name: str):
-    """Send WhatsApp notification for ONUs with weak signal"""
+def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_name: str, upper_threshold: float, lower_threshold: float):
+    """Send WhatsApp notification for ONUs in the 'danger zone' (weak signal between thresholds)"""
+    global weak_signal_alert_cache
+
     try:
         if not onus_with_weak_signal:
             return
@@ -523,6 +618,12 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
             logger.debug("Skipping weak signal notification - quiet hours")
             return
 
+        # Apply ONU/Region filtering
+        onus_with_weak_signal = filter_onus_by_selection(onus_with_weak_signal, alarm_settings)
+        if not onus_with_weak_signal:
+            logger.debug("No weak signal ONUs left after ONU/Region filtering")
+            return
+
         settings = get_whatsapp_settings(db)
 
         # Check if WhatsApp notifications are enabled
@@ -537,52 +638,105 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
         if not recipients or not all([api_url, secret, account]):
             return
 
-        threshold = alarm_settings.get("weak_signal_threshold", -27)
+        # Filter out ONUs that were recently alerted (within cooldown period)
+        now = datetime.utcnow()
+        cooldown_threshold = now - timedelta(hours=WEAK_SIGNAL_ALERT_COOLDOWN_HOURS)
 
-        # Build message
-        message_parts = [
-            f"⚠️ *WEAK SIGNAL ALERT*",
-            f"Threshold: {threshold} dBm",
-            f"OLT: {olt_name}",
-            ""
-        ]
+        # Clean up old entries from cache
+        expired_ids = [onu_id for onu_id, alert_time in weak_signal_alert_cache.items()
+                       if alert_time < cooldown_threshold]
+        for onu_id in expired_ids:
+            del weak_signal_alert_cache[onu_id]
 
-        for onu in onus_with_weak_signal[:10]:  # Limit to 10 ONUs per message
-            desc = onu.description or onu.mac_address
-            message_parts.append(f"• {desc}: {onu.rx_power} dBm")
+        # Filter to only ONUs that haven't been alerted recently
+        onus_to_alert = []
+        for onu in onus_with_weak_signal:
+            if onu.id not in weak_signal_alert_cache:
+                onus_to_alert.append(onu)
+            else:
+                logger.debug(f"Skipping weak signal alert for ONU {onu.mac_address} - already alerted within {WEAK_SIGNAL_ALERT_COOLDOWN_HOURS}h")
 
-        if len(onus_with_weak_signal) > 10:
-            message_parts.append(f"... and {len(onus_with_weak_signal) - 10} more")
+        if not onus_to_alert:
+            logger.debug("All weak signal ONUs were already alerted recently, skipping")
+            return
 
-        message_parts.append("")
-        message_parts.append(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Build detailed message for each ONU
+        for onu in onus_to_alert[:5]:  # Limit to 5 ONUs per batch to avoid long messages
+            onu_name = onu.description if onu.description and onu.description.upper() != "NULL" else "No Name"
+            region_name = onu.region.name if onu.region else "No Region"
 
-        message = "\n".join(message_parts)
+            # Get signal value (prefer ONU-reported rx_power, fallback to OLT-measured)
+            signal = onu.rx_power
 
-        # Send to all recipients
-        for recipient in recipients:
-            phone = recipient.get('phone', '').strip()
-            if not phone:
-                continue
-
-            try:
-                response = requests.post(
-                    api_url,
-                    data={
-                        'secret': secret,
-                        'account': account,
-                        'recipient': phone,
-                        'type': 'text',
-                        'message': message
-                    },
-                    timeout=10
-                )
-                if response.status_code == 200:
-                    logger.info(f"Weak signal notification sent to {phone}")
+            # Calculate risk level based on proximity to lower threshold
+            if signal is not None:
+                range_size = upper_threshold - lower_threshold
+                position = (signal - lower_threshold) / range_size if range_size != 0 else 0.5
+                if position < 0.33:
+                    risk_level = "CRITICAL - Disconnect imminent!"
+                elif position < 0.66:
+                    risk_level = "HIGH - May disconnect soon"
                 else:
-                    logger.warning(f"Failed to send weak signal notification to {phone}: {response.text}")
-            except Exception as e:
-                logger.error(f"Error sending weak signal notification to {phone}: {e}")
+                    risk_level = "WARNING - Signal degrading"
+            else:
+                risk_level = "UNKNOWN"
+
+            message_parts = [
+                "⚠️ *WEAK SIGNAL ALERT*",
+                "",
+                f"Description: {onu_name}",
+                f"OLT: {olt_name}",
+                f"Region: {region_name}",
+                f"MAC: {onu.mac_address}",
+                f"Port: {onu.pon_port}/{onu.onu_id}",
+                "",
+                f"📶 Signal: {signal} dBm" if signal else "📶 Signal: Unknown",
+                f"🎯 Danger Zone: {upper_threshold} to {lower_threshold} dBm",
+                f"⚡ Risk: {risk_level}",
+            ]
+
+            # Add location if available
+            if onu.latitude and onu.longitude:
+                message_parts.append(f"📍 Location: https://maps.google.com/?q={onu.latitude},{onu.longitude}")
+            if onu.address:
+                message_parts.append(f"🏠 Address: {onu.address}")
+
+            message_parts.append("")
+            message_parts.append(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            message_parts.append("")
+            message_parts.append("Action: Check fiber connection")
+
+            message = "\n".join(message_parts)
+
+            # Send to all recipients
+            for recipient in recipients:
+                phone = recipient.get('phone', '').strip()
+                if not phone:
+                    continue
+
+                try:
+                    response = requests.post(
+                        api_url,
+                        data={
+                            'secret': secret,
+                            'account': account,
+                            'recipient': phone,
+                            'type': 'text',
+                            'message': message
+                        },
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"Weak signal notification sent to {phone} for ONU {onu.mac_address}")
+                        # Mark this ONU as alerted in the cache to prevent spam
+                        weak_signal_alert_cache[onu.id] = now
+                    else:
+                        logger.warning(f"Failed to send weak signal notification to {phone}: {response.text}")
+                except Exception as e:
+                    logger.error(f"Error sending weak signal notification to {phone}: {e}")
+
+        if len(onus_to_alert) > 5:
+            logger.info(f"Weak signal alert: Sent notifications for 5 ONUs, {len(onus_to_alert) - 5} more have weak signal (not yet alerted)")
 
     except Exception as e:
         logger.error(f"Failed to send weak signal notification: {e}")
@@ -1067,20 +1221,18 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                         existing.onu_tx_bias = onu_tx_bias
                                     existing.last_seen = datetime.utcnow()
                                 else:
-                                    # Clear optical data when ONU is offline (no live traffic)
-                                    existing.distance = None
-                                    existing.rx_power = None
-                                    existing.onu_rx_power = None
-                                    existing.onu_tx_power = None
-                                    existing.onu_temperature = None
-                                    existing.onu_voltage = None
-                                    existing.onu_tx_bias = None
+                                    # Keep last known optical data when ONU goes offline
+                                    # This preserves the "last signal" for notifications and troubleshooting
+                                    # Only clear if explicitly requested (e.g., ONU removed)
+                                    pass
                                 existing.updated_at = datetime.utcnow()
 
                                 # Collect status changes for batched notification
                                 if was_online and not is_online:
+                                    logger.info(f"ONU went OFFLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
                                     onus_went_offline.append(existing)
                                 elif not was_online and is_online:
+                                    logger.info(f"ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
                                     onus_went_online.append(existing)
                             else:
                                 # Create new ONU from SNMP (now includes pon_port and onu_id)
@@ -1112,33 +1264,35 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 if onu.is_online:
                                     logger.info(f"Marking ONU offline (not in SNMP): PON {onu.pon_port} ONU {onu.onu_id} ({onu.mac_address})")
                                     onu.is_online = False
-                                    onu.distance = None
-                                    onu.rx_power = None
-                                    onu.onu_rx_power = None
-                                    onu.onu_tx_power = None
-                                    onu.onu_temperature = None
-                                    onu.onu_voltage = None
-                                    onu.onu_tx_bias = None
+                                    # Keep last known optical data for notifications and troubleshooting
+                                    # (distance, rx_power, onu_rx_power, etc. are preserved)
                                     onu.updated_at = datetime.utcnow()
                                     onus_went_offline.append(onu)
 
                         # Send batched notification for all status changes
                         send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
 
-                        # Check for weak signal alarms
+                        # Check for weak signal alarms (Danger Zone detection)
                         alarm_settings = get_alarm_settings(db)
                         if is_alarm_enabled(alarm_settings, "weak_signal"):
-                            signal_threshold = float(alarm_settings.get("weak_signal_threshold", -27))
+                            # Upper threshold: signal weaker than this triggers alert (e.g., -25 dBm)
+                            upper_threshold = float(alarm_settings.get("weak_signal_threshold", -25))
+                            # Lower threshold: signal weaker than this means ONU is likely to disconnect (e.g., -30 dBm)
+                            lower_threshold = float(alarm_settings.get("weak_signal_lower_threshold", -30))
+
+                            # Find ONUs in the DANGER ZONE: signal is weak but not yet disconnected
+                            # Signal must be: weaker than upper (rx_power < upper) AND stronger than lower (rx_power >= lower)
                             weak_signal_onus = [
                                 o for o in db.query(ONU).filter(
                                     ONU.olt_id == olt.id,
                                     ONU.is_online == True,
                                     ONU.rx_power != None,
-                                    ONU.rx_power < signal_threshold
+                                    ONU.rx_power < upper_threshold,  # Signal weaker than upper threshold
+                                    ONU.rx_power >= lower_threshold  # But not yet at disconnection level
                                 ).all()
                             ]
                             if weak_signal_onus:
-                                send_weak_signal_notification(db, weak_signal_onus, olt.name)
+                                send_weak_signal_notification(db, weak_signal_onus, olt.name, upper_threshold, lower_threshold)
 
                         # Log successful SNMP poll
                         poll_log = PollLog(
@@ -1249,8 +1403,10 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
 
                             # Collect status changes for batched notification
                             if was_online and not is_online:
+                                logger.info(f"[SSH] ONU went OFFLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
                                 onus_went_offline.append(existing)
                             elif not was_online and is_online:
+                                logger.info(f"[SSH] ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
                                 onus_went_online.append(existing)
                         else:
                             # Create new ONU
@@ -3599,7 +3755,8 @@ def get_alarm_settings(db: Session = Depends(get_db)):
         "olt_offline": "true",
         "olt_back_online": "true",
         "weak_signal": "false",
-        "weak_signal_threshold": "-27",
+        "weak_signal_threshold": "-25",
+        "weak_signal_lower_threshold": "-30",
         "high_temperature": "false",
         "high_temperature_threshold": "60",
         "selected_onus": "[]",
@@ -3636,7 +3793,12 @@ def get_alarm_settings(db: Session = Depends(get_db)):
         try:
             result["weak_signal_threshold"] = int(result["weak_signal_threshold"])
         except:
-            result["weak_signal_threshold"] = -27
+            result["weak_signal_threshold"] = -25
+    if "weak_signal_lower_threshold" in result:
+        try:
+            result["weak_signal_lower_threshold"] = int(result["weak_signal_lower_threshold"])
+        except:
+            result["weak_signal_lower_threshold"] = -30
     if "high_temperature_threshold" in result:
         try:
             result["high_temperature_threshold"] = int(result["high_temperature_threshold"])
@@ -3658,9 +3820,9 @@ def update_alarm_settings(
 
     allowed_keys = ["new_onu_registration", "onu_offline", "onu_back_online",
                     "olt_offline", "olt_back_online", "weak_signal",
-                    "weak_signal_threshold", "high_temperature",
-                    "high_temperature_threshold", "selected_onus",
-                    "selected_regions", "quiet_hours_enabled",
+                    "weak_signal_threshold", "weak_signal_lower_threshold",
+                    "high_temperature", "high_temperature_threshold",
+                    "selected_onus", "selected_regions", "quiet_hours_enabled",
                     "quiet_hours_start", "quiet_hours_end"]
 
     for key, value in data.items():

@@ -2152,10 +2152,10 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                   type="button"
                   onClick={addRecipient}
                   disabled={!formData.whatsapp_enabled}
-                  className="px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 text-sm font-medium"
+                  className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 text-sm font-medium"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
                   </svg>
                   Add
                 </button>
@@ -2219,80 +2219,6 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               )}
             </div>
 
-            {/* Info Box */}
-            <div className={`p-4 rounded-xl border ${darkMode ? 'bg-blue-900/30 border-blue-800' : 'bg-blue-50 border-blue-100'}`}>
-              <div className="flex items-start">
-                <svg className={`w-5 h-5 mt-0.5 mr-2 flex-shrink-0 ${darkMode ? 'text-blue-400' : 'text-blue-500'}`} fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                </svg>
-                <div>
-                  <p className={`text-sm font-medium ${darkMode ? 'text-blue-300' : 'text-blue-800'}`}>When enabled, you'll receive notifications for:</p>
-                  <ul className={`text-sm mt-1 ml-4 list-disc ${darkMode ? 'text-blue-400' : 'text-blue-700'}`}>
-                    <li>ONU goes offline</li>
-                    <li>ONU comes back online</li>
-                    <li>OLT connection issues</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-
-            {/* SNMP Trap Settings */}
-            <div className={`mt-6 p-4 rounded-2xl border ${darkMode ? 'bg-purple-900/30 border-purple-800' : 'bg-gradient-to-br from-purple-50 to-indigo-50 border-purple-100'}`}>
-              <h3 className={`text-lg font-semibold mb-4 flex items-center ${darkMode ? 'text-purple-300' : 'text-purple-900'}`}>
-                <svg className={`w-6 h-6 mr-2 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                SNMP Trap Receiver (Instant Alerts)
-              </h3>
-
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <p className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Enable Trap Receiver</p>
-                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Receive instant ONU status changes from OLT</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="sr-only peer"
-                    checked={formData.trap_enabled}
-                    onChange={(e) => setFormData({ ...formData, trap_enabled: e.target.checked })}
-                  />
-                  <div className="w-14 h-7 bg-gray-300 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[4px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-purple-500"></div>
-                  <span className={`ml-3 text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>{formData.trap_enabled ? 'ON' : 'OFF'}</span>
-                </label>
-              </div>
-
-              <div className={`space-y-4 p-4 rounded-xl border ${darkMode ? (formData.trap_enabled ? 'bg-slate-700 border-slate-600' : 'bg-slate-700/50 border-slate-600') : (formData.trap_enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100')}`}>
-                <div>
-                  <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Trap Port</label>
-                  <input
-                    type="number"
-                    className={`w-full rounded-lg border shadow-sm p-3 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${darkMode ? 'bg-slate-600 border-slate-500 text-white' : 'border-gray-300'} ${!formData.trap_enabled ? (darkMode ? 'bg-slate-600/50 text-slate-400' : 'bg-gray-100 text-gray-500') : ''}`}
-                    value={formData.trap_port}
-                    onChange={(e) => setFormData({ ...formData, trap_port: e.target.value })}
-                    placeholder="162"
-                  />
-                  <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Default: 162 (requires root). Use 1620+ if not running as root.</p>
-                </div>
-              </div>
-
-              <div className={`p-3 rounded-xl border mt-4 ${darkMode ? 'bg-purple-900/50 border-purple-700' : 'bg-purple-100 border-purple-200'}`}>
-                <div className="flex items-start">
-                  <svg className={`w-5 h-5 mt-0.5 mr-2 flex-shrink-0 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                  </svg>
-                  <div>
-                    <p className={`text-sm font-medium ${darkMode ? 'text-purple-300' : 'text-purple-800'}`}>Configure your OLT:</p>
-                    <ul className={`text-sm mt-1 ml-4 list-disc ${darkMode ? 'text-purple-400' : 'text-purple-700'}`}>
-                      <li>Trap Server IP: 172.22.22.20</li>
-                      <li>Trap Port: {formData.trap_port || 162}</li>
-                      <li>Community: public</li>
-                    </ul>
-                    <p className={`text-xs mt-2 ${darkMode ? 'text-purple-500' : 'text-purple-600'}`}>Traps provide instant alerts vs polling (60s delay)</p>
-                  </div>
-                </div>
-              </div>
-            </div>
           </div>
 
           <div className="mt-6 flex justify-end">
@@ -6611,7 +6537,8 @@ function Dashboard({ user, onLogout, pageName }) {
     olt_offline: true,
     olt_back_online: true,
     weak_signal: false,
-    weak_signal_threshold: -27,
+    weak_signal_threshold: -25,
+    weak_signal_lower_threshold: -30,
     high_temperature: false,
     high_temperature_threshold: 60,
     selected_onus: [],
@@ -6625,6 +6552,7 @@ function Dashboard({ user, onLogout, pageName }) {
   const [selectedRegion, setSelectedRegion] = useState(null);
   const [selectedPonPort, setSelectedPonPort] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showOfflineOnly, setShowOfflineOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAddOLTModal, setShowAddOLTModal] = useState(false);
   const [showEditOLTModal, setShowEditOLTModal] = useState(false);
@@ -6699,12 +6627,12 @@ function Dashboard({ user, onLogout, pageName }) {
     }
   }, []);
 
-  const fetchONUs = useCallback(async () => {
+  const fetchONUs = useCallback(async (searchTerm = null) => {
     try {
       let response;
       const params = {};
-      if (searchQuery) {
-        response = await api.searchONUs(searchQuery);
+      if (searchTerm) {
+        response = await api.searchONUs(searchTerm);
       } else {
         if (selectedOLT) params.olt_id = selectedOLT;
         if (selectedRegion) params.region_id = selectedRegion;
@@ -6714,7 +6642,7 @@ function Dashboard({ user, onLogout, pageName }) {
     } catch (error) {
       console.error('Failed to fetch ONUs:', error);
     }
-  }, [selectedOLT, selectedRegion, searchQuery]);
+  }, [selectedOLT, selectedRegion]);
 
   const fetchRegions = useCallback(async () => {
     try {
@@ -7033,7 +6961,11 @@ function Dashboard({ user, onLogout, pageName }) {
 
   const handleSearch = (e) => {
     e.preventDefault();
-    fetchONUs();
+    if (searchQuery.trim()) {
+      fetchONUs(searchQuery.trim());
+    } else {
+      fetchONUs();
+    }
   };
 
   const handleAddOLT = async (data) => {
@@ -7370,8 +7302,15 @@ function Dashboard({ user, onLogout, pageName }) {
                     )}
                   </h2>
                   <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
-                    {selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort).length : onus.length} ONUs shown
+                    {(() => {
+                      let count = selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort).length : onus.length;
+                      if (showOfflineOnly) {
+                        count = onus.filter(onu => (!selectedPonPort || onu.pon_port === selectedPonPort) && !onu.is_online).length;
+                      }
+                      return count;
+                    })()} ONUs shown
                     {selectedPonPort && <span className="text-emerald-600"> (filtered by PON {selectedPonPort})</span>}
+                    {showOfflineOnly && <span className="text-red-500"> (Offline Only)</span>}
                   </p>
                 </div>
                 <form onSubmit={handleSearch} className="flex gap-2 w-full sm:w-auto">
@@ -7385,7 +7324,7 @@ function Dashboard({ user, onLogout, pageName }) {
                   <button type="submit" className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
                     Search
                   </button>
-                  {(searchQuery || selectedOLT || selectedRegion || selectedPonPort) && (
+                  {(searchQuery || selectedOLT || selectedRegion || selectedPonPort || showOfflineOnly) && (
                     <button
                       type="button"
                       onClick={() => {
@@ -7393,12 +7332,27 @@ function Dashboard({ user, onLogout, pageName }) {
                         setSelectedOLT(null);
                         setSelectedRegion(null);
                         setSelectedPonPort(null);
+                        setShowOfflineOnly(false);
+                        fetchONUs();
                       }}
                       className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-400 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
                     >
                       Clear
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => setShowOfflineOnly(!showOfflineOnly)}
+                    className={`px-4 py-2 rounded-lg font-medium transition ${
+                      showOfflineOnly
+                        ? 'bg-red-600 text-white hover:bg-red-700'
+                        : darkMode
+                          ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    }`}
+                  >
+                    {showOfflineOnly ? 'Show All' : 'Show Offline'}
+                  </button>
                 </form>
               </div>
 
@@ -7524,7 +7478,11 @@ function Dashboard({ user, onLogout, pageName }) {
               </div>
 
               {(() => {
-                const filteredOnus = selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort) : onus;
+                let filteredOnus = selectedPonPort ? onus.filter(onu => onu.pon_port === selectedPonPort) : onus;
+                // Apply offline filter if enabled
+                if (showOfflineOnly) {
+                  filteredOnus = filteredOnus.filter(onu => !onu.is_online);
+                }
                 return isMobile ? (
                   <>
                     <ImagePreviewModal
@@ -7728,9 +7686,9 @@ function Dashboard({ user, onLogout, pageName }) {
                   <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
                     <p className="font-medium mb-1">Message includes:</p>
                     <ul className="list-disc list-inside space-y-0.5">
-                      <li>ONU Name & Description</li>
+                      <li>ONU Description</li>
                       <li>Customer Address</li>
-                      <li>Last Signal Before Disconnect</li>
+                      <li>Last Signal & Distance Before Disconnect</li>
                       <li>Region & OLT Info</li>
                     </ul>
                   </div>
@@ -7865,30 +7823,55 @@ function Dashboard({ user, onLogout, pageName }) {
                     </label>
                   </div>
                   {alarmSettings.weak_signal && (
-                    <div className="mb-3">
-                      <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
-                        Signal Threshold (dBm)
-                      </label>
-                      <input
-                        type="number"
-                        value={alarmSettings.weak_signal_threshold}
-                        onChange={(e) => setAlarmSettings({...alarmSettings, weak_signal_threshold: parseFloat(e.target.value)})}
-                        className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
-                        min="-35"
-                        max="-15"
-                        step="0.5"
-                      />
-                      <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
-                        Typical range: -27 to -30 dBm (weaker signal)
-                      </p>
+                    <div className="space-y-3 mb-3">
+                      <div className={`p-3 rounded-lg ${darkMode ? 'bg-yellow-900/20 border border-yellow-700/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+                        <p className={`text-xs font-medium ${darkMode ? 'text-yellow-400' : 'text-yellow-700'}`}>
+                          DANGER ZONE: Alerts when signal is between these thresholds (weak but still connected)
+                        </p>
+                      </div>
+                      <div>
+                        <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                          Upper Threshold (Danger Zone Start)
+                        </label>
+                        <input
+                          type="number"
+                          value={alarmSettings.weak_signal_threshold}
+                          onChange={(e) => setAlarmSettings({...alarmSettings, weak_signal_threshold: parseFloat(e.target.value)})}
+                          className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                          min="-35"
+                          max="-15"
+                          step="0.5"
+                        />
+                        <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                          Signal weaker than this triggers warning (e.g., -25 dBm)
+                        </p>
+                      </div>
+                      <div>
+                        <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                          Lower Threshold (Disconnect Level)
+                        </label>
+                        <input
+                          type="number"
+                          value={alarmSettings.weak_signal_lower_threshold || -30}
+                          onChange={(e) => setAlarmSettings({...alarmSettings, weak_signal_lower_threshold: parseFloat(e.target.value)})}
+                          className={`w-full px-3 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                          min="-40"
+                          max="-20"
+                          step="0.5"
+                        />
+                        <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                          ONU typically disconnects below this (e.g., -30 dBm)
+                        </p>
+                      </div>
                     </div>
                   )}
                   <div className={`text-xs p-3 rounded-lg ${darkMode ? 'bg-slate-700/50 text-slate-300' : 'bg-gray-50 text-gray-600'}`}>
-                    <p className="font-medium mb-1">Message includes:</p>
+                    <p className="font-medium mb-1">Proactive Alert - Message includes:</p>
                     <ul className="list-disc list-inside space-y-0.5">
-                      <li>ONU Name & Address</li>
-                      <li>Current Signal vs Threshold</li>
-                      <li>Trend (degrading/stable)</li>
+                      <li>ONU Description & Address</li>
+                      <li>Current Signal & Danger Zone Range</li>
+                      <li>Risk Level (CRITICAL/HIGH/WARNING)</li>
+                      <li>1-hour cooldown to prevent spam</li>
                     </ul>
                   </div>
                 </div>
@@ -7999,16 +7982,30 @@ function Dashboard({ user, onLogout, pageName }) {
 
               {/* Select Specific ONUs Section */}
               <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-cyan-900/30' : 'bg-cyan-100'}`}>
-                    <svg className={`w-6 h-6 ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                    </svg>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${darkMode ? 'bg-cyan-900/30' : 'bg-cyan-100'}`}>
+                      <svg className={`w-6 h-6 ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Select Specific ONUs for Alerts</h3>
+                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Choose which ONUs should trigger WhatsApp alerts (leave empty for all ONUs)</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Select Specific ONUs for Alerts</h3>
-                    <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Choose which ONUs should trigger WhatsApp alerts (leave empty for all ONUs)</p>
-                  </div>
+                  {/* Show Selected Only Toggle */}
+                  {alarmSettings.selected_onus.length > 0 && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Show Selected Only</span>
+                      <input
+                        type="checkbox"
+                        checked={alarmSettings.showSelectedOnly || false}
+                        onChange={(e) => setAlarmSettings({...alarmSettings, showSelectedOnly: e.target.checked})}
+                        className="w-4 h-4 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                      />
+                    </label>
+                  )}
                 </div>
                 <div className={`max-h-60 overflow-y-auto rounded-lg border ${darkMode ? 'border-slate-600' : 'border-gray-200'}`}>
                   {onus.length === 0 ? (
@@ -8020,7 +8017,7 @@ function Dashboard({ user, onLogout, pageName }) {
                           <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
                             <input
                               type="checkbox"
-                              checked={alarmSettings.selected_onus.length === onus.length}
+                              checked={alarmSettings.selected_onus.length === onus.length && onus.length > 0}
                               onChange={(e) => {
                                 if (e.target.checked) {
                                   setAlarmSettings({...alarmSettings, selected_onus: onus.map(o => o.id)});
@@ -8031,14 +8028,18 @@ function Dashboard({ user, onLogout, pageName }) {
                               className="rounded"
                             />
                           </th>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Status</th>
                           <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>ONU</th>
                           <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Description</th>
-                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Status</th>
+                          <th className={`px-3 py-2 text-left text-xs font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>OLT</th>
                         </tr>
                       </thead>
                       <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
-                        {onus.slice(0, 50).map((onu) => (
-                          <tr key={onu.id} className={`${darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-gray-50'}`}>
+                        {(alarmSettings.showSelectedOnly
+                          ? onus.filter(onu => alarmSettings.selected_onus.includes(onu.id))
+                          : onus
+                        ).slice(0, 100).map((onu) => (
+                          <tr key={onu.id} className={`${alarmSettings.selected_onus.includes(onu.id) ? (darkMode ? 'bg-cyan-900/20' : 'bg-cyan-50') : ''} ${darkMode ? 'hover:bg-slate-700/50' : 'hover:bg-gray-50'}`}>
                             <td className="px-3 py-2">
                               <input
                                 type="checkbox"
@@ -8053,20 +8054,22 @@ function Dashboard({ user, onLogout, pageName }) {
                                 className="rounded"
                               />
                             </td>
-                            <td className={`px-3 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2.5 h-2.5 rounded-full ${onu.is_online ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                                <span className={`text-xs font-medium ${onu.is_online ? (darkMode ? 'text-green-400' : 'text-green-600') : (darkMode ? 'text-red-400' : 'text-red-600')}`}>
+                                  {onu.is_online ? 'Online' : 'Offline'}
+                                </span>
+                              </div>
+                            </td>
+                            <td className={`px-3 py-2 text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
                               {onu.pon_port}:{onu.onu_id}
                             </td>
                             <td className={`px-3 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
                               {onu.description || '-'}
                             </td>
-                            <td className="px-3 py-2">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                onu.status === 'online'
-                                  ? 'bg-green-100 text-green-800'
-                                  : 'bg-red-100 text-red-800'
-                              }`}>
-                                {onu.status}
-                              </span>
+                            <td className={`px-3 py-2 text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                              {onu.olt_name || '-'}
                             </td>
                           </tr>
                         ))}
@@ -8075,9 +8078,17 @@ function Dashboard({ user, onLogout, pageName }) {
                   )}
                 </div>
                 {alarmSettings.selected_onus.length > 0 && (
-                  <p className={`mt-2 text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
-                    {alarmSettings.selected_onus.length} ONU(s) selected for alerts
-                  </p>
+                  <div className={`mt-3 flex items-center justify-between`}>
+                    <p className={`text-sm font-medium ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`}>
+                      {alarmSettings.selected_onus.length} ONU(s) selected for alerts
+                    </p>
+                    <button
+                      onClick={() => setAlarmSettings({...alarmSettings, selected_onus: [], showSelectedOnly: false})}
+                      className={`text-xs px-2 py-1 rounded ${darkMode ? 'bg-red-900/30 text-red-400 hover:bg-red-900/50' : 'bg-red-100 text-red-600 hover:bg-red-200'}`}
+                    >
+                      Clear All
+                    </button>
+                  </div>
                 )}
               </div>
 
