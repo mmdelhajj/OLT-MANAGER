@@ -2732,12 +2732,41 @@ def delete_onu_image(onu_id: int, image_index: int = 0, user: User = Depends(req
 
 
 @app.delete("/api/onus/{onu_id}", status_code=204)
-def delete_onu(onu_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """Delete ONU record (admin only)"""
+def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Delete ONU record (admin only). Also deletes from OLT if delete_from_olt=true."""
+    from olt_web_scraper import delete_onu_web
+
     onu = db.query(ONU).filter(ONU.id == onu_id).first()
     if not onu:
         raise HTTPException(status_code=404, detail="ONU not found")
 
+    # Try to delete from OLT first if requested
+    olt_delete_success = False
+    olt_delete_error = None
+
+    if delete_from_olt:
+        # Get the OLT
+        olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
+        if olt and olt.is_online:
+            try:
+                # Use web credentials if set, otherwise fall back to standard credentials
+                web_user = olt.web_username or olt.username or 'admin'
+                web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) or 'admin'
+
+                olt_delete_success = delete_onu_web(
+                    ip=olt.ip_address,
+                    pon_port=onu.pon_port,
+                    onu_id=onu.onu_id,
+                    username=web_user,
+                    password=web_pass
+                )
+                if olt_delete_success:
+                    print(f"Successfully deleted ONU {onu.mac_address} from OLT {olt.name}")
+            except Exception as e:
+                olt_delete_error = str(e)
+                print(f"Failed to delete ONU from OLT: {e}")
+
+    # Always delete from database
     db.delete(onu)
     db.commit()
     return None

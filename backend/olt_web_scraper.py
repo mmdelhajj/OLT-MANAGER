@@ -56,6 +56,16 @@ class OLTWebScraper:
     def login(self) -> bool:
         """Login to OLT web interface"""
         try:
+            # First, check if we're already logged in (VSOL uses IP-based sessions)
+            test_url = f"{self.base_url}/action/onuauthinfo.html"
+            test_response = self.session.get(test_url, timeout=10)
+            if test_response.status_code == 200 and 'EPON' in test_response.text:
+                # Already logged in (IP-based session from previous login)
+                self._logged_in = True
+                logger.info(f"Already logged into OLT web interface at {self.ip} (IP-based session)")
+                return True
+
+            # Not logged in, try to authenticate
             login_url = f"{self.base_url}/action/main.html"
             login_data = {
                 "user": self.username,
@@ -66,13 +76,18 @@ class OLTWebScraper:
             response = self.session.post(login_url, data=login_data, timeout=10)
 
             # Check if login successful (page size > 1000 bytes indicates main page loaded)
-            if response.status_code == 200 and len(response.text) > 1000:
-                self._logged_in = True
-                logger.info(f"Logged into OLT web interface at {self.ip}")
-                return True
-            else:
-                logger.warning(f"OLT web login failed for {self.ip}: status={response.status_code}, size={len(response.text)}")
-                return False
+            # Also check for login failure message
+            if response.status_code == 200:
+                if 'LoginFailed' in response.text or 'do not have access' in response.text:
+                    logger.warning(f"OLT web login failed for {self.ip}: access denied")
+                    return False
+                if len(response.text) > 1000:
+                    self._logged_in = True
+                    logger.info(f"Logged into OLT web interface at {self.ip}")
+                    return True
+
+            logger.warning(f"OLT web login failed for {self.ip}: status={response.status_code}, size={len(response.text)}")
+            return False
 
         except Exception as e:
             logger.error(f"OLT web login error for {self.ip}: {e}")
@@ -180,6 +195,72 @@ class OLTWebScraper:
             logger.debug(f"Error getting session key: {e}")
         return None
 
+    def delete_onu(self, pon_port: int, onu_id: int) -> bool:
+        """
+        Delete/Deregister an ONU via web interface.
+
+        For authenticated ONUs: uses who=4 (Deregister)
+        For unauthorized/offline ONUs: uses who=3 (Unauth/Remove)
+
+        IMPORTANT: VSOL requires POST requests for delete actions to work.
+
+        Args:
+            pon_port: PON port number (1-8)
+            onu_id: ONU ID on the PON port
+
+        Returns:
+            True if delete command sent successfully
+        """
+        if not self._logged_in:
+            if not self.login():
+                logger.error(f"Failed to login for ONU delete on {self.ip}")
+                return False
+
+        try:
+            delete_url = f"{self.base_url}/action/onuauthinfo.html"
+
+            # Get fresh session key by accessing the ONU list page first
+            # This ensures we have a valid session before POST
+            list_url = f"{self.base_url}/action/onuauthinfo.html?select={pon_port}"
+            list_resp = self.session.get(list_url, timeout=10)
+
+            # Extract session key from response
+            import re
+            match = re.search(r"SessionKey\.value\s*=\s*'([^']+)'", list_resp.text)
+            session_key = match.group(1) if match else ""
+
+            if not session_key:
+                logger.warning(f"Could not get session key for {self.ip}")
+
+            # For offline/unauthorized ONUs, only who=3 works
+            # For online/authenticated ONUs, who=4 works
+            # Try who=3 first (works for offline), then who=4 (works for online)
+
+            form_data = {
+                "select": str(pon_port),
+                "select2": str(pon_port),
+                "onuid": str(onu_id),
+                "SessionKey": session_key
+            }
+
+            # Try who=3 (Unauth) - works for offline/unauthorized ONUs
+            form_data["who"] = "3"
+            response1 = self.session.post(delete_url, data=form_data, timeout=15)
+            if response1.status_code == 200:
+                logger.info(f"Unauth (who=3) POST sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+
+            # Also try who=4 (Deregister) - works for online/authenticated ONUs
+            form_data["who"] = "4"
+            response2 = self.session.post(delete_url, data=form_data, timeout=15)
+            if response2.status_code == 200:
+                logger.info(f"Deregister (who=4) POST sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+
+            return response1.status_code == 200 or response2.status_code == 200
+
+        except Exception as e:
+            logger.error(f"ONU delete error for {self.ip}: {e}")
+            return False
+
     def reboot_onu(self, pon_port: int, onu_id: int) -> bool:
         """
         Reboot an ONU via web interface.
@@ -284,6 +365,28 @@ class OLTWebScraper:
     def close(self):
         """Close session"""
         self.session.close()
+
+
+def delete_onu_web(ip: str, pon_port: int, onu_id: int,
+                   username: str = "admin", password: str = "admin") -> bool:
+    """
+    Convenience function to delete/deregister an ONU via web interface.
+
+    Args:
+        ip: OLT IP address
+        pon_port: PON port number
+        onu_id: ONU ID
+        username: Web login username
+        password: Web login password
+
+    Returns:
+        True if delete command sent successfully
+    """
+    scraper = OLTWebScraper(ip, username, password)
+    try:
+        return scraper.delete_onu(pon_port, onu_id)
+    finally:
+        scraper.close()
 
 
 def reboot_onu_web(ip: str, pon_port: int, onu_id: int,
