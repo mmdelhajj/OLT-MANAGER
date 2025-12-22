@@ -2797,7 +2797,7 @@ def delete_onu_image(onu_id: int, image_index: int = 0, user: User = Depends(req
 
 @app.delete("/api/onus/{onu_id}", status_code=204)
 def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """Delete ONU record (admin only). Also deletes from OLT if delete_from_olt=true."""
+    """Delete ONU record (admin only). Also deletes from OLT if delete_from_olt=true AND ONU is online."""
     from olt_web_scraper import delete_onu_web
 
     onu = db.query(ONU).filter(ONU.id == onu_id).first()
@@ -2808,7 +2808,11 @@ def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(r
     olt_delete_success = False
     olt_delete_error = None
 
-    if delete_from_olt:
+    # Only try to delete from OLT if:
+    # 1. delete_from_olt is True
+    # 2. ONU is currently ONLINE (not offline)
+    # 3. OLT is online
+    if delete_from_olt and onu.is_online:
         # Get the OLT
         olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
         if olt and olt.is_online:
@@ -2825,12 +2829,14 @@ def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(r
                     password=web_pass
                 )
                 if olt_delete_success:
-                    print(f"Successfully deleted ONU {onu.mac_address} from OLT {olt.name}")
+                    logger.info(f"Successfully deleted ONU {onu.mac_address} from OLT {olt.name}")
             except Exception as e:
                 olt_delete_error = str(e)
-                print(f"Failed to delete ONU from OLT: {e}")
+                logger.warning(f"Failed to delete ONU from OLT: {e}")
+    elif delete_from_olt and not onu.is_online:
+        logger.info(f"ONU {onu.mac_address} is offline - skipping OLT deletion, only removing from database")
 
-    # Always delete from database
+    # Delete from database only (not from OLT if offline)
     db.delete(onu)
     db.commit()
     return None
