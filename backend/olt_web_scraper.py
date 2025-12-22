@@ -202,7 +202,7 @@ class OLTWebScraper:
         For authenticated ONUs: uses who=4 (Deregister)
         For unauthorized/offline ONUs: uses who=3 (Unauth/Remove)
 
-        IMPORTANT: VSOL requires POST requests for delete actions to work.
+        VSOL uses GET requests with query parameters for delete actions.
 
         Args:
             pon_port: PON port number (1-8)
@@ -217,43 +217,39 @@ class OLTWebScraper:
                 return False
 
         try:
-            delete_url = f"{self.base_url}/action/onuauthinfo.html"
-
             # Get fresh session key by accessing the ONU list page first
-            # This ensures we have a valid session before POST
             list_url = f"{self.base_url}/action/onuauthinfo.html?select={pon_port}"
             list_resp = self.session.get(list_url, timeout=10)
 
             # Extract session key from response
-            import re
             match = re.search(r"SessionKey\.value\s*=\s*'([^']+)'", list_resp.text)
             session_key = match.group(1) if match else ""
 
             if not session_key:
                 logger.warning(f"Could not get session key for {self.ip}")
+                return False
 
-            # For offline/unauthorized ONUs, only who=3 works
-            # For online/authenticated ONUs, who=4 works
-            # Try who=3 first (works for offline), then who=4 (works for online)
+            delete_url = f"{self.base_url}/action/onuauthinfo.html"
 
-            form_data = {
+            # VSOL uses GET requests with query parameters (not POST)
+            # Try who=4 (Deregister) first for online/authenticated ONUs
+            params = {
+                "who": "4",
                 "select": str(pon_port),
                 "select2": str(pon_port),
                 "onuid": str(onu_id),
                 "SessionKey": session_key
             }
 
-            # Try who=3 (Unauth) - works for offline/unauthorized ONUs
-            form_data["who"] = "3"
-            response1 = self.session.post(delete_url, data=form_data, timeout=15)
+            response1 = self.session.get(delete_url, params=params, timeout=15)
             if response1.status_code == 200:
-                logger.info(f"Unauth (who=3) POST sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+                logger.info(f"Deregister (who=4) sent for PON {pon_port} ONU {onu_id} on {self.ip}")
 
-            # Also try who=4 (Deregister) - works for online/authenticated ONUs
-            form_data["who"] = "4"
-            response2 = self.session.post(delete_url, data=form_data, timeout=15)
+            # Also try who=3 (Unauth) for offline/unauthorized ONUs
+            params["who"] = "3"
+            response2 = self.session.get(delete_url, params=params, timeout=15)
             if response2.status_code == 200:
-                logger.info(f"Deregister (who=4) POST sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+                logger.info(f"Unauth (who=3) sent for PON {pon_port} ONU {onu_id} on {self.ip}")
 
             return response1.status_code == 200 or response2.status_code == 200
 
