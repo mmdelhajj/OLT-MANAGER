@@ -483,7 +483,7 @@ SNMP_ONU_MODEL_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.7"      # ONU Model (STR
 # OID: 1.3.6.1.4.1.37950.1.1.5.12.1.25.1.{column}.{pon}.{onu}
 SNMP_ONU_INFO_TABLE = "1.3.6.1.4.1.37950.1.1.5.12.1.25.1"
 SNMP_ONU_DESC_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.25.1.9"       # Description (STRING)
-SNMP_ONU_DISTANCE_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.25.1.12"  # Distance in meters (INTEGER)
+SNMP_ONU_DISTANCE_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.25.1.17"  # Distance in meters (Gauge32) - column 17 matches web interface
 
 # ONU Optical Power Table (subtree 28) - RX Power measured at OLT
 # OID: 1.3.6.1.4.1.37950.1.1.5.12.1.28.1.{column}.{index}
@@ -780,17 +780,17 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
                     if desc:  # Only store non-empty descriptions
                         desc_by_pon_onu[f"{pon}.{onu}"] = desc
 
-        # Parse distance from subtree 25 (indexed by PON.ONU)
-        # OID format: .12.{pon}.{onu} = INTEGER: distance
-        # SNMP returns distance in decimeters, divide by 10 to get meters (matching OLT web dashboard)
+        # Parse distance from subtree 25 column 17 (indexed by PON.ONU)
+        # OID format: .17.{pon}.{onu} = Gauge32: distance
+        # This matches the distance shown in OLT web interface
         distance_by_pon_onu: Dict[str, int] = {}
         for line in distance_result.stdout.split('\n'):
-            if 'INTEGER:' in line:
-                match = re.search(r'\.12\.(\d+)\.(\d+)\s*=\s*INTEGER:\s*(\d+)', line)
+            if 'Gauge32:' in line or 'INTEGER:' in line:
+                match = re.search(r'\.17\.(\d+)\.(\d+)\s*=\s*(?:Gauge32|INTEGER):\s*(\d+)', line)
                 if match:
                     pon = match.group(1)
                     onu = match.group(2)
-                    distance = int(match.group(3)) // 10  # Divide by 10 to match OLT dashboard
+                    distance = int(match.group(3))  # Already in meters
                     distance_by_pon_onu[f"{pon}.{onu}"] = distance
 
         # Parse RX power from subtree 28 - need to correlate with MAC
