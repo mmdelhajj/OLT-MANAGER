@@ -33,20 +33,24 @@ def _get_or_create_salt() -> bytes:
     return salt
 
 
-def get_encryption_key():
-    """Generate encryption key using PBKDF2 with hardware ID and random salt"""
+def _get_hardware_id() -> str:
+    """Get hardware ID from file or machine-id"""
     hardware_id_file = "/etc/olt-manager/hardware.id"
     try:
         if os.path.exists(hardware_id_file):
             with open(hardware_id_file, 'r') as f:
-                hardware_id = f.read().strip()
+                return f.read().strip()
         else:
             # Fallback: use machine-id
             with open('/etc/machine-id', 'r') as f:
-                hardware_id = f.read().strip()
+                return f.read().strip()
     except Exception:
-        # If no hardware ID available, generate a persistent one
-        hardware_id = secrets.token_hex(16)
+        return secrets.token_hex(16)
+
+
+def get_encryption_key():
+    """Generate encryption key using PBKDF2 with hardware ID and random salt"""
+    hardware_id = _get_hardware_id()
 
     # Get persistent salt
     salt = _get_or_create_salt()
@@ -60,6 +64,12 @@ def get_encryption_key():
         dklen=32
     )
     return key
+
+
+def get_legacy_encryption_key():
+    """Get the old encryption key (simple SHA256) for migration"""
+    hardware_id = _get_hardware_id()
+    return hashlib.sha256(hardware_id.encode()).digest()
 
 # Encryption key for sensitive data (OLT passwords, etc.)
 ENCRYPTION_KEY = get_encryption_key()
@@ -87,23 +97,36 @@ def encrypt_sensitive(plaintext: str) -> str:
 
 
 def decrypt_sensitive(ciphertext: str) -> str:
-    """Decrypt sensitive data"""
+    """Decrypt sensitive data - tries new key first, then legacy key for migration"""
     if not ciphertext:
         return ciphertext
     if not ciphertext.startswith("ENC:"):
         # Not encrypted - this is legacy data, log a warning
         _config_logger.warning("[SECURITY] Found unencrypted sensitive data - should be re-encrypted")
         return ciphertext
+
+    from cryptography.fernet import Fernet
+    encrypted_data = ciphertext[4:]  # Remove "ENC:" prefix
+
+    # Try new PBKDF2 key first
     try:
-        from cryptography.fernet import Fernet
         key = base64.urlsafe_b64encode(ENCRYPTION_KEY)
         f = Fernet(key)
-        encrypted_data = ciphertext[4:]  # Remove "ENC:" prefix
         decrypted = f.decrypt(encrypted_data.encode())
         return decrypted.decode()
+    except Exception:
+        pass  # Try legacy key
+
+    # Try legacy key (simple SHA256) for migration from old versions
+    try:
+        legacy_key = get_legacy_encryption_key()
+        key = base64.urlsafe_b64encode(legacy_key)
+        f = Fernet(key)
+        decrypted = f.decrypt(encrypted_data.encode())
+        _config_logger.info("[SECURITY] Decrypted with legacy key - data will be re-encrypted on next save")
+        return decrypted.decode()
     except Exception as e:
-        # Log the error
-        _config_logger.error(f"[SECURITY] Decryption failed: {e}")
+        _config_logger.error(f"[SECURITY] Decryption failed with both keys: {e}")
         raise ValueError("Decryption failed - data may be corrupted or key changed")
 
 # Database

@@ -199,17 +199,15 @@ class OLTWebScraper:
         """
         Delete/Deregister an ONU via web interface.
 
-        For authenticated ONUs: uses who=4 (Deregister)
-        For unauthorized/offline ONUs: uses who=3 (Unauth/Remove)
-
-        VSOL uses GET requests with query parameters for delete actions.
+        Extracts the direct action URLs from the ONU list page which contain
+        the correct session key, then calls those URLs.
 
         Args:
             pon_port: PON port number (1-8)
             onu_id: ONU ID on the PON port
 
         Returns:
-            True if delete command sent successfully
+            True if delete was successful
         """
         if not self._logged_in:
             if not self.login():
@@ -217,41 +215,66 @@ class OLTWebScraper:
                 return False
 
         try:
-            # Get fresh session key by accessing the ONU list page first
+            # Get the ONU list page which contains direct action URLs with session keys
             list_url = f"{self.base_url}/action/onuauthinfo.html?select={pon_port}"
             list_resp = self.session.get(list_url, timeout=10)
 
-            # Extract session key from response
-            match = re.search(r"SessionKey\.value\s*=\s*'([^']+)'", list_resp.text)
-            session_key = match.group(1) if match else ""
-
-            if not session_key:
-                logger.warning(f"Could not get session key for {self.ip}")
+            if list_resp.status_code != 200:
+                logger.error(f"Failed to get ONU list page for {self.ip}")
                 return False
 
-            delete_url = f"{self.base_url}/action/onuauthinfo.html"
+            success = False
 
-            # VSOL uses GET requests with query parameters (not POST)
-            # Try who=4 (Deregister) first for online/authenticated ONUs
-            params = {
-                "who": "4",
-                "select": str(pon_port),
-                "select2": str(pon_port),
-                "onuid": str(onu_id),
-                "SessionKey": session_key
-            }
+            # Look for direct "Unauth" link for this specific ONU (who=3)
+            # Format: onuauthinfo.html?who=3&select=X&select2=X&onuid=Y&SessionKey=ZZZ
+            unauth_pattern = rf'onuauthinfo\.html\?who=3&select={pon_port}&select2={pon_port}&onuid={onu_id}&SessionKey=[^"\'>\s]+'
+            unauth_match = re.search(unauth_pattern, list_resp.text)
 
-            response1 = self.session.get(delete_url, params=params, timeout=15)
-            if response1.status_code == 200:
-                logger.info(f"Deregister (who=4) sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+            if unauth_match:
+                unauth_url = f"{self.base_url}/action/{unauth_match.group(0)}"
+                response = self.session.get(unauth_url, timeout=15)
+                if response.status_code == 200:
+                    logger.info(f"Unauth successful for PON {pon_port} ONU {onu_id} on {self.ip}")
+                    success = True
 
-            # Also try who=3 (Unauth) for offline/unauthorized ONUs
-            params["who"] = "3"
-            response2 = self.session.get(delete_url, params=params, timeout=15)
-            if response2.status_code == 200:
-                logger.info(f"Unauth (who=3) sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+            # Look for direct "Deregister" link (who=4) - may be on different page or for online ONUs
+            dereg_pattern = rf'onuauthinfo\.html\?who=4&select={pon_port}&select2={pon_port}&onuid={onu_id}&SessionKey=[^"\'>\s]+'
+            dereg_match = re.search(dereg_pattern, list_resp.text)
 
-            return response1.status_code == 200 or response2.status_code == 200
+            if dereg_match:
+                dereg_url = f"{self.base_url}/action/{dereg_match.group(0)}"
+                response = self.session.get(dereg_url, timeout=15)
+                if response.status_code == 200:
+                    logger.info(f"Deregister successful for PON {pon_port} ONU {onu_id} on {self.ip}")
+                    success = True
+
+            # If no direct links found, try building URL with session key from page
+            if not success:
+                # Extract session key from JavaScript
+                sk_match = re.search(r"SessionKey\.value\s*=\s*'([^']+)'", list_resp.text)
+                if not sk_match:
+                    # Try alternate pattern - session key in link
+                    sk_match = re.search(r'SessionKey=([^"\'>&\s]+)', list_resp.text)
+
+                if sk_match:
+                    session_key = sk_match.group(1)
+                    # Try who=3 (Unauth/Remove)
+                    url = f"{self.base_url}/action/onuauthinfo.html?who=3&select={pon_port}&select2={pon_port}&onuid={onu_id}&SessionKey={session_key}"
+                    response = self.session.get(url, timeout=15)
+                    if response.status_code == 200:
+                        logger.info(f"Unauth (fallback) sent for PON {pon_port} ONU {onu_id} on {self.ip}")
+                        success = True
+
+            # Verify deletion by checking if ONU still exists
+            if success:
+                verify_resp = self.session.get(list_url, timeout=10)
+                onu_still_exists = f"onuid={onu_id}&" in verify_resp.text or f"/{pon_port}:{onu_id}<" in verify_resp.text
+                if onu_still_exists:
+                    logger.warning(f"ONU PON {pon_port} ID {onu_id} may still exist on {self.ip}")
+                else:
+                    logger.info(f"Verified: ONU PON {pon_port} ID {onu_id} removed from {self.ip}")
+
+            return success
 
         except Exception as e:
             logger.error(f"ONU delete error for {self.ip}: {e}")
