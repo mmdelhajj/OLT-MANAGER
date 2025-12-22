@@ -23,8 +23,8 @@ LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "http://lic.proxpanel.com")
 LICENSE_CHECK_ENDPOINT = "/api/validate"
 LICENSE_CACHE_FILE = Path("/var/lib/olt-manager/.license_cache")
 
-# Grace period if server unreachable (days)
-OFFLINE_GRACE_DAYS = 7
+# Grace period if server unreachable (days) - kept short for security
+OFFLINE_GRACE_DAYS = 3  # Reduced from 7 to 3 days for better protection
 
 # How often to check license (seconds) - 5 minutes
 LICENSE_CHECK_INTERVAL = 300
@@ -348,14 +348,16 @@ def require_license(func):
     return wrapper
 
 
-# Development mode - skip license check
-DEV_MODE = os.getenv('OLT_DEV_MODE', 'false').lower() == 'true'
+# SECURITY: Dev mode removed in production builds
+# To enable development mode, you must modify the code directly (not via environment)
+_INTERNAL_DEV_MODE = False  # Set to True only for local development
 
 
 def validate_license_on_startup():
     """Called on application startup"""
-    if DEV_MODE:
-        logger.warning("⚠️ Running in DEVELOPMENT MODE - license check skipped")
+    if _INTERNAL_DEV_MODE:
+        logger.warning("⚠️ [DEV ONLY] Running in DEVELOPMENT MODE - license check skipped")
+        logger.warning("⚠️ [DEV ONLY] This should never appear in production!")
         license_manager.license_data = {
             'customer_name': 'Development',
             'max_olts': 999,
@@ -375,7 +377,7 @@ def validate_license_on_startup():
 
 async def license_check_loop():
     """Background task to periodically check license validity"""
-    if DEV_MODE:
+    if _INTERNAL_DEV_MODE:
         return  # Don't run in dev mode
 
     logger.info(f"Started license check loop (interval: {LICENSE_CHECK_INTERVAL}s)")

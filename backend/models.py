@@ -236,6 +236,9 @@ class User(Base):
     role = Column(String(20), nullable=False, default="operator")  # admin, operator
     full_name = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True)
+    must_change_password = Column(Boolean, default=False)  # Force password change on first login
+    failed_login_attempts = Column(Integer, default=0)  # Track failed logins for rate limiting
+    locked_until = Column(DateTime, nullable=True)  # Account lockout time
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
 
@@ -305,6 +308,19 @@ def run_migrations():
             if 'web_password' not in olt_columns:
                 print("[Migration] Adding web_password column to olts table...")
                 cursor.execute("ALTER TABLE olts ADD COLUMN web_password VARCHAR(255)")
+
+            # Migration for User security columns (v1.6.0) - rate limiting and password change
+            cursor.execute("PRAGMA table_info(users)")
+            user_columns = {col[1] for col in cursor.fetchall()}
+            if 'must_change_password' not in user_columns:
+                print("[Migration] Adding must_change_password column to users table...")
+                cursor.execute("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0")
+            if 'failed_login_attempts' not in user_columns:
+                print("[Migration] Adding failed_login_attempts column to users table...")
+                cursor.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0")
+            if 'locked_until' not in user_columns:
+                print("[Migration] Adding locked_until column to users table...")
+                cursor.execute("ALTER TABLE users ADD COLUMN locked_until DATETIME")
 
             conn.commit()
             conn.close()

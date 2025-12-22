@@ -1,11 +1,57 @@
 """OLT SSH Connection and Config Parser"""
 import re
+import os
 import logging
 import subprocess
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+from pathlib import Path
 import paramiko
 from config import SSH_TIMEOUT, SSH_PORT
+
+# SSH Security: Use known_hosts file for host key verification
+SSH_KNOWN_HOSTS_FILE = "/etc/olt-manager/known_hosts"
+
+
+class OLTHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Custom host key policy that saves and verifies host keys"""
+
+    def __init__(self):
+        self.known_hosts_file = Path(SSH_KNOWN_HOSTS_FILE)
+        self._ensure_known_hosts_file()
+
+    def _ensure_known_hosts_file(self):
+        """Create known_hosts file if it doesn't exist"""
+        if not self.known_hosts_file.exists():
+            self.known_hosts_file.parent.mkdir(parents=True, exist_ok=True)
+            self.known_hosts_file.touch(mode=0o600)
+
+    def missing_host_key(self, client, hostname, key):
+        """Handle missing host key - save it on first connection"""
+        # Load existing known hosts
+        host_keys = paramiko.HostKeys()
+        try:
+            if self.known_hosts_file.exists():
+                host_keys.load(str(self.known_hosts_file))
+        except Exception:
+            pass
+
+        # Check if we have a key for this host
+        existing_key = host_keys.lookup(hostname)
+        if existing_key:
+            # We have a key but it doesn't match - potential MITM attack!
+            key_type = key.get_name()
+            if key_type in existing_key and existing_key[key_type] != key:
+                logging.error(f"[SECURITY] SSH host key mismatch for {hostname}! Possible MITM attack!")
+                raise paramiko.SSHException(f"Host key verification failed for {hostname}")
+        else:
+            # First time connecting - save the key
+            logging.info(f"[SSH] Saving host key for {hostname}")
+            host_keys.add(hostname, key.get_name(), key)
+            try:
+                host_keys.save(str(self.known_hosts_file))
+            except Exception as e:
+                logging.warning(f"[SSH] Could not save host key: {e}")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,7 +83,8 @@ class OLTConnector:
         """Establish SSH connection to OLT"""
         try:
             self.client = paramiko.SSHClient()
-            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Use secure host key policy that saves and verifies keys
+            self.client.set_missing_host_key_policy(OLTHostKeyPolicy())
             self.client.connect(
                 hostname=self.ip,
                 port=self.port,
@@ -160,7 +207,7 @@ class OLTConnector:
 
         # Create new connection for this operation
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(OLTHostKeyPolicy())
 
         try:
             client.connect(
@@ -228,7 +275,7 @@ class OLTConnector:
 
         # Create new connection for this operation
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(OLTHostKeyPolicy())
 
         try:
             # VSOL OLTs have non-standard SSH implementations that need special handling
@@ -458,7 +505,7 @@ def get_opm_data_via_ssh(ip: str, username: str, password: str, port: int = 22) 
 
     try:
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(OLTHostKeyPolicy())
         client.connect(
             hostname=ip,
             port=port,

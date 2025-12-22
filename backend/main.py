@@ -1714,13 +1714,27 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS middleware - configurable origins from environment
+# For production: set CORS_ORIGINS environment variable (comma-separated)
+# Example: CORS_ORIGINS=https://olt.example.com,https://admin.example.com
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").strip()
+if CORS_ORIGINS:
+    allowed_origins = [origin.strip() for origin in CORS_ORIGINS.split(",")]
+else:
+    # Default: allow local development and same-origin requests
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 # Create uploads directory
@@ -2250,18 +2264,67 @@ class ExecuteCommandRequest(BaseModel):
     command: str
 
 
+# Security: Whitelist of allowed commands for OLT execution
+ALLOWED_OLT_COMMANDS = [
+    'show',           # Read-only show commands
+    'display',        # Display commands (some OLTs use this)
+    'ping',           # Network diagnostics
+    'traceroute',     # Network diagnostics
+]
+
+# Security: Blacklist of dangerous commands that are never allowed
+BLOCKED_OLT_COMMANDS = [
+    'delete', 'erase', 'format', 'reset',      # Destructive
+    'no interface', 'no confirm', 'no onu',    # Config deletion
+    'system', 'reload', 'reboot',              # System restart
+    'copy', 'tftp', 'ftp',                     # File transfer
+    'password', 'secret', 'enable',            # Credential access
+    'radius', 'tacacs',                        # AAA config
+    'crypto', 'key', 'certificate',            # Security config
+    'terminal', 'shell', 'bash',               # Shell access
+    'rm ', 'wget', 'curl',                     # Linux commands
+    ';', '&&', '||', '|', '`', '$(',           # Command injection
+]
+
+
+def validate_olt_command(command: str) -> tuple[bool, str]:
+    """Validate OLT command against security rules"""
+    cmd_lower = command.lower().strip()
+
+    # Check for command injection patterns
+    for blocked in BLOCKED_OLT_COMMANDS:
+        if blocked in cmd_lower:
+            return False, f"Blocked command or pattern: {blocked}"
+
+    # Check if command starts with allowed prefix
+    cmd_starts_valid = False
+    for allowed in ALLOWED_OLT_COMMANDS:
+        if cmd_lower.startswith(allowed):
+            cmd_starts_valid = True
+            break
+
+    if not cmd_starts_valid:
+        return False, f"Command must start with one of: {', '.join(ALLOWED_OLT_COMMANDS)}"
+
+    # Command length limit
+    if len(command) > 500:
+        return False, "Command too long (max 500 characters)"
+
+    return True, "OK"
+
+
 @app.post("/api/olts/{olt_id}/execute-command")
 async def execute_olt_command(olt_id: int, request: ExecuteCommandRequest, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """Execute a custom CLI command on OLT (admin only)"""
+    """Execute a custom CLI command on OLT (admin only) - restricted to safe read-only commands"""
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
-    # Validate command - block dangerous commands
-    dangerous_commands = ['delete', 'erase', 'format', 'no interface', 'no confirm']
-    for dangerous in dangerous_commands:
-        if dangerous in request.command.lower():
-            raise HTTPException(status_code=400, detail=f"Command contains dangerous keyword: {dangerous}")
+    # Validate command against security rules
+    is_valid, message = validate_olt_command(request.command)
+    if not is_valid:
+        logger.warning(f"[SECURITY] Blocked command attempt by {user.username}: {request.command}")
+        raise HTTPException(status_code=400, detail=f"Command not allowed: {message}")
 
     try:
         loop = asyncio.get_event_loop()
@@ -2270,6 +2333,7 @@ async def execute_olt_command(olt_id: int, request: ExecuteCommandRequest, user:
             ssh_executor,
             lambda: connector.execute_custom_command(request.command)
         )
+        logger.info(f"[AUDIT] Command executed by {user.username} on OLT {olt.name}: {request.command}")
         return {"success": True, "output": output}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
