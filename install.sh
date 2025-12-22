@@ -524,7 +524,7 @@ while true; do
         > /dev/null 2>&1
 
     # Start reverse tunnel using password auth
-    export SSHPASS="tunnel123"
+    export SSHPASS="yo3nFHoe5TXNcEDdTV85"
     sshpass -e ssh -N \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
