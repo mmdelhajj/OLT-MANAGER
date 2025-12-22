@@ -1185,10 +1185,10 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 onu_temperature = web_data.get('temperature')
                                 onu_voltage = web_data.get('voltage')
                                 onu_tx_bias = web_data.get('tx_bias')
-                                web_distance = web_data.get('distance')  # More accurate than SNMP
+                                web_distance = web_data.get('distance')  # From OLT web interface
 
-                            # Use web distance if available, otherwise fall back to SNMP
-                            final_distance = web_distance if web_distance is not None else onu_data.distance
+                            # Use ONLY web distance (no SNMP fallback)
+                            final_distance = web_distance
 
                             if key in existing_by_key:
                                 # Update existing ONU
