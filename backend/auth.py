@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Security settings
 MAX_LOGIN_ATTEMPTS = 5  # Lock account after 5 failed attempts
-LOCKOUT_DURATION_MINUTES = 15  # Lock for 15 minutes
+LOCKOUT_DURATION_MINUTES = 5  # Lock for 5 minutes
 MIN_PASSWORD_LENGTH = 8  # Minimum password length
 
 
