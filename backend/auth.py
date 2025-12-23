@@ -207,15 +207,15 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
 
 
 def create_default_admin(db: Session):
-    """Create default admin user if no users exist with secure random password"""
+    """Create default admin user if no users exist"""
     user_count = db.query(User).count()
     if user_count == 0:
-        # Generate a secure random password
-        secure_password = generate_secure_password(16)
+        # Use simple default password for easier first-time access
+        default_password = "admin"
 
         admin = User(
             username="admin",
-            password_hash=get_password_hash(secure_password),
+            password_hash=get_password_hash(default_password),
             role="admin",
             full_name="Administrator",
             must_change_password=True  # Force password change on first login
@@ -223,22 +223,7 @@ def create_default_admin(db: Session):
         db.add(admin)
         db.commit()
 
-        # Save password to a secure file for first-time access
-        password_file = "/etc/olt-manager/initial_admin_password.txt"
-        try:
-            os.makedirs("/etc/olt-manager", exist_ok=True)
-            with open(password_file, 'w') as f:
-                f.write(f"Initial Admin Credentials\n")
-                f.write(f"========================\n")
-                f.write(f"Username: admin\n")
-                f.write(f"Password: {secure_password}\n")
-                f.write(f"\n*** CHANGE THIS PASSWORD IMMEDIATELY ***\n")
-                f.write(f"*** DELETE THIS FILE AFTER FIRST LOGIN ***\n")
-            os.chmod(password_file, 0o600)  # Only root can read
-            print(f"[SECURITY] Created admin user. Password saved to: {password_file}")
-            print(f"[SECURITY] Username: admin")
-            print(f"[SECURITY] Password: {secure_password}")
-            print(f"[SECURITY] *** CHANGE PASSWORD ON FIRST LOGIN ***")
-        except Exception as e:
-            print(f"[SECURITY] Created admin user: admin / {secure_password}")
-            print(f"[SECURITY] Warning: Could not save to file: {e}")
+        print(f"[INFO] Created default admin user")
+        print(f"[INFO] Username: admin")
+        print(f"[INFO] Password: admin")
+        print(f"[INFO] *** PLEASE CHANGE PASSWORD AFTER FIRST LOGIN ***")

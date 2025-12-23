@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+backend/venv
+backend/data
+*.egg-info
+
+# Node
+frontend/node_modules
+frontend/build
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# ISO builder
+iso-builder/output
+*.iso
+*.run
+
+# Docs
+*.md
+LICENSE

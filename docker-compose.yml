@@ -1,45 +1,31 @@
 version: '3.8'
 
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: olt-manager-backend
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - olt-data:/app/data
-    environment:
-      - DATABASE_URL=sqlite:///./data/olt_manager.db
-      - POLL_INTERVAL=300
-      - SSH_TIMEOUT=30
-    networks:
-      - olt-network
-    # Allow access to your management network for SSH connections
-    # Uncomment the line below if backend needs host network access
-    # network_mode: host
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        - REACT_APP_API_URL=
-    container_name: olt-manager-frontend
+  olt-manager:
+    build: .
+    image: olt-manager:1.3.1
+    container_name: olt-manager
     restart: unless-stopped
     ports:
       - "80:80"
-    depends_on:
-      - backend
+    volumes:
+      - olt-data:/opt/olt-manager/backend/data
+      - olt-config:/etc/olt-manager
+    environment:
+      - TZ=Asia/Riyadh
     networks:
       - olt-network
-
-networks:
-  olt-network:
-    driver: bridge
+    # Required for SNMP to work with OLTs on the host network
+    # Uncomment if you need direct network access to OLTs
+    # network_mode: host
 
 volumes:
   olt-data:
-    driver: local
+    name: olt-manager-data
+  olt-config:
+    name: olt-manager-config
+
+networks:
+  olt-network:
+    name: olt-manager-network
+    driver: bridge
