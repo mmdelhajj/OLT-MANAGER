@@ -517,7 +517,7 @@ print_complete() {
     echo ""
     echo -e "  ${CYAN}Default Login:${NC}"
     echo -e "  → Username: ${YELLOW}admin${NC}"
-    echo -e "  → Password: ${YELLOW}admin123${NC}"
+    echo -e "  → Password: ${YELLOW}admin${NC}"
     echo ""
     echo -e "  ${CYAN}Security Status:${NC}"
     echo -e "  → LUKS Encryption: ${GREEN}Verified${NC}"

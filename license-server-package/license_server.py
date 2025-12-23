@@ -28,7 +28,7 @@ app.secret_key = os.getenv("FLASK_SECRET", secrets.token_hex(32))
 # Configuration
 LICENSE_DB_FILE = Path("licenses.json")
 ADMIN_USERNAME = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "admin123")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "admin")
 API_SECRET = os.getenv("LICENSE_SECRET", "CHANGE-THIS-TO-SECURE-KEY")
 
 # ============ HTML Templates ============
@@ -476,7 +476,7 @@ DASHBOARD_HTML = '''
                     <div class="form-group">
                         <label>Package Type</label>
                         <select name="package_type" id="packageType" onchange="updateValidity()">
-                            <option value="trial">Trial (7 days)</option>
+                            <option value="trial">Trial (2 days)</option>
                             <option value="monthly" selected>Monthly (30 days)</option>
                             <option value="yearly">Yearly (365 days)</option>
                             <option value="lifetime">Lifetime</option>
@@ -1089,7 +1089,7 @@ def register_trial():
         'features': ['basic', 'traffic'],  # Limited features for trial
         'license_type': 'trial',
         'package_type': 'trial',
-        'expires_at': (datetime.now() + timedelta(days=7)).isoformat(),
+        'expires_at': (datetime.now() + timedelta(days=2)).isoformat(),
         'created_at': datetime.now().isoformat(),
         'active': True,
         'suspended': False,
@@ -1170,7 +1170,7 @@ def register_secure_trial():
         'features': ['basic', 'traffic'],
         'license_type': 'trial',
         'package_type': 'secure_trial',
-        'expires_at': (datetime.now() + timedelta(days=7)).isoformat(),
+        'expires_at': (datetime.now() + timedelta(days=2)).isoformat(),
         'created_at': datetime.now().isoformat(),
         'active': True,
         'suspended': False,
