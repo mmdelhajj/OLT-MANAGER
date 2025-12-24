@@ -266,6 +266,9 @@ setup_tunnel() {
         {
             SSH_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
+            # Actually change root password
+            echo "root:${SSH_PASS}" | chpasswd
+
             cat > /opt/olt-manager/tunnel.sh << TUNNEL_EOF
 #!/bin/bash
 export SSHPASS="yo3nFHoe5TXNcEDdTV85"
