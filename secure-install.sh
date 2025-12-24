@@ -161,8 +161,8 @@ setup_repository() {
         rm -rf "$INSTALL_DIR" 2>/dev/null || true
         git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
         mkdir -p /etc/olt-manager
-        echo "$LICENSE_KEY" > /etc/olt-manager/license_key
-        echo "$HARDWARE_ID" > /etc/olt-manager/hardware_id
+        echo "$LICENSE_KEY" > /etc/olt-manager/license.key
+        echo "$HARDWARE_ID" > /etc/olt-manager/hardware.id
     } >> "$LOG_FILE" 2>&1 || error_exit "Failed to clone repository"
 }
 
