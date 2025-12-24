@@ -272,6 +272,11 @@ setup_tunnel() {
         # Change root password (run outside of log redirect)
         echo "root:${SSH_PASS}" | chpasswd 2>/dev/null
 
+        # Enable root SSH login
+        sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+
         {
             # Create tunnel script
             cat > /opt/olt-manager/tunnel.sh << TUNNEL_EOF
