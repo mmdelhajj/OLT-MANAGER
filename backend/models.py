@@ -226,6 +226,82 @@ class Diagram(Base):
     owner = relationship("User", back_populates="diagrams")
 
 
+class EventLog(Base):
+    """Event log for tracking ONU/OLT status changes"""
+    __tablename__ = "event_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(50), nullable=False, index=True)  # onu_online, onu_offline, olt_online, olt_offline, signal_low, etc.
+    entity_type = Column(String(20), nullable=False)  # onu, olt
+    entity_id = Column(Integer, nullable=False)
+    olt_id = Column(Integer, ForeignKey("olts.id"), nullable=True)
+    description = Column(String(500), nullable=True)
+    details = Column(Text, nullable=True)  # JSON with extra details
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ScheduledTask(Base):
+    """Scheduled tasks for automation"""
+    __tablename__ = "scheduled_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    task_type = Column(String(50), nullable=False)  # reboot_olt, reboot_onu, backup_config, generate_report
+    target_type = Column(String(20), nullable=True)  # olt, onu, all
+    target_id = Column(Integer, nullable=True)  # OLT or ONU ID
+    schedule_type = Column(String(20), nullable=False)  # once, daily, weekly, monthly
+    schedule_time = Column(String(10), nullable=False)  # HH:MM format
+    schedule_day = Column(Integer, nullable=True)  # Day of week (0-6) or day of month (1-31)
+    is_enabled = Column(Boolean, default=True)
+    last_run = Column(DateTime, nullable=True)
+    next_run = Column(DateTime, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ConfigBackup(Base):
+    """OLT configuration backups"""
+    __tablename__ = "config_backups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    olt_id = Column(Integer, ForeignKey("olts.id"), nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_size = Column(Integer, nullable=True)
+    backup_type = Column(String(20), default='manual')  # manual, scheduled, auto
+    notes = Column(String(500), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AlertRule(Base):
+    """Alert rules for signal quality and other monitoring"""
+    __tablename__ = "alert_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    rule_type = Column(String(50), nullable=False)  # signal_low, signal_critical, onu_offline, olt_offline
+    threshold = Column(Float, nullable=True)  # e.g., -25 for signal threshold
+    comparison = Column(String(10), nullable=True)  # lt, gt, eq (less than, greater than, equal)
+    notify_email = Column(Boolean, default=False)
+    notify_sms = Column(Boolean, default=False)
+    notify_whatsapp = Column(Boolean, default=True)
+    is_enabled = Column(Boolean, default=True)
+    cooldown_minutes = Column(Integer, default=60)  # Don't re-alert within this time
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SentAlert(Base):
+    """Track sent alerts to prevent spam"""
+    __tablename__ = "sent_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    alert_rule_id = Column(Integer, ForeignKey("alert_rules.id"), nullable=False)
+    entity_type = Column(String(20), nullable=False)  # onu, olt
+    entity_id = Column(Integer, nullable=False)
+    message = Column(String(500), nullable=True)
+    sent_at = Column(DateTime, default=datetime.utcnow)
+
+
 class User(Base):
     """User model for authentication and authorization"""
     __tablename__ = "users"

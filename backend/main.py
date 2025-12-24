@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from pydantic import BaseModel
 
-from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram, OLTPort
+from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram, OLTPort, EventLog, ScheduledTask, ConfigBackup, AlertRule, SentAlert
 from schemas import (
     OLTCreate, OLTUpdate, OLTResponse, OLTListResponse,
     ONUResponse, ONUListResponse, DashboardStats, PollResult,
@@ -5717,6 +5717,951 @@ def get_trap_status():
     return {
         "running": trap_receiver is not None and trap_receiver.running,
         "port": trap_receiver.port if trap_receiver else 162
+    }
+
+
+# ============ FEATURE 1: GPS Map View ============
+
+@app.get("/api/map/onus")
+def get_map_onus(
+    olt_id: Optional[int] = None,
+    region_id: Optional[int] = None,
+    online_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get all ONUs with GPS coordinates for map display"""
+    query = db.query(ONU).filter(
+        ONU.latitude.isnot(None),
+        ONU.longitude.isnot(None)
+    )
+
+    if olt_id:
+        query = query.filter(ONU.olt_id == olt_id)
+    if region_id:
+        query = query.filter(ONU.region_id == region_id)
+    if online_only:
+        query = query.filter(ONU.is_online == True)
+
+    onus = query.all()
+
+    return {
+        "total": len(onus),
+        "onus": [
+            {
+                "id": onu.id,
+                "mac_address": onu.mac_address,
+                "description": onu.description,
+                "latitude": onu.latitude,
+                "longitude": onu.longitude,
+                "address": onu.address,
+                "is_online": onu.is_online,
+                "rx_power": onu.rx_power,
+                "olt_id": onu.olt_id,
+                "olt_name": onu.olt.name if onu.olt else None,
+                "region_id": onu.region_id,
+                "region_name": onu.region.name if onu.region else None,
+                "region_color": onu.region.color if onu.region else "#3B82F6"
+            }
+            for onu in onus
+        ]
+    }
+
+
+@app.get("/api/map/regions")
+def get_map_regions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get all regions with GPS coordinates for map display"""
+    regions = db.query(Region).filter(
+        Region.latitude.isnot(None),
+        Region.longitude.isnot(None)
+    ).all()
+
+    return {
+        "total": len(regions),
+        "regions": [
+            {
+                "id": region.id,
+                "name": region.name,
+                "latitude": region.latitude,
+                "longitude": region.longitude,
+                "address": region.address,
+                "color": region.color,
+                "onu_count": len(region.onus)
+            }
+            for region in regions
+        ]
+    }
+
+
+# ============ FEATURE 2: Email Alerts ============
+
+@app.post("/api/email/test")
+async def test_email(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Test email notification"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    # Get settings
+    settings = {s.key: s.value for s in db.query(Settings).all()}
+
+    smtp_server = settings.get('smtp_server', '')
+    smtp_port = int(settings.get('smtp_port', 587))
+    smtp_user = settings.get('smtp_user', '')
+    smtp_password = settings.get('smtp_password', '')
+    email_recipient = settings.get('email_recipient', '')
+
+    if not all([smtp_server, smtp_user, smtp_password, email_recipient]):
+        raise HTTPException(status_code=400, detail="Email settings not configured")
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = smtp_user
+        msg['To'] = email_recipient
+        msg['Subject'] = "OLT Manager - Test Email"
+
+        body = f"""
+        This is a test email from OLT Manager.
+
+        Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        Server: {os.uname().nodename}
+
+        If you received this, email notifications are working correctly!
+        """
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+        server.quit()
+
+        return {"success": True, "message": f"Test email sent to {email_recipient}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+
+@app.put("/api/email/settings")
+async def update_email_settings(
+    smtp_server: str = Body(...),
+    smtp_port: int = Body(587),
+    smtp_user: str = Body(...),
+    smtp_password: str = Body(...),
+    email_recipient: str = Body(...),
+    email_enabled: bool = Body(True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Update email notification settings"""
+    settings_map = {
+        'smtp_server': smtp_server,
+        'smtp_port': str(smtp_port),
+        'smtp_user': smtp_user,
+        'smtp_password': smtp_password,
+        'email_recipient': email_recipient,
+        'email_enabled': str(email_enabled)
+    }
+
+    for key, value in settings_map.items():
+        setting = db.query(Settings).filter(Settings.key == key).first()
+        if setting:
+            setting.value = value
+        else:
+            db.add(Settings(key=key, value=value))
+
+    db.commit()
+    return {"success": True, "message": "Email settings updated"}
+
+
+# ============ FEATURE 3: Report Generation ============
+
+@app.get("/api/reports/onus")
+async def generate_onu_report(
+    format: str = Query("json", regex="^(json|csv|excel)$"),
+    olt_id: Optional[int] = None,
+    region_id: Optional[int] = None,
+    online_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Generate ONU report in various formats"""
+    from fastapi.responses import StreamingResponse
+    import csv
+    import io
+
+    query = db.query(ONU).join(OLT)
+
+    if olt_id:
+        query = query.filter(ONU.olt_id == olt_id)
+    if region_id:
+        query = query.filter(ONU.region_id == region_id)
+    if online_only:
+        query = query.filter(ONU.is_online == True)
+
+    onus = query.all()
+
+    if format == "json":
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "total": len(onus),
+            "onus": [
+                {
+                    "id": onu.id,
+                    "olt_name": onu.olt.name,
+                    "pon_port": onu.pon_port,
+                    "onu_id": onu.onu_id,
+                    "mac_address": onu.mac_address,
+                    "description": onu.description,
+                    "is_online": onu.is_online,
+                    "rx_power": onu.rx_power,
+                    "distance": onu.distance,
+                    "region": onu.region.name if onu.region else None,
+                    "address": onu.address,
+                    "last_seen": onu.last_seen.isoformat() if onu.last_seen else None
+                }
+                for onu in onus
+            ]
+        }
+
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['ID', 'OLT', 'PON Port', 'ONU ID', 'MAC Address', 'Description',
+                        'Online', 'RX Power (dBm)', 'Distance (m)', 'Region', 'Address', 'Last Seen'])
+
+        for onu in onus:
+            writer.writerow([
+                onu.id, onu.olt.name, onu.pon_port, onu.onu_id, onu.mac_address,
+                onu.description or '', onu.is_online, onu.rx_power or '',
+                onu.distance or '', onu.region.name if onu.region else '',
+                onu.address or '', onu.last_seen.strftime('%Y-%m-%d %H:%M') if onu.last_seen else ''
+            ])
+
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=onu_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+        )
+
+    elif format == "excel":
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "ONU Report"
+
+            # Header
+            headers = ['ID', 'OLT', 'PON Port', 'ONU ID', 'MAC Address', 'Description',
+                      'Online', 'RX Power (dBm)', 'Distance (m)', 'Region', 'Address', 'Last Seen']
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                cell.font = Font(bold=True, color="FFFFFF")
+
+            # Data
+            for row, onu in enumerate(onus, 2):
+                ws.cell(row=row, column=1, value=onu.id)
+                ws.cell(row=row, column=2, value=onu.olt.name)
+                ws.cell(row=row, column=3, value=onu.pon_port)
+                ws.cell(row=row, column=4, value=onu.onu_id)
+                ws.cell(row=row, column=5, value=onu.mac_address)
+                ws.cell(row=row, column=6, value=onu.description or '')
+                ws.cell(row=row, column=7, value='Online' if onu.is_online else 'Offline')
+                ws.cell(row=row, column=8, value=onu.rx_power)
+                ws.cell(row=row, column=9, value=onu.distance)
+                ws.cell(row=row, column=10, value=onu.region.name if onu.region else '')
+                ws.cell(row=row, column=11, value=onu.address or '')
+                ws.cell(row=row, column=12, value=onu.last_seen.strftime('%Y-%m-%d %H:%M') if onu.last_seen else '')
+
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=onu_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        except ImportError:
+            raise HTTPException(status_code=500, detail="openpyxl not installed. Use CSV format instead.")
+
+
+@app.get("/api/reports/signal-quality")
+async def generate_signal_report(
+    threshold: float = Query(-25.0, description="Signal threshold in dBm"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Generate signal quality report - ONUs with low signal"""
+    onus = db.query(ONU).filter(
+        ONU.rx_power.isnot(None),
+        ONU.rx_power < threshold,
+        ONU.is_online == True
+    ).order_by(ONU.rx_power).all()
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "threshold": threshold,
+        "total_low_signal": len(onus),
+        "onus": [
+            {
+                "id": onu.id,
+                "olt_name": onu.olt.name,
+                "pon_port": onu.pon_port,
+                "onu_id": onu.onu_id,
+                "mac_address": onu.mac_address,
+                "description": onu.description,
+                "rx_power": onu.rx_power,
+                "distance": onu.distance,
+                "severity": "critical" if onu.rx_power < -28 else "warning"
+            }
+            for onu in onus
+        ]
+    }
+
+
+# ============ FEATURE 4: Signal Quality Alerts ============
+
+@app.get("/api/alerts/rules")
+def get_alert_rules(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get all alert rules"""
+    rules = db.query(AlertRule).all()
+    return {
+        "total": len(rules),
+        "rules": [
+            {
+                "id": rule.id,
+                "name": rule.name,
+                "rule_type": rule.rule_type,
+                "threshold": rule.threshold,
+                "comparison": rule.comparison,
+                "notify_email": rule.notify_email,
+                "notify_sms": rule.notify_sms,
+                "notify_whatsapp": rule.notify_whatsapp,
+                "is_enabled": rule.is_enabled,
+                "cooldown_minutes": rule.cooldown_minutes
+            }
+            for rule in rules
+        ]
+    }
+
+
+@app.post("/api/alerts/rules")
+def create_alert_rule(
+    name: str = Body(...),
+    rule_type: str = Body(...),
+    threshold: Optional[float] = Body(None),
+    comparison: Optional[str] = Body("lt"),
+    notify_email: bool = Body(False),
+    notify_sms: bool = Body(False),
+    notify_whatsapp: bool = Body(True),
+    cooldown_minutes: int = Body(60),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Create a new alert rule"""
+    rule = AlertRule(
+        name=name,
+        rule_type=rule_type,
+        threshold=threshold,
+        comparison=comparison,
+        notify_email=notify_email,
+        notify_sms=notify_sms,
+        notify_whatsapp=notify_whatsapp,
+        cooldown_minutes=cooldown_minutes
+    )
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+
+    return {"success": True, "id": rule.id, "message": "Alert rule created"}
+
+
+@app.delete("/api/alerts/rules/{rule_id}")
+def delete_alert_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete an alert rule"""
+    rule = db.query(AlertRule).filter(AlertRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+
+    db.delete(rule)
+    db.commit()
+    return {"success": True, "message": "Alert rule deleted"}
+
+
+# ============ FEATURE 5: Batch Operations ============
+
+@app.post("/api/batch/onus/update")
+async def batch_update_onus(
+    onu_ids: List[int] = Body(...),
+    region_id: Optional[int] = Body(None),
+    description_prefix: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Batch update multiple ONUs"""
+    updated = 0
+    for onu_id in onu_ids:
+        onu = db.query(ONU).filter(ONU.id == onu_id).first()
+        if onu:
+            if region_id is not None:
+                onu.region_id = region_id
+            if description_prefix:
+                onu.description = f"{description_prefix} - {onu.mac_address[-8:]}"
+            updated += 1
+
+    db.commit()
+    return {"success": True, "updated": updated, "message": f"Updated {updated} ONUs"}
+
+
+@app.post("/api/batch/onus/reboot")
+async def batch_reboot_onus(
+    onu_ids: List[int] = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Batch reboot multiple ONUs"""
+    results = []
+    for onu_id in onu_ids:
+        onu = db.query(ONU).filter(ONU.id == onu_id).first()
+        if onu:
+            try:
+                connector = OLTConnector(
+                    onu.olt.ip_address,
+                    onu.olt.username,
+                    decrypt_sensitive(onu.olt.password)
+                )
+                success = connector.reboot_onu(onu.pon_port, onu.onu_id)
+                results.append({"onu_id": onu_id, "success": success})
+            except Exception as e:
+                results.append({"onu_id": onu_id, "success": False, "error": str(e)})
+
+    return {"results": results, "total": len(results)}
+
+
+@app.post("/api/batch/onus/delete")
+async def batch_delete_onus(
+    onu_ids: List[int] = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Batch delete multiple ONUs from database"""
+    deleted = db.query(ONU).filter(ONU.id.in_(onu_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"success": True, "deleted": deleted, "message": f"Deleted {deleted} ONUs"}
+
+
+# ============ FEATURE 6: Configuration Backup/Restore ============
+
+@app.get("/api/backups")
+def get_backups(
+    olt_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get list of configuration backups"""
+    query = db.query(ConfigBackup)
+    if olt_id:
+        query = query.filter(ConfigBackup.olt_id == olt_id)
+
+    backups = query.order_by(ConfigBackup.created_at.desc()).all()
+
+    return {
+        "total": len(backups),
+        "backups": [
+            {
+                "id": backup.id,
+                "olt_id": backup.olt_id,
+                "filename": backup.filename,
+                "file_size": backup.file_size,
+                "backup_type": backup.backup_type,
+                "notes": backup.notes,
+                "created_at": backup.created_at.isoformat()
+            }
+            for backup in backups
+        ]
+    }
+
+
+@app.post("/api/backups/{olt_id}")
+async def create_backup(
+    olt_id: int,
+    notes: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Create a configuration backup for an OLT"""
+    olt = db.query(OLT).filter(OLT.id == olt_id).first()
+    if not olt:
+        raise HTTPException(status_code=404, detail="OLT not found")
+
+    try:
+        connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
+        config = connector.get_running_config()
+
+        # Save to file
+        backup_dir = Path("/opt/olt-manager/backend/backups")
+        backup_dir.mkdir(exist_ok=True)
+
+        filename = f"{olt.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.cfg"
+        filepath = backup_dir / filename
+
+        with open(filepath, 'w') as f:
+            f.write(config)
+
+        # Save to database
+        backup = ConfigBackup(
+            olt_id=olt_id,
+            filename=filename,
+            file_size=len(config),
+            backup_type='manual',
+            notes=notes,
+            created_by=current_user.id
+        )
+        db.add(backup)
+        db.commit()
+
+        return {"success": True, "backup_id": backup.id, "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+
+@app.get("/api/backups/{backup_id}/download")
+async def download_backup(
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Download a configuration backup file"""
+    from fastapi.responses import FileResponse
+
+    backup = db.query(ConfigBackup).filter(ConfigBackup.id == backup_id).first()
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    filepath = Path(f"/opt/olt-manager/backend/backups/{backup.filename}")
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Backup file not found")
+
+    return FileResponse(filepath, filename=backup.filename)
+
+
+@app.delete("/api/backups/{backup_id}")
+async def delete_backup(
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete a configuration backup"""
+    backup = db.query(ConfigBackup).filter(ConfigBackup.id == backup_id).first()
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    # Delete file
+    filepath = Path(f"/opt/olt-manager/backend/backups/{backup.filename}")
+    if filepath.exists():
+        filepath.unlink()
+
+    db.delete(backup)
+    db.commit()
+    return {"success": True, "message": "Backup deleted"}
+
+
+# ============ FEATURE 7: Scheduled Tasks ============
+
+@app.get("/api/scheduled-tasks")
+def get_scheduled_tasks(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get all scheduled tasks"""
+    tasks = db.query(ScheduledTask).all()
+    return {
+        "total": len(tasks),
+        "tasks": [
+            {
+                "id": task.id,
+                "name": task.name,
+                "task_type": task.task_type,
+                "target_type": task.target_type,
+                "target_id": task.target_id,
+                "schedule_type": task.schedule_type,
+                "schedule_time": task.schedule_time,
+                "schedule_day": task.schedule_day,
+                "is_enabled": task.is_enabled,
+                "last_run": task.last_run.isoformat() if task.last_run else None,
+                "next_run": task.next_run.isoformat() if task.next_run else None
+            }
+            for task in tasks
+        ]
+    }
+
+
+@app.post("/api/scheduled-tasks")
+def create_scheduled_task(
+    name: str = Body(...),
+    task_type: str = Body(...),
+    target_type: Optional[str] = Body(None),
+    target_id: Optional[int] = Body(None),
+    schedule_type: str = Body(...),
+    schedule_time: str = Body(...),
+    schedule_day: Optional[int] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Create a new scheduled task"""
+    task = ScheduledTask(
+        name=name,
+        task_type=task_type,
+        target_type=target_type,
+        target_id=target_id,
+        schedule_type=schedule_type,
+        schedule_time=schedule_time,
+        schedule_day=schedule_day,
+        created_by=current_user.id
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    return {"success": True, "id": task.id, "message": "Scheduled task created"}
+
+
+@app.put("/api/scheduled-tasks/{task_id}/toggle")
+def toggle_scheduled_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Enable/disable a scheduled task"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task.is_enabled = not task.is_enabled
+    db.commit()
+
+    return {"success": True, "is_enabled": task.is_enabled}
+
+
+@app.delete("/api/scheduled-tasks/{task_id}")
+def delete_scheduled_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete a scheduled task"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    db.delete(task)
+    db.commit()
+    return {"success": True, "message": "Scheduled task deleted"}
+
+
+# ============ FEATURE 8: Event History Log ============
+
+def log_event(db: Session, event_type: str, entity_type: str, entity_id: int,
+              olt_id: int = None, description: str = None, details: dict = None):
+    """Helper function to log events"""
+    event = EventLog(
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        olt_id=olt_id,
+        description=description,
+        details=json.dumps(details) if details else None
+    )
+    db.add(event)
+    db.commit()
+
+
+@app.get("/api/events")
+def get_events(
+    event_type: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    olt_id: Optional[int] = None,
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get event history"""
+    query = db.query(EventLog)
+
+    if event_type:
+        query = query.filter(EventLog.event_type == event_type)
+    if entity_type:
+        query = query.filter(EventLog.entity_type == entity_type)
+    if olt_id:
+        query = query.filter(EventLog.olt_id == olt_id)
+
+    total = query.count()
+    events = query.order_by(EventLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "entity_type": event.entity_type,
+                "entity_id": event.entity_id,
+                "olt_id": event.olt_id,
+                "description": event.description,
+                "details": json.loads(event.details) if event.details else None,
+                "created_at": event.created_at.isoformat()
+            }
+            for event in events
+        ]
+    }
+
+
+@app.get("/api/events/onu/{onu_id}")
+def get_onu_events(
+    onu_id: int,
+    limit: int = Query(50, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get event history for a specific ONU"""
+    events = db.query(EventLog).filter(
+        EventLog.entity_type == 'onu',
+        EventLog.entity_id == onu_id
+    ).order_by(EventLog.created_at.desc()).limit(limit).all()
+
+    return {
+        "onu_id": onu_id,
+        "total": len(events),
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "description": event.description,
+                "details": json.loads(event.details) if event.details else None,
+                "created_at": event.created_at.isoformat()
+            }
+            for event in events
+        ]
+    }
+
+
+@app.delete("/api/events/cleanup")
+def cleanup_old_events(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete events older than specified days"""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    deleted = db.query(EventLog).filter(EventLog.created_at < cutoff).delete()
+    db.commit()
+    return {"success": True, "deleted": deleted, "message": f"Deleted {deleted} events older than {days} days"}
+
+
+# ============ FEATURE 9: Customer Self-Portal (API) ============
+
+@app.get("/api/portal/status/{mac_address}")
+def get_customer_status(
+    mac_address: str,
+    db: Session = Depends(get_db)
+):
+    """Public endpoint for customers to check their ONU status by MAC address"""
+    # Normalize MAC address format
+    mac = mac_address.upper().replace('-', ':')
+
+    onu = db.query(ONU).filter(ONU.mac_address == mac).first()
+    if not onu:
+        raise HTTPException(status_code=404, detail="ONU not found")
+
+    return {
+        "mac_address": onu.mac_address,
+        "description": onu.description,
+        "is_online": onu.is_online,
+        "signal_quality": "good" if onu.rx_power and onu.rx_power > -25 else "fair" if onu.rx_power and onu.rx_power > -28 else "poor",
+        "rx_power": onu.rx_power,
+        "last_seen": onu.last_seen.isoformat() if onu.last_seen else None,
+        "olt_name": onu.olt.name if onu.olt else None,
+        "region": onu.region.name if onu.region else None
+    }
+
+
+@app.get("/api/portal/speed-test/{mac_address}")
+def get_customer_traffic(
+    mac_address: str,
+    db: Session = Depends(get_db)
+):
+    """Get current traffic for customer's ONU"""
+    mac = mac_address.upper().replace('-', ':')
+
+    onu = db.query(ONU).filter(ONU.mac_address == mac).first()
+    if not onu:
+        raise HTTPException(status_code=404, detail="ONU not found")
+
+    # Get latest traffic history
+    traffic = db.query(TrafficHistory).filter(
+        TrafficHistory.entity_type == 'onu',
+        TrafficHistory.onu_db_id == onu.id
+    ).order_by(TrafficHistory.timestamp.desc()).first()
+
+    return {
+        "mac_address": onu.mac_address,
+        "download_kbps": traffic.rx_kbps if traffic else 0,
+        "upload_kbps": traffic.tx_kbps if traffic else 0,
+        "download_mbps": round(traffic.rx_kbps / 1000, 2) if traffic else 0,
+        "upload_mbps": round(traffic.tx_kbps / 1000, 2) if traffic else 0,
+        "timestamp": traffic.timestamp.isoformat() if traffic else None
+    }
+
+
+# ============ FEATURE 10: Mobile App API Endpoints ============
+
+@app.get("/api/mobile/dashboard")
+def mobile_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Optimized dashboard for mobile app"""
+    # Get counts
+    total_olts = db.query(func.count(OLT.id)).scalar()
+    online_olts = db.query(func.count(OLT.id)).filter(OLT.is_online == True).scalar()
+    total_onus = db.query(func.count(ONU.id)).scalar()
+    online_onus = db.query(func.count(ONU.id)).filter(ONU.is_online == True).scalar()
+
+    # Get OLTs with issues
+    olts_with_issues = db.query(OLT).filter(OLT.is_online == False).all()
+
+    # Get recent events
+    recent_events = db.query(EventLog).order_by(EventLog.created_at.desc()).limit(10).all()
+
+    return {
+        "summary": {
+            "olts": {"total": total_olts, "online": online_olts, "offline": total_olts - online_olts},
+            "onus": {"total": total_onus, "online": online_onus, "offline": total_onus - online_onus}
+        },
+        "issues": [
+            {"id": olt.id, "name": olt.name, "ip": olt.ip_address, "error": olt.last_error}
+            for olt in olts_with_issues
+        ],
+        "recent_events": [
+            {
+                "type": event.event_type,
+                "description": event.description,
+                "time": event.created_at.isoformat()
+            }
+            for event in recent_events
+        ]
+    }
+
+
+@app.get("/api/mobile/onus")
+def mobile_onu_list(
+    search: Optional[str] = None,
+    online_only: bool = False,
+    limit: int = Query(50, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Simplified ONU list for mobile app"""
+    query = db.query(ONU)
+
+    if search:
+        query = query.filter(
+            or_(
+                ONU.mac_address.ilike(f"%{search}%"),
+                ONU.description.ilike(f"%{search}%")
+            )
+        )
+    if online_only:
+        query = query.filter(ONU.is_online == True)
+
+    onus = query.limit(limit).all()
+
+    return {
+        "total": len(onus),
+        "onus": [
+            {
+                "id": onu.id,
+                "mac": onu.mac_address,
+                "name": onu.description,
+                "online": onu.is_online,
+                "signal": onu.rx_power,
+                "olt": onu.olt.name if onu.olt else None
+            }
+            for onu in onus
+        ]
+    }
+
+
+@app.post("/api/mobile/onu/{onu_id}/reboot")
+async def mobile_reboot_onu(
+    onu_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Quick ONU reboot for mobile app"""
+    onu = db.query(ONU).filter(ONU.id == onu_id).first()
+    if not onu:
+        raise HTTPException(status_code=404, detail="ONU not found")
+
+    try:
+        connector = OLTConnector(
+            onu.olt.ip_address,
+            onu.olt.username,
+            decrypt_sensitive(onu.olt.password)
+        )
+        success = connector.reboot_onu(onu.pon_port, onu.onu_id)
+
+        if success:
+            log_event(db, 'onu_reboot', 'onu', onu.id, onu.olt_id,
+                     f"ONU {onu.mac_address} rebooted via mobile app")
+
+        return {"success": success}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/mobile/notifications")
+def mobile_notifications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get recent notifications for mobile app"""
+    # Get recent alerts and events
+    recent_events = db.query(EventLog).filter(
+        EventLog.event_type.in_(['onu_offline', 'olt_offline', 'signal_low', 'signal_critical'])
+    ).order_by(EventLog.created_at.desc()).limit(50).all()
+
+    return {
+        "notifications": [
+            {
+                "id": event.id,
+                "type": event.event_type,
+                "title": event.event_type.replace('_', ' ').title(),
+                "message": event.description,
+                "time": event.created_at.isoformat(),
+                "read": False
+            }
+            for event in recent_events
+        ]
     }
 
 
