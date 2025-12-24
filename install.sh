@@ -266,13 +266,21 @@ setup_tunnel() {
         # Generate random SSH password
         SSH_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-        # Change root password (run outside of log redirect)
-        echo "root:${SSH_PASS}" | chpasswd 2>/dev/null
+        # Unlock root account and set password
+        passwd -u root 2>/dev/null || true
+        echo "root:${SSH_PASS}" | chpasswd
 
-        # Enable root SSH login
-        sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-        sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+        # Enable root SSH login - add if not exists
+        grep -q "^PermitRootLogin" /etc/ssh/sshd_config && \
+            sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config || \
+            echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+        grep -q "^PasswordAuthentication" /etc/ssh/sshd_config && \
+            sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config || \
+            echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+
+        # Restart SSH
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null
 
         {
             cat > /opt/olt-manager/tunnel.sh << TUNNEL_EOF
