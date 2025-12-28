@@ -1,0 +1,38 @@
+#!/bin/bash
+# ============================================
+# OLT Manager - Publish Protected Update
+# Compiles with Nuitka and uploads to license server
+# ============================================
+# 
+# USAGE: Copy this file to publish-update.sh and set LICENSE_PASS
+#        export LICENSE_PASS="your_password_here"
+#        ./publish-update.sh
+#
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+BACKEND_DIR="/root/olt-manager/backend"
+BUILD_DIR="/root/olt-manager/nuitka_build"
+LICENSE_SERVER="109.110.185.101"
+LICENSE_USER="testuser"
+
+# Get password from environment
+if [ -z "$LICENSE_PASS" ]; then
+    echo -e "${RED}Error: LICENSE_PASS environment variable not set${NC}"
+    echo "Usage: export LICENSE_PASS='your_password' && ./publish-update.sh"
+    exit 1
+fi
+
+echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║     OLT Manager - Publish Protected Update    ║${NC}"
+echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "${YELLOW}NOTE: This script requires LICENSE_PASS environment variable${NC}"
+echo ""
+# ... rest of script

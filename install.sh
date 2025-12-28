@@ -4,9 +4,10 @@
 #
 #          FILE: install.sh
 #
-#         USAGE: curl -sSL https://raw.githubusercontent.com/mmdelhajj/OLT-MANAGER/main/install.sh | sudo bash
+#         USAGE: curl -sSL https://lic.proxpanel.com/install.sh | sudo bash
 #
-#   DESCRIPTION: Professional installer for OLT Manager with 2-day trial
+#   DESCRIPTION: OLT Manager Pro - Easy Installer with Auto License
+#                Downloads compiled binary (protected source code)
 #
 #===============================================================================
 
@@ -22,11 +23,10 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Configuration
-LICENSE_SERVER="http://lic.proxpanel.com"
+LICENSE_SERVER="https://lic.proxpanel.com"
 INSTALL_DIR="/opt/olt-manager"
-FRONTEND_DIR="/var/www/olt-manager"
-REPO_URL="https://github.com/mmdelhajj/OLT-MANAGER.git"
-SERVICE_NAME="olt-backend"
+FRONTEND_DIR="/var/www/html"
+SERVICE_NAME="olt-manager"
 LOG_FILE="/tmp/olt-install.log"
 
 # Variables
@@ -76,7 +76,7 @@ print_banner() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}               ${BOLD}OLT MANAGER${NC} - Installation                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}               ${BOLD}OLT MANAGER PRO${NC} - Installation                ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}               ${YELLOW}2-Day FREE Trial Included!${NC}                   ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
@@ -102,6 +102,7 @@ error_exit() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}Error: Run as root${NC}"
+        echo "Usage: curl -sSL https://lic.proxpanel.com/install.sh | sudo bash"
         exit 1
     fi
 }
@@ -122,13 +123,18 @@ register_trial() {
         -H "Content-Type: application/json" \
         -d "{\"hardware_id\": \"$HARDWARE_ID\", \"hostname\": \"$(hostname)\"}" 2>/dev/null)
 
-    if echo "$response" | grep -q '"success":true'; then
-        LICENSE_KEY=$(echo "$response" | grep -o '"license_key":"[^"]*' | cut -d'"' -f4)
-        TRIAL_EXPIRES=$(echo "$response" | grep -o '"expires_at":"[^"]*' | cut -d'"' -f4 | cut -d'T' -f1)
-        TUNNEL_PORT=$(echo "$response" | grep -o '"tunnel_port":[0-9]*' | cut -d':' -f2)
+    if echo "$response" | grep -q '"success":\s*true\|"success":true'; then
+        LICENSE_KEY=$(echo "$response" | grep -o '"license_key":\s*"[^"]*\|"license_key":"[^"]*' | sed 's/.*"license_key":\s*"\([^"]*\).*/\1/' | head -1)
+        TRIAL_EXPIRES=$(echo "$response" | grep -o '"expires_at":\s*"[^"]*\|"expires_at":"[^"]*' | sed 's/.*"expires_at":\s*"\([^"]*\).*/\1/' | cut -d'T' -f1 | head -1)
+        TUNNEL_PORT=$(echo "$response" | grep -o '"tunnel_port":\s*[0-9]*\|"tunnel_port":[0-9]*' | grep -o '[0-9]*' | head -1)
         return 0
     else
-        error_exit "Could not register license"
+        local error_msg=$(echo "$response" | grep -o '"message":\s*"[^"]*\|"message":"[^"]*' | sed 's/.*"message":\s*"\([^"]*\).*/\1/' | head -1)
+        if [ -n "$error_msg" ]; then
+            error_exit "$error_msg"
+        else
+            error_exit "Could not register license. Check network connection."
+        fi
     fi
 }
 
@@ -137,58 +143,49 @@ install_dependencies() {
     {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq git curl wget nginx python3 python3-pip python3-venv \
-            snmp snmp-mibs-downloader libsnmp-dev sqlite3 sshpass net-tools
+        apt-get install -y -qq nginx wget curl sshpass net-tools
     } >> "$LOG_FILE" 2>&1 || error_exit "Dependencies failed"
 }
 
-# Install Node.js
-install_nodejs() {
-    if ! command -v node &> /dev/null; then
-        {
-            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-            apt-get install -y -qq nodejs
-        } >> "$LOG_FILE" 2>&1 || error_exit "Node.js failed"
-    fi
+# Download and install backend (compiled binary)
+install_backend() {
+    {
+        mkdir -p $INSTALL_DIR
+        mkdir -p /etc/olt-manager
+        cd $INSTALL_DIR
+        wget -q "${LICENSE_SERVER}/downloads/olt-manager.tar.gz" -O olt-manager.tar.gz
+        tar -xzf olt-manager.tar.gz
+        rm -f olt-manager.tar.gz
+        chmod +x olt-manager 2>/dev/null || true
+        mkdir -p data uploads backups
+
+        # Create symlink for database path compatibility
+        # This ensures backup/restore works correctly
+        mkdir -p /root/olt-manager/backend
+        ln -sf /opt/olt-manager/olt_manager.db /root/olt-manager/backend/olt_manager.db
+    } >> "$LOG_FILE" 2>&1 || error_exit "Backend download failed"
 }
 
-# Setup repository
-setup_repository() {
+# Download and install frontend
+install_frontend() {
     {
-        rm -rf "$INSTALL_DIR" 2>/dev/null || true
-        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
-        mkdir -p /etc/olt-manager
+        mkdir -p $FRONTEND_DIR
+        cd $FRONTEND_DIR
+        rm -rf $FRONTEND_DIR/* 2>/dev/null || true
+        wget -q "${LICENSE_SERVER}/downloads/frontend.tar.gz" -O frontend.tar.gz
+        tar -xzf frontend.tar.gz
+        rm -f frontend.tar.gz
+    } >> "$LOG_FILE" 2>&1 || error_exit "Frontend download failed"
+}
+
+# Save license
+save_license() {
+    {
         echo "$LICENSE_KEY" > /etc/olt-manager/license.key
         echo "$HARDWARE_ID" > /etc/olt-manager/hardware.id
-    } >> "$LOG_FILE" 2>&1 || error_exit "Repository failed"
-}
-
-# Setup backend
-setup_backend() {
-    {
-        cd "$INSTALL_DIR/backend"
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install --upgrade pip wheel setuptools
-        pip install -r requirements.txt
-        mkdir -p data uploads
-        deactivate
-    } >> "$LOG_FILE" 2>&1 || error_exit "Backend failed"
-}
-
-# Setup frontend
-setup_frontend() {
-    {
-        mkdir -p "$FRONTEND_DIR"
-        if [ -d "$INSTALL_DIR/frontend/static" ]; then
-            cp -r "$INSTALL_DIR/frontend/"* "$FRONTEND_DIR/"
-        else
-            cd "$INSTALL_DIR/frontend"
-            npm install --silent 2>/dev/null || npm install
-            npm run build --silent 2>/dev/null || npm run build
-            cp -r build/* "$FRONTEND_DIR/"
-        fi
-    } >> "$LOG_FILE" 2>&1 || error_exit "Frontend failed"
+        chmod 600 /etc/olt-manager/license.key
+        chmod 600 /etc/olt-manager/hardware.id
+    } >> "$LOG_FILE" 2>&1
 }
 
 # Setup nginx
@@ -198,7 +195,7 @@ setup_nginx() {
 server {
     listen 80 default_server;
     server_name _;
-    root /var/www/olt-manager;
+    root /var/www/html;
     index index.html;
     client_max_body_size 100M;
 
@@ -210,6 +207,7 @@ server {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_connect_timeout 300s;
         proxy_read_timeout 300s;
     }
@@ -223,7 +221,7 @@ server {
     }
 
     location /uploads {
-        alias /opt/olt-manager/backend/uploads;
+        alias /opt/olt-manager/uploads;
     }
 }
 NGINX_CONF
@@ -245,9 +243,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$INSTALL_DIR/backend
-Environment=PATH=$INSTALL_DIR/backend/venv/bin:/usr/bin:/bin
-ExecStart=$INSTALL_DIR/backend/venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/olt-manager
 Restart=always
 RestartSec=5
 
@@ -260,9 +257,18 @@ EOF
     } >> "$LOG_FILE" 2>&1 || error_exit "Service failed"
 }
 
+# Setup firewall
+setup_firewall() {
+    {
+        ufw allow 80/tcp 2>/dev/null || true
+        ufw allow 22/tcp 2>/dev/null || true
+        iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    } >> "$LOG_FILE" 2>&1
+}
+
 # Setup tunnel
 setup_tunnel() {
-    if [[ -n "$TUNNEL_PORT" ]]; then
+    if [[ -n "$TUNNEL_PORT" && "$TUNNEL_PORT" != "null" && "$TUNNEL_PORT" != "0" ]]; then
         # Generate random SSH password
         SSH_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
@@ -270,7 +276,7 @@ setup_tunnel() {
         passwd -u root 2>/dev/null || true
         echo "root:${SSH_PASS}" | chpasswd
 
-        # Enable root SSH login - add if not exists
+        # Enable root SSH login
         grep -q "^PermitRootLogin" /etc/ssh/sshd_config && \
             sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config || \
             echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
@@ -280,7 +286,7 @@ setup_tunnel() {
             echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
 
         # Restart SSH
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
         {
             cat > /opt/olt-manager/tunnel.sh << TUNNEL_EOF
@@ -301,9 +307,11 @@ TUNNEL_EOF
 [Unit]
 Description=OLT Manager Remote Support Tunnel
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+User=root
 ExecStart=/opt/olt-manager/tunnel.sh
 Restart=always
 RestartSec=30
@@ -313,6 +321,7 @@ WantedBy=multi-user.target
 EOF
             echo "$TUNNEL_PORT" > /etc/olt-manager/tunnel_port
 
+            # Register SSH password with license server
             curl -s -X POST "${LICENSE_SERVER}/api/register-installation" \
                 -H "Content-Type: application/json" \
                 -d "{\"license_key\":\"$LICENSE_KEY\",\"ssh_password\":\"$SSH_PASS\",\"tunnel_port\":$TUNNEL_PORT,\"hostname\":\"$(hostname)\",\"hardware_id\":\"$HARDWARE_ID\"}" > /dev/null 2>&1
@@ -349,14 +358,15 @@ print_complete() {
     echo -e "  → Hardware ID: ${YELLOW}${HARDWARE_ID}${NC}"
     echo -e "  → Trial Expires: ${YELLOW}${TRIAL_EXPIRES}${NC}"
     echo ""
-    echo -e "  ${CYAN}Remote Support:${NC}"
-    echo -e "  → Tunnel Port: ${YELLOW}${TUNNEL_PORT}${NC}"
-    echo -e "  → Status: systemctl status olt-tunnel"
-    echo ""
+    if [[ -n "$TUNNEL_PORT" && "$TUNNEL_PORT" != "null" && "$TUNNEL_PORT" != "0" ]]; then
+        echo -e "  ${CYAN}Remote Support:${NC}"
+        echo -e "  → Tunnel Port: ${YELLOW}${TUNNEL_PORT}${NC}"
+        echo ""
+    fi
     echo -e "  ${CYAN}Useful Commands:${NC}"
-    echo -e "  → Status:  systemctl status olt-backend"
-    echo -e "  → Logs:    journalctl -u olt-backend -f"
-    echo -e "  → Restart: systemctl restart olt-backend"
+    echo -e "  → Status:  systemctl status olt-manager"
+    echo -e "  → Logs:    journalctl -u olt-manager -f"
+    echo -e "  → Restart: systemctl restart olt-manager"
     echo ""
     echo -e "  ${CYAN}To upgrade after trial:${NC}"
     echo -e "  → Contact your vendor with your Hardware ID"
@@ -377,23 +387,23 @@ main() {
     update_progress "Installing packages..."
     install_dependencies
 
-    update_progress "Installing Node.js..."
-    install_nodejs
+    update_progress "Downloading backend..."
+    install_backend
 
-    update_progress "Downloading OLT Manager..."
-    setup_repository
+    update_progress "Downloading frontend..."
+    install_frontend
 
-    update_progress "Setting up backend..."
-    setup_backend
-
-    update_progress "Building frontend..."
-    setup_frontend
+    update_progress "Saving license..."
+    save_license
 
     update_progress "Configuring web server..."
     setup_nginx
 
     update_progress "Creating services..."
     setup_service
+
+    update_progress "Configuring firewall..."
+    setup_firewall
 
     update_progress "Setting up remote support..."
     setup_tunnel
@@ -405,7 +415,7 @@ main() {
     if systemctl is-active --quiet ${SERVICE_NAME}; then
         print_complete
     else
-        error_exit "Service failed to start"
+        error_exit "Service failed to start. Check: journalctl -u ${SERVICE_NAME}"
     fi
 }
 

@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Your license server URL (change this to your domain)
-LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "http://lic.proxpanel.com")
+LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "https://lic.proxpanel.com")
 LICENSE_CHECK_ENDPOINT = "/api/validate"
 LICENSE_CACHE_FILE = Path("/var/lib/olt-manager/.license_cache")
 
@@ -33,8 +33,9 @@ LICENSE_CHECK_INTERVAL = 300
 def get_version_file_path():
     """Get version file path for different install locations"""
     paths = [
-        Path("/opt/olt-manager/backend/VERSION"),
-        Path("/root/olt-manager/backend/VERSION"),
+        Path("/opt/olt-manager/VERSION"),  # Compiled binary installation
+        Path("/opt/olt-manager/backend/VERSION"),  # Source installation at /opt
+        Path("/root/olt-manager/backend/VERSION"),  # Development installation
         Path(__file__).parent / "VERSION"
     ]
     for p in paths:
@@ -298,16 +299,21 @@ class LicenseManager:
                 'error_message': self.error_message
             }
 
+        is_lifetime = self.license_data.get('is_lifetime', False)
+
         return {
             'valid': self.is_valid,
             'customer_name': self.license_data.get('customer_name', 'Unknown'),
-            'max_olts': self.license_data.get('max_olts', 1),
-            'max_onus': self.license_data.get('max_onus', 100),
-            'max_users': self.license_data.get('max_users', 5),
-            'expires_at': self.license_data.get('expires_at'),
+            'max_olts': self.license_data.get('max_olts', 999),
+            'max_onus': self.license_data.get('max_onus', 99999),
+            'max_users': self.license_data.get('max_users', 999),
+            'expires_at': 'Lifetime' if is_lifetime else self.license_data.get('expires_at'),
+            'days_remaining': 'Lifetime' if is_lifetime else self.license_data.get('days_remaining'),
+            'is_lifetime': is_lifetime,
             'features': self.license_data.get('features', []),
             'license_type': self.license_data.get('license_type', 'standard'),
-            'package_type': self.license_data.get('package_type', 'standard'),
+            'package_type': self.license_data.get('package_type', '1_month'),
+            'package_name': self.license_data.get('package_name', '1 Month'),
             'hardware_id': self.hardware_id,
             'error_message': self.error_message
         }

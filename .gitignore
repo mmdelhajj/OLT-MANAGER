@@ -10,9 +10,27 @@ ENV/
 dist/
 build/
 
+# Build outputs
+nuitka_build/
+obfuscated_build/
+protected_build/
+*.build/
+*.dist/
+*.onefile-build/
+
 # Database
 *.db
 *.sqlite3
+*.db.bak
+
+# Crash reports
+*.xml
+
+# Static build files (generated)
+backend/static/
+
+# ISO builder output
+iso-builder/output/
 
 # Environment
 .env
