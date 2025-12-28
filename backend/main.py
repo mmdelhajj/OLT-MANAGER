@@ -10,6 +10,7 @@ from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 
 import os
+import sys
 import uuid
 import shutil
 from pathlib import Path
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from pydantic import BaseModel
 
-from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram, OLTPort, EventLog, ScheduledTask, ConfigBackup, AlertRule, SentAlert
+from models import init_db, get_db, OLT, ONU, PollLog, Region, User, user_olts, Settings, TrafficSnapshot, TrafficHistory, Diagram, OLTPort, EventLog, ScheduledTask, ConfigBackup, AlertRule, SentAlert, SystemBackup, BackupSettings
 from schemas import (
     OLTCreate, OLTUpdate, OLTResponse, OLTListResponse,
     ONUResponse, ONUListResponse, DashboardStats, PollResult,
@@ -29,7 +30,7 @@ from schemas import (
     UserLogin, UserCreate, UserUpdate, UserResponse, UserListResponse, LoginResponse,
     DiagramCreate, DiagramUpdate, DiagramResponse, DiagramListResponse
 )
-from olt_connector import poll_olt, poll_olt_snmp, get_opm_data_via_ssh, get_traffic_counters_snmp, get_olt_health_snmp, ONUData, OLTConnector
+from olt_connector import poll_olt_snmp, get_traffic_counters_snmp, get_olt_health_snmp, ONUData, OLTConnector
 from olt_web_scraper import get_onu_opm_data_web
 from trap_receiver import SimpleTrapReceiver, TrapEvent
 from config import POLL_INTERVAL, encrypt_sensitive, decrypt_sensitive
@@ -41,8 +42,8 @@ from auth import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thread pool for SSH operations (non-blocking)
-ssh_executor = ThreadPoolExecutor(max_workers=5)
+# Thread pool for blocking I/O operations (SNMP, web scraping, etc.)
+thread_executor = ThreadPoolExecutor(max_workers=5)
 
 # Cleanup counter - run cleanup every N poll cycles
 cleanup_counter = 0
@@ -821,7 +822,7 @@ async def collect_traffic_history(olt, db):
     try:
         loop = asyncio.get_event_loop()
         current_counters = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             get_traffic_counters_snmp,
             olt.ip_address,
             "public"
@@ -964,7 +965,7 @@ async def collect_traffic_history(olt, db):
         # Collect uplink port traffic via SNMP
         from models import PortTraffic
         port_counters = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             poll_port_traffic_snmp,
             olt.ip_address,
             "public"
@@ -1038,7 +1039,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                     logger.info(f"Trying SNMP poll for {olt.name}...")
                     loop = asyncio.get_event_loop()
                     snmp_onus_data, snmp_status_map = await loop.run_in_executor(
-                        ssh_executor,
+                        thread_executor,
                         poll_olt_snmp,
                         olt.ip_address,
                         "public"  # Default community string
@@ -1047,32 +1048,15 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                     if snmp_onus_data:
                         logger.info(f"SNMP poll successful for {olt.name}: {len(snmp_onus_data)} ONUs")
 
-                        # Get OPM data via SSH for complete optical power info
-                        # SNMP rx_power is incomplete for some ONUs
-                        opm_data = {}
-                        try:
-                            opm_data = await loop.run_in_executor(
-                                ssh_executor,
-                                get_opm_data_via_ssh,
-                                olt.ip_address,
-                                olt.username,
-                                decrypt_sensitive(olt.password)  # Decrypt password for SSH
-                            )
-                            if opm_data:
-                                logger.info(f"SSH OPM for {olt.name}: got optical data for {len(opm_data)} ONUs")
-                        except Exception as opm_err:
-                            logger.warning(f"SSH OPM failed for {olt.name} (using SNMP data only): {opm_err}")
-
                         # Get ONU self-reported RX power via web scraping
                         # This gives the ~-13 dBm value the customer sees (vs ~-26 dBm SNMP measures)
-                        # Fall back to SSH credentials if web credentials not set
                         web_opm_data = {}
                         web_user = olt.web_username or olt.username or 'admin'
                         web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) if olt.password else 'admin'
                         if web_user and web_pass:
                             try:
                                 web_opm_data = await loop.run_in_executor(
-                                    ssh_executor,
+                                    thread_executor,
                                     get_onu_opm_data_web,
                                     olt.ip_address,
                                     web_user,
@@ -1091,7 +1075,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data)
                         try:
                             health_data = await loop.run_in_executor(
-                                ssh_executor,
+                                thread_executor,
                                 get_olt_health_snmp,
                                 olt.ip_address,
                                 "public",
@@ -1154,6 +1138,13 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         onus_went_online = []
                         onus_went_offline = []
 
+                        # Check license ONU limit
+                        from license_manager import license_manager
+                        license_info = license_manager.get_license_info()
+                        max_onus = license_info.get('max_onus', 100)
+                        current_onu_count = db.query(ONU).count()
+                        onu_limit_reached = current_onu_count >= max_onus
+
                         # Update or create ONUs from SNMP data
                         for onu_data in snmp_onus_data:
                             key = (onu_data.pon_port, onu_data.onu_id)
@@ -1164,12 +1155,8 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                             status_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
                             is_online = snmp_status_map.get(status_key, False)
 
-                            # Get RX power: prefer SSH OPM data (complete), fallback to SNMP (partial)
-                            rx_power = None
-                            if onu_data.mac_address in opm_data:
-                                rx_power = opm_data[onu_data.mac_address].get('rx_power')
-                            elif onu_data.rx_power is not None:
-                                rx_power = onu_data.rx_power
+                            # Get RX power from SNMP
+                            rx_power = onu_data.rx_power
 
                             # Get ONU self-reported optical data from web scraping
                             onu_rx_power = None
@@ -1235,6 +1222,11 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                     logger.info(f"ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
                                     onus_went_online.append(existing)
                             else:
+                                # Check ONU limit before creating new ONU
+                                if onu_limit_reached:
+                                    logger.warning(f"ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
+                                    continue
+
                                 # Create new ONU from SNMP (now includes pon_port and onu_id)
                                 # Only save distance/rx_power if ONU is online
                                 new_onu = ONU(
@@ -1255,6 +1247,8 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                     last_seen=datetime.utcnow() if is_online else None
                                 )
                                 db.add(new_onu)
+                                current_onu_count += 1  # Track added ONUs
+                                onu_limit_reached = current_onu_count >= max_onus
                                 # Send new ONU registration notification
                                 send_new_onu_notification(db, new_onu, olt.name)
 
@@ -1307,144 +1301,6 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         # Collect traffic history after successful poll
                         await collect_traffic_history(olt, db)
                         db.commit()
-
-                        continue  # Skip SSH poll if SNMP worked
-
-                # Fall back to SSH poll (or if SNMP failed)
-                if not snmp_onus_data:
-                    logger.info(f"Using SSH poll for {olt.name}...")
-                    loop = asyncio.get_event_loop()
-                    onus_data, status_map = await loop.run_in_executor(
-                        ssh_executor,
-                        poll_olt,
-                        olt.ip_address,
-                        olt.username,
-                        decrypt_sensitive(olt.password)  # Decrypt password for SSH
-                    )
-
-                    # Update OLT status
-                    olt.is_online = True
-                    olt.last_poll = datetime.utcnow()
-                    olt.last_error = None
-
-                    # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data) via SNMP
-                    try:
-                        health_data = await loop.run_in_executor(
-                            ssh_executor,
-                            get_olt_health_snmp,
-                            olt.ip_address,
-                            "public",
-                            olt.pon_ports  # Pass number of PON ports for transceiver polling
-                        )
-                        if health_data:
-                            olt.cpu_usage = health_data.get('cpu_usage')
-                            olt.memory_usage = health_data.get('memory_usage')
-                            olt.temperature = health_data.get('temperature')
-                            olt.uptime_seconds = health_data.get('uptime_seconds')
-
-                            # Save PON port transceiver diagnostics to OLTPort table
-                            pon_ports_data = health_data.get('pon_ports', [])
-                            for port_info in pon_ports_data:
-                                port_num = port_info.get('port')
-                                if port_num:
-                                    # Find or create OLTPort entry for this PON port
-                                    olt_port = db.query(OLTPort).filter(
-                                        OLTPort.olt_id == olt.id,
-                                        OLTPort.port_type == 'pon',
-                                        OLTPort.port_number == port_num
-                                    ).first()
-                                    if not olt_port:
-                                        olt_port = OLTPort(
-                                            olt_id=olt.id,
-                                            port_type='pon',
-                                            port_number=port_num
-                                        )
-                                        db.add(olt_port)
-                                    # Update transceiver data
-                                    if port_info.get('temperature') is not None:
-                                        olt_port.temperature = port_info['temperature']
-                                    if port_info.get('tx_power') is not None:
-                                        olt_port.tx_power = port_info['tx_power']
-                                    olt_port.last_updated = datetime.utcnow()
-                    except Exception as health_err:
-                        logger.warning(f"Health poll failed for {olt.name}: {health_err}")
-
-                    # Re-index by (pon_port, onu_id) for SSH data
-                    existing_by_key = {
-                        (o.pon_port, o.onu_id): o
-                        for o in db.query(ONU).filter(ONU.olt_id == olt.id).all()
-                    }
-
-                    # Track which ONUs we've seen
-                    seen_keys = set()
-
-                    # Collect status changes for batched notification
-                    onus_went_online = []
-                    onus_went_offline = []
-
-                    # Update or create ONUs
-                    for onu_data in onus_data:
-                        key = (onu_data.pon_port, onu_data.onu_id)
-                        seen_keys.add(key)
-
-                        # If MAC not found in status_map, assume offline (not seen = offline)
-                        is_online = status_map.get(onu_data.mac_address, False)
-
-                        if key in existing_by_key:
-                            # Update existing ONU
-                            existing = existing_by_key[key]
-                            was_online = existing.is_online
-                            existing.mac_address = onu_data.mac_address
-                            existing.description = onu_data.description
-                            existing.is_online = is_online
-                            if is_online:
-                                existing.last_seen = datetime.utcnow()
-                            existing.updated_at = datetime.utcnow()
-
-                            # Collect status changes for batched notification
-                            if was_online and not is_online:
-                                logger.info(f"[SSH] ONU went OFFLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
-                                onus_went_offline.append(existing)
-                            elif not was_online and is_online:
-                                logger.info(f"[SSH] ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
-                                onus_went_online.append(existing)
-                        else:
-                            # Create new ONU
-                            new_onu = ONU(
-                                olt_id=olt.id,
-                                pon_port=onu_data.pon_port,
-                                onu_id=onu_data.onu_id,
-                                mac_address=onu_data.mac_address,
-                                description=onu_data.description,
-                                is_online=is_online,
-                                last_seen=datetime.utcnow()
-                            )
-                            db.add(new_onu)
-                            # Send new ONU registration notification
-                            send_new_onu_notification(db, new_onu, olt.name)
-
-                    # Delete ONUs that are no longer in the OLT config
-                    for key, onu in existing_by_key.items():
-                        if key not in seen_keys:
-                            db.delete(onu)
-
-                    # Send batched notification for all status changes
-                    send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
-
-                    # Log successful poll
-                    poll_log = PollLog(
-                        olt_id=olt.id,
-                        status="success",
-                        message=f"SSH: Found {len(onus_data)} ONUs",
-                        onus_found=len(onus_data)
-                    )
-                    db.add(poll_log)
-                    db.commit()
-
-                    # Collect traffic history after successful SSH poll
-                    await collect_traffic_history(olt, db)
-
-                    logger.info(f"Successfully polled {olt.name}: {len(onus_data)} ONUs")
 
             except Exception as e:
                 logger.error(f"Failed to poll OLT {olt.name}: {e}")
@@ -1744,6 +1600,28 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Mount static files for uploads
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
+# Mount frontend static files (for compiled installations without nginx)
+# Check multiple possible locations for static directory
+def find_static_dir():
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), "static"),  # Development
+        os.path.join(os.getcwd(), "static"),                 # Current working directory
+        os.path.join(os.path.dirname(sys.executable), "static"),  # Next to executable
+        "/opt/olt-manager/static",                           # Standard install location
+    ]
+    for path in possible_paths:
+        if os.path.exists(path) and os.path.isdir(path):
+            return path
+    return None
+
+STATIC_DIR = find_static_dir()
+if STATIC_DIR:
+    logger.info(f"Found static directory at: {STATIC_DIR}")
+    # Mount the JS/CSS static folder
+    static_assets = os.path.join(STATIC_DIR, "static")
+    if os.path.exists(static_assets):
+        app.mount("/static", StaticFiles(directory=static_assets), name="static_assets")
+
 
 # ============ Helper Functions ============
 
@@ -1899,6 +1777,19 @@ def get_olt(olt_id: int, db: Session = Depends(get_db)):
 @app.post("/api/olts", response_model=OLTResponse, status_code=201)
 def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Create new OLT (admin only)"""
+    # Check license OLT limit
+    from license_manager import license_manager
+    license_info = license_manager.get_license_info()
+    max_olts = license_info.get('max_olts', 1)
+    current_olt_count = db.query(OLT).count()
+
+    if current_olt_count >= max_olts:
+        package = license_info.get('package_type', 'trial')
+        raise HTTPException(
+            status_code=403,
+            detail=f"OLT limit reached ({max_olts}). Upgrade your package to add more OLTs. Current package: {package}"
+        )
+
     # Check for duplicate IP
     existing = db.query(OLT).filter(OLT.ip_address == olt_data.ip_address).first()
     if existing:
@@ -1990,35 +1881,20 @@ def delete_olt(olt_id: int, user: User = Depends(require_admin), db: Session = D
 @app.post("/api/olts/{olt_id}/poll", response_model=PollResult)
 async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
     """Manually trigger poll for specific OLT using SNMP (fast ~2 seconds)"""
+    from license_manager import license_manager
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
     try:
-        # Use SNMP for fast polling (~2 seconds vs 30-60 seconds for SSH)
+        # Use SNMP for fast polling
         loop = asyncio.get_event_loop()
         onus_data, status_map = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             poll_olt_snmp,
             olt.ip_address,
             "public"  # SNMP community string
         )
-
-        # Get OPM data via SSH for complete optical power info (SNMP only has partial)
-        # This runs in parallel with the database update and adds ~10-15 seconds
-        opm_data = {}
-        try:
-            opm_data = await loop.run_in_executor(
-                ssh_executor,
-                get_opm_data_via_ssh,
-                olt.ip_address,
-                olt.username,
-                decrypt_sensitive(olt.password)  # Decrypt password for SSH
-            )
-            if opm_data:
-                logger.info(f"SSH OPM: got optical data for {len(opm_data)} ONUs")
-        except Exception as opm_err:
-            logger.warning(f"SSH OPM failed (using SNMP data only): {opm_err}")
 
         # Update database (same logic as polling loop)
         olt.is_online = True
@@ -2036,6 +1912,12 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
         onus_went_online = []
         onus_went_offline = []
 
+        # Check license ONU limit for manual poll
+        license_info = license_manager.get_license_info()
+        max_onus = license_info.get('max_onus', 100)
+        current_onu_count = db.query(ONU).count()
+        onu_limit_reached = current_onu_count >= max_onus
+
         for onu_data in onus_data:
             key = (onu_data.pon_port, onu_data.onu_id)
             seen_keys.add(key)
@@ -2045,12 +1927,8 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
             status_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
             is_online = status_map.get(status_key, False)
 
-            # Get RX power: prefer SSH OPM data (complete), fallback to SNMP (partial)
-            rx_power = None
-            if onu_data.mac_address in opm_data:
-                rx_power = opm_data[onu_data.mac_address].get('rx_power')
-            elif onu_data.rx_power is not None:
-                rx_power = onu_data.rx_power
+            # Get RX power from SNMP
+            rx_power = onu_data.rx_power
 
             if key in existing_onus:
                 existing = existing_onus[key]
@@ -2083,6 +1961,11 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                 elif not was_online and is_online:
                     onus_went_online.append(existing)
             else:
+                # Check ONU limit before creating new ONU
+                if onu_limit_reached:
+                    logger.warning(f"[Manual Poll] ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
+                    continue
+
                 new_onu = ONU(
                     olt_id=olt.id,
                     pon_port=onu_data.pon_port,
@@ -2096,6 +1979,8 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                     last_seen=datetime.utcnow()
                 )
                 db.add(new_onu)
+                current_onu_count += 1
+                onu_limit_reached = current_onu_count >= max_onus
 
         # Track ONUs not found in SNMP - delete after 3 consecutive missed polls
         # This syncs with OLT when ONUs are deleted from OLT config
@@ -2164,7 +2049,7 @@ async def get_olt_vlans(olt_id: int, user: User = Depends(require_admin), db: Se
     try:
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
-        vlan_config = await loop.run_in_executor(ssh_executor, connector.get_vlan_config)
+        vlan_config = await loop.run_in_executor(thread_executor, connector.get_vlan_config)
         return {"success": True, "vlans": vlan_config.get('vlans', []), "raw_config": vlan_config.get('raw_config', '')}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2188,7 +2073,7 @@ async def set_onu_vlan(olt_id: int, request: SetONUVlanRequest, user: User = Dep
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
         result = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             lambda: connector.set_onu_vlan(request.pon_port, request.onu_id, request.vlan_id, request.mode)
         )
         return {"success": result, "message": f"VLAN {request.vlan_id} set for ONU {request.pon_port}:{request.onu_id} in {request.mode} mode"}
@@ -2213,7 +2098,7 @@ async def set_port_status(olt_id: int, request: SetPortStatusRequest, user: User
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
         result = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             lambda: connector.set_port_status(request.port_type, request.port_number, request.enabled)
         )
         status = "enabled" if request.enabled else "disabled"
@@ -2232,7 +2117,7 @@ async def reboot_olt(olt_id: int, user: User = Depends(require_admin), db: Sessi
     try:
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
-        result = await loop.run_in_executor(ssh_executor, connector.reboot_olt)
+        result = await loop.run_in_executor(thread_executor, connector.reboot_olt)
 
         # Mark OLT as offline since it's rebooting
         olt.is_online = False
@@ -2254,7 +2139,7 @@ async def save_olt_config(olt_id: int, user: User = Depends(require_admin), db: 
     try:
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
-        result = await loop.run_in_executor(ssh_executor, connector.save_config)
+        result = await loop.run_in_executor(thread_executor, connector.save_config)
         return {"success": result, "message": "Configuration saved successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2330,7 +2215,7 @@ async def execute_olt_command(olt_id: int, request: ExecuteCommandRequest, user:
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
         output = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             lambda: connector.execute_custom_command(request.command)
         )
         logger.info(f"[AUDIT] Command executed by {user.username} on OLT {olt.name}: {request.command}")
@@ -3154,14 +3039,38 @@ def list_onus_by_region(region_id: int, user: User = Depends(require_auth), db: 
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
     """Login and get access token"""
+    # Check if account is locked
+    user_check = db.query(User).filter(User.username == credentials.username).first()
+    if user_check and user_check.locked_until:
+        if datetime.utcnow() < user_check.locked_until:
+            remaining = (user_check.locked_until - datetime.utcnow()).seconds // 60
+            raise HTTPException(
+                status_code=423,
+                detail=f"Account locked. Try again in {remaining + 1} minutes."
+            )
+        else:
+            # Lockout expired, reset
+            user_check.locked_until = None
+            user_check.failed_login_attempts = 0
+            db.commit()
+
     user = authenticate_user(db, credentials.username, credentials.password)
     if not user:
+        # Track failed login attempts
+        if user_check:
+            user_check.failed_login_attempts = (user_check.failed_login_attempts or 0) + 1
+            # Lock account after 5 failed attempts for 15 minutes
+            if user_check.failed_login_attempts >= 5:
+                user_check.locked_until = datetime.utcnow() + timedelta(minutes=15)
+            db.commit()
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password"
         )
 
-    # Update last login
+    # Reset failed login attempts on successful login
+    user.failed_login_attempts = 0
+    user.locked_until = None
     user.last_login = datetime.utcnow()
     db.commit()
 
@@ -3181,7 +3090,8 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
             created_at=user.created_at,
             last_login=user.last_login,
             assigned_olt_ids=assigned_olt_ids
-        )
+        ),
+        must_change_password=user.must_change_password or False
     )
 
 
@@ -3229,6 +3139,19 @@ def list_users(user: User = Depends(require_admin), db: Session = Depends(get_db
 @app.post("/api/users", response_model=UserResponse, status_code=201)
 def create_user(user_data: UserCreate, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Create new user (admin only)"""
+    # Check license user limit
+    from license_manager import license_manager
+    license_info = license_manager.get_license_info()
+    max_users = license_info.get('max_users', 5)
+    current_user_count = db.query(User).count()
+
+    if current_user_count >= max_users:
+        package = license_info.get('package_type', 'trial')
+        raise HTTPException(
+            status_code=403,
+            detail=f"User limit reached ({max_users}). Upgrade your package to add more users. Current package: {package}"
+        )
+
     # Check for duplicate username
     existing = db.query(User).filter(User.username == user_data.username).first()
     if existing:
@@ -3487,60 +3410,151 @@ async def install_update(current_user: User = Depends(require_admin)):
         update_status["stage"] = "backing_up"
         update_status["progress"] = 70
 
-        # Detect install directory (could be /opt/olt-manager or /root/olt-manager)
-        if Path("/opt/olt-manager/backend").exists():
-            install_dir = Path("/opt/olt-manager")
-        else:
-            install_dir = Path("/root/olt-manager")
-
-        backend_dir = install_dir / "backend"
-
-        # Create backup of current installation
-        backup_dir = Path("/tmp/olt-manager-backup")
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-
-        # Backup backend
-        shutil.copytree(str(backend_dir), str(backup_dir / "backend"))
-
-        update_status["stage"] = "applying"
-        update_status["progress"] = 80
-
-        # Apply backend update
-        extracted_backend = extract_dir / "backend"
-        if extracted_backend.exists():
-            # Copy new backend files (preserve venv)
-            for item in extracted_backend.iterdir():
-                if item.name != "venv" and item.name != "__pycache__":
-                    dest = backend_dir / item.name
-                    if item.is_dir():
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(item, dest)
-                    else:
-                        shutil.copy2(item, dest)
-
-        # Apply frontend update
-        extracted_frontend = extract_dir / "frontend" / "build"
-        if extracted_frontend.exists():
-            # Copy to nginx directory (both locations for compatibility)
-            for nginx_dir in [Path("/var/www/olt-manager"), Path("/var/www/html")]:
-                if nginx_dir.exists():
-                    for item in extracted_frontend.iterdir():
-                        dest = nginx_dir / item.name
-                        if item.is_dir():
-                            if dest.exists():
-                                shutil.rmtree(dest)
-                            shutil.copytree(item, dest)
-                        else:
-                            shutil.copy2(item, dest)
-
-        # Update version file with new version
-        update_status["progress"] = 85
         new_version = update_status.get("new_version", "1.1.0")
-        version_file = backend_dir / "VERSION"
-        version_file.write_text(new_version)
-        logger.info(f"Updated VERSION file to {new_version}")
+
+        # Check if package includes install script (new self-contained updates)
+        package_install_script = extract_dir / "install.sh"
+        if package_install_script.exists():
+            logger.info("Using package's install script for update")
+            update_status["stage"] = "applying"
+            update_status["progress"] = 75
+
+            # Make script executable and run it
+            package_install_script.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(package_install_script), str(extract_dir), new_version],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Install script failed: {result.stderr}")
+                raise Exception(f"Install script failed: {result.stderr}")
+
+            logger.info(f"Install script output: {result.stdout}")
+            update_status["progress"] = 85
+
+        else:
+            # Fallback: Legacy install logic for old packages without install.sh
+            logger.info("Using legacy install logic (no install.sh in package)")
+
+            # Detect installation type: compiled binary or source
+            is_compiled = Path("/opt/olt-manager/olt-manager").exists()
+
+            if is_compiled:
+                install_dir = Path("/opt/olt-manager")
+                backend_dir = None
+                logger.info("Detected compiled binary installation")
+            elif Path("/opt/olt-manager/backend").exists():
+                install_dir = Path("/opt/olt-manager")
+                backend_dir = install_dir / "backend"
+            else:
+                install_dir = Path("/root/olt-manager")
+                backend_dir = install_dir / "backend"
+
+            # Create backup
+            backup_dir = Path("/tmp/olt-manager-backup")
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+            backup_dir.mkdir(parents=True)
+
+            if backend_dir and backend_dir.exists():
+                shutil.copytree(str(backend_dir), str(backup_dir / "backend"))
+
+            update_status["stage"] = "applying"
+            update_status["progress"] = 80
+
+            # Apply update based on installation type
+            if is_compiled:
+                # Compiled binary installation - update the binary
+                new_binary = extract_dir / "olt-manager"
+                if new_binary.exists():
+                    # Copy new binary to staging location (can't overwrite running binary)
+                    staged_binary = install_dir / "olt-manager.new"
+                    shutil.copy2(new_binary, staged_binary)
+                    staged_binary.chmod(0o755)
+                    logger.info("Staged new binary as olt-manager.new")
+                else:
+                    logger.warning("No olt-manager binary in update package")
+
+                # Update static folder for compiled installation
+                new_static = extract_dir / "static"
+                if new_static.exists():
+                    # Update /opt/olt-manager/static
+                    target_static = install_dir / "static"
+                    if target_static.exists():
+                        shutil.rmtree(target_static)
+                    shutil.copytree(new_static, target_static)
+                    logger.info("Updated static folder in /opt/olt-manager")
+
+                    # Also update nginx folder if it exists
+                    nginx_html = Path("/var/www/html")
+                    if nginx_html.exists():
+                        # Clear and copy new frontend
+                        for item in nginx_html.iterdir():
+                            if item.is_dir():
+                                shutil.rmtree(item)
+                            else:
+                                item.unlink()
+                        for item in new_static.iterdir():
+                            dest = nginx_html / item.name
+                            if item.is_dir():
+                                shutil.copytree(item, dest)
+                            else:
+                                shutil.copy2(item, dest)
+                        logger.info("Updated nginx frontend in /var/www/html")
+
+            elif backend_dir and backend_dir.exists():
+                # Source installation - update backend files
+                extracted_backend = extract_dir / "backend"
+                if extracted_backend.exists():
+                    for item in extracted_backend.iterdir():
+                        if item.name not in ["venv", "__pycache__", "data"]:
+                            dest = backend_dir / item.name
+                            if item.is_dir():
+                                if dest.exists():
+                                    shutil.rmtree(dest)
+                                shutil.copytree(item, dest)
+                            else:
+                                shutil.copy2(item, dest)
+
+            # Apply frontend update
+            extracted_frontend = extract_dir / "frontend" / "build"
+            if extracted_frontend.exists():
+                for nginx_dir in [Path("/var/www/olt-manager"), Path("/var/www/html")]:
+                    if nginx_dir.exists():
+                        for item in extracted_frontend.iterdir():
+                            dest = nginx_dir / item.name
+                            if item.is_dir():
+                                if dest.exists():
+                                    shutil.rmtree(dest)
+                                shutil.copytree(item, dest)
+                            else:
+                                shutil.copy2(item, dest)
+
+            # Update version file
+            update_status["progress"] = 85
+            if is_compiled:
+                version_file = install_dir / "VERSION"
+            else:
+                version_file = backend_dir / "VERSION"
+            version_file.write_text(new_version)
+            logger.info(f"Updated VERSION file to {new_version}")
+
+        # Create symlink for database path compatibility (fixes backup/restore)
+        # This ensures backup/restore works correctly for compiled installations
+        symlink_dir = Path("/root/olt-manager/backend")
+        symlink_path = symlink_dir / "olt_manager.db"
+        db_target = Path("/opt/olt-manager/olt_manager.db")
+
+        if db_target.exists() and not symlink_path.exists():
+            symlink_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                symlink_path.symlink_to(db_target)
+                logger.info("Created database symlink for backup compatibility")
+            except Exception as sym_err:
+                logger.warning(f"Could not create symlink: {sym_err}")
 
         update_status["stage"] = "restarting"
         update_status["progress"] = 90
@@ -3549,6 +3563,26 @@ async def install_update(current_user: User = Depends(require_admin)):
         restart_script = Path("/tmp/restart-olt-manager.sh")
         restart_script.write_text("""#!/bin/bash
 sleep 2
+
+# For compiled installations, swap the binary before restart
+if [ -f /opt/olt-manager/olt-manager.new ]; then
+    # Stop service first
+    systemctl stop olt-manager 2>/dev/null || systemctl stop olt-backend 2>/dev/null
+    sleep 1
+
+    # Backup and swap binary
+    cd /opt/olt-manager
+    if [ -f olt-manager ]; then
+        mv olt-manager olt-manager.old
+    fi
+    mv olt-manager.new olt-manager
+    chmod +x olt-manager
+
+    # Start service
+    systemctl start olt-manager 2>/dev/null || systemctl start olt-backend 2>/dev/null
+    exit 0
+fi
+
 # Try different service names used by different install methods
 if systemctl is-active --quiet olt-backend; then
     systemctl restart olt-backend
@@ -3655,15 +3689,87 @@ class PublishRequest(PydanticBaseModel):
     version: str
     changelog: str
 
+@app.get("/api/dev/build-status")
+async def get_build_status(current_user: User = Depends(require_admin)):
+    """Check Nuitka build status"""
+    if not is_dev_server():
+        raise HTTPException(status_code=403, detail="This feature is only available on development server")
+
+    build_dir = Path("/root/olt-manager/nuitka_build")
+    binary_path = build_dir / "olt-manager"
+    log_path = Path("/tmp/nuitka_build.log")
+
+    # Check if build is running
+    import subprocess
+    ps_result = subprocess.run(["pgrep", "-f", "nuitka"], capture_output=True)
+    is_building = ps_result.returncode == 0
+
+    # Get log tail
+    log_tail = ""
+    if log_path.exists():
+        log_tail = log_path.read_text()[-2000:]
+
+    # Check binary
+    binary_exists = binary_path.exists()
+    binary_size = 0
+    binary_date = None
+    if binary_exists:
+        stat = binary_path.stat()
+        binary_size = stat.st_size / (1024 * 1024)
+        from datetime import datetime
+        binary_date = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+
+    return {
+        "is_building": is_building,
+        "binary_ready": binary_exists and not is_building,
+        "binary_size_mb": round(binary_size, 1),
+        "binary_date": binary_date,
+        "log": log_tail
+    }
+
+@app.post("/api/dev/build")
+async def start_build(current_user: User = Depends(require_admin), background_tasks: BackgroundTasks = None):
+    """Start Nuitka build in background"""
+    import subprocess
+
+    if not is_dev_server():
+        raise HTTPException(status_code=403, detail="This feature is only available on development server")
+
+    # Check if already building
+    ps_result = subprocess.run(["pgrep", "-f", "nuitka"], capture_output=True)
+    if ps_result.returncode == 0:
+        raise HTTPException(status_code=400, detail="Build already in progress")
+
+    # Start build in background
+    build_script = '''
+source /root/olt-manager/backend/venv/bin/activate
+cd /root/olt-manager/backend
+echo "Starting Nuitka build at $(date)"
+BUILD_DIR="/root/olt-manager/nuitka_build"
+rm -rf "$BUILD_DIR" main.build main.dist main.onefile-build 2>/dev/null
+mkdir -p "$BUILD_DIR"
+python -m nuitka --standalone --onefile --output-dir="$BUILD_DIR" --output-filename=olt-manager --follow-imports --prefer-source-code main.py
+echo "Build finished at $(date)"
+ls -lh "$BUILD_DIR/olt-manager" 2>/dev/null || echo "Build failed"
+'''
+    subprocess.Popen(
+        ["bash", "-c", build_script],
+        stdout=open("/tmp/nuitka_build.log", "w"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True
+    )
+
+    return {"success": True, "message": "Nuitka build started in background. Check /api/dev/build-status for progress."}
+
 @app.post("/api/dev/publish")
 async def publish_update(
     request: PublishRequest,
     current_user: User = Depends(require_admin)
 ):
-    """Build and publish update to license server (dev server only)"""
+    """Publish PROTECTED update using pre-built binary to license server (dev server only)"""
     import subprocess
     import tarfile
-    from license_manager import LICENSE_SERVER_URL
+    import shutil
 
     version = request.version
     changelog = request.changelog
@@ -3673,79 +3779,134 @@ async def publish_update(
 
     try:
         result_steps = []
+        backend_dir = Path("/root/olt-manager/backend")
+        build_dir = Path("/root/olt-manager/nuitka_build")
+        binary_path = build_dir / "olt-manager"
+
+        # Check if binary exists
+        if not binary_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail="No pre-built binary found. Click 'Build Binary' first and wait for completion."
+            )
+
+        # Check if build is still running
+        ps_result = subprocess.run(["pgrep", "-f", "nuitka"], capture_output=True)
+        if ps_result.returncode == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Nuitka build still in progress. Please wait for it to complete."
+            )
+
+        binary_size = binary_path.stat().st_size / (1024 * 1024)
+        result_steps.append(f"Using pre-built binary: {binary_size:.1f} MB")
 
         # Step 1: Update VERSION file
-        version_file = Path("/root/olt-manager/backend/VERSION")
+        version_file = backend_dir / "VERSION"
         version_file.write_text(version)
         result_steps.append(f"Updated VERSION to {version}")
 
-        # Step 2: Build frontend
-        frontend_dir = Path("/root/olt-manager/frontend")
-        build_result = subprocess.run(
-            ["npm", "run", "build"],
-            cwd=str(frontend_dir),
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DISABLE_ESLINT_PLUGIN": "true", "CI": "false"}
-        )
-        if build_result.returncode != 0:
-            raise Exception(f"Frontend build failed: {build_result.stderr}")
-        result_steps.append("Frontend built successfully")
+        # Step 2: Create deployment package
+        package_dir = build_dir / "package"
+        if package_dir.exists():
+            shutil.rmtree(package_dir)
+        package_dir.mkdir(exist_ok=True)
 
-        # Step 3: Create tar.gz package
-        package_name = f"olt-manager-v{version}.tar.gz"
-        package_path = Path(f"/tmp/{package_name}")
+        shutil.copy(binary_path, package_dir / "olt-manager")
+        shutil.copy(version_file, package_dir / "VERSION")
+        (package_dir / "data").mkdir(exist_ok=True)
+        (package_dir / "uploads").mkdir(exist_ok=True)
 
+        # Create start script
+        start_script = package_dir / "start.sh"
+        start_script.write_text("#!/bin/bash\ncd \"$(dirname \"$0\")\"\n./olt-manager\n")
+        start_script.chmod(0o755)
+
+        # Create tarball
+        package_path = Path("/tmp/olt-manager.tar.gz")
         with tarfile.open(package_path, "w:gz") as tar:
-            # Add backend (excluding venv, __pycache__, .dev_server, uploads, databases)
-            backend_dir = Path("/root/olt-manager/backend")
-            # Files/dirs to exclude from update package
-            exclude_names = ["venv", "__pycache__", ".dev_server", "uploads"]
-            exclude_extensions = [".db", ".sqlite", ".sqlite3"]
+            for item in package_dir.iterdir():
+                tar.add(item, arcname=item.name)
 
-            for item in backend_dir.iterdir():
-                # Skip excluded directories/files
-                if item.name in exclude_names:
-                    continue
-                # Skip database files
-                if any(item.name.endswith(ext) for ext in exclude_extensions):
-                    continue
-                tar.add(item, arcname=f"backend/{item.name}")
+        package_size = package_path.stat().st_size / (1024 * 1024)
+        result_steps.append(f"Package created: {package_size:.1f} MB (protected binary)")
 
-            # Add frontend build
-            frontend_build = Path("/root/olt-manager/frontend/build")
-            if frontend_build.exists():
-                tar.add(frontend_build, arcname="frontend/build")
+        # Step 3: Upload to license server via SCP
+        license_server = os.environ.get("LICENSE_SERVER", "109.110.185.101")
+        license_user = os.environ.get("LICENSE_USER", "testuser")
+        license_pass = os.environ.get("LICENSE_PASS")
+        if not license_pass:
+            raise Exception("LICENSE_PASS environment variable not set")
 
-        package_size = package_path.stat().st_size / (1024 * 1024)  # MB
-        result_steps.append(f"Package created: {package_name} ({package_size:.2f} MB)")
+        scp_result = subprocess.run(
+            ["sshpass", "-p", license_pass, "scp", "-o", "StrictHostKeyChecking=no",
+             str(package_path), f"{license_user}@{license_server}:/tmp/"],
+            capture_output=True, text=True, timeout=300
+        )
+        if scp_result.returncode != 0:
+            raise Exception(f"SCP upload failed: {scp_result.stderr}")
 
-        # Step 4: Upload to license server
-        with open(package_path, 'rb') as f:
-            files = {'package': (package_name, f, 'application/gzip')}
-            data = {
-                'version': version,
-                'changelog': changelog
-            }
+        # Copy to web directory and update version
+        import json as json_module
+        changelog_escaped = json_module.dumps(changelog)
 
-            response = requests.post(
-                f"{LICENSE_SERVER_URL}/api/upload-update",
-                files=files,
-                data=data,
-                timeout=300
-            )
+        ssh_commands = f'''
+echo '{license_pass}' | sudo -S bash -c '
+# Upload to both locations
+cp /tmp/olt-manager.tar.gz /var/www/html/downloads/olt-manager.tar.gz
+chmod 644 /var/www/html/downloads/olt-manager.tar.gz
+cp /tmp/olt-manager.tar.gz /opt/license-server/updates/olt-manager-{version}.tar.gz
+chmod 644 /opt/license-server/updates/olt-manager-{version}.tar.gz
 
-        if response.status_code != 200:
-            try:
-                error_msg = response.json().get('error', 'Upload failed')
-            except:
-                error_msg = response.text or f"HTTP {response.status_code}"
-            raise Exception(f"Upload failed: {error_msg}")
+python3 << PYEOF
+import json
+from datetime import datetime
+with open("/opt/license-server/updates.json", "r") as f:
+    data = json.load(f)
 
-        result_steps.append(f"Uploaded to license server successfully")
+# Update both latest fields
+data["latest"] = "{version}"
+data["latest_version"] = "{version}"
+data["download_url"] = "https://lic.proxpanel.com/downloads/olt-manager.tar.gz"
+data["changelog"] = {changelog_escaped}
+data["release_date"] = datetime.now().strftime("%Y-%m-%d")
+
+# Add to versions list
+new_version = {{
+    "version": "{version}",
+    "changelog": {changelog_escaped},
+    "filename": "olt-manager-{version}.tar.gz",
+    "uploaded_at": datetime.now().strftime("%Y-%m-%d")
+}}
+if "versions" not in data:
+    data["versions"] = []
+data["versions"] = [v for v in data["versions"] if v.get("version") != "{version}"]
+data["versions"].insert(0, new_version)
+
+with open("/opt/license-server/updates.json", "w") as f:
+    json.dump(data, f, indent=2)
+print("OK")
+PYEOF
+'
+'''
+        ssh_result = subprocess.run(
+            ["sshpass", "-p", license_pass, "ssh", "-o", "StrictHostKeyChecking=no",
+             f"{license_user}@{license_server}", ssh_commands],
+            capture_output=True, text=True, timeout=60
+        )
+        if ssh_result.returncode != 0:
+            raise Exception(f"SSH command failed: {ssh_result.stderr}")
+
+        result_steps.append("Uploaded to license server successfully")
 
         # Cleanup
         package_path.unlink()
+
+        # Step 4: Reload SOFTWARE_VERSION
+        import license_manager
+        license_manager.SOFTWARE_VERSION = version
+        license_manager.license_manager.update_info = None
+        result_steps.append(f"Reloaded version to {version}")
 
         return {
             "success": True,
@@ -3754,6 +3915,8 @@ async def publish_update(
             "steps": result_steps
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         logger.error(f"Publish failed: {e}")
@@ -3963,9 +4126,10 @@ def change_password(
     if not bcrypt.checkpw(current_password.encode('utf-8'), current_user.password_hash.encode('utf-8')):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    # Update password
+    # Update password and reset must_change_password flag
     new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     current_user.password_hash = new_hash
+    current_user.must_change_password = False
     db.commit()
 
     return {"message": "Password changed successfully"}
@@ -4607,7 +4771,7 @@ async def set_port_description(
     # Set description via SNMP (port_number is the interface index)
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(
-        ssh_executor,
+        thread_executor,
         set_port_description_snmp,
         olt.ip_address,
         port_number,
@@ -4726,7 +4890,7 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
         # Get current traffic counters from SNMP
         loop = asyncio.get_event_loop()
         current_counters = await loop.run_in_executor(
-            ssh_executor,
+            thread_executor,
             get_traffic_counters_snmp,
             olt.ip_address,
             "public"
@@ -4905,7 +5069,7 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
             # Get current traffic counters from SNMP
             loop = asyncio.get_event_loop()
             current_counters = await loop.run_in_executor(
-                ssh_executor,
+                thread_executor,
                 get_traffic_counters_snmp,
                 olt.ip_address,
                 "public"
@@ -5020,7 +5184,7 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                 # Get current traffic counters from SNMP
                 loop = asyncio.get_event_loop()
                 current_counters = await loop.run_in_executor(
-                    ssh_executor,
+                    thread_executor,
                     get_traffic_counters_snmp,
                     olt_ip,
                     "public"
@@ -5633,7 +5797,64 @@ async def get_license_info(user: User = Depends(require_auth)):
         info['status'] = 'active'
         info['status_message'] = None
 
+    # Add current usage counts
+    db = next(get_db())
+    try:
+        info['current_olts'] = db.query(OLT).count()
+        info['current_onus'] = db.query(ONU).count()
+        info['current_users'] = db.query(User).count()
+    except:
+        info['current_olts'] = 0
+        info['current_onus'] = 0
+        info['current_users'] = 0
+    finally:
+        db.close()
+
     return info
+
+
+@app.post("/api/license/refresh")
+async def refresh_license(user: User = Depends(require_auth)):
+    """Force refresh license from server"""
+    from license_manager import license_manager
+    try:
+        # Force revalidation from server
+        license_manager.validate()
+        return {"success": True, "message": "License refreshed successfully"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/system/restart-service")
+async def restart_service(user: User = Depends(require_auth)):
+    """Restart the OLT Manager service"""
+    import subprocess
+    try:
+        # Try different service names
+        service_names = ['olt-backend', 'olt-manager', 'oltmanager']
+        for name in service_names:
+            result = subprocess.run(['systemctl', 'is-active', name], capture_output=True)
+            if result.returncode == 0:
+                subprocess.Popen(['systemctl', 'restart', name])
+                return {"success": True, "message": f"Service {name} is restarting..."}
+
+        # If no systemd service, try to restart the process
+        subprocess.Popen(['pkill', '-f', 'uvicorn|main.bin|main.py'])
+        return {"success": True, "message": "Service is restarting..."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/system/reboot")
+async def reboot_server(user: User = Depends(require_auth)):
+    """Reboot the server"""
+    import subprocess
+    try:
+        # Schedule reboot in 3 seconds to allow response to be sent
+        subprocess.Popen(['shutdown', '-r', '+0'])
+        return {"success": True, "message": "Server is rebooting..."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 # ============ Remote Access Tunnel API ============
@@ -6284,6 +6505,802 @@ async def delete_backup(
     return {"success": True, "message": "Backup deleted"}
 
 
+# ============ SYSTEM BACKUP - Full Database Backup/Restore ============
+
+def upload_to_ftp(filepath: Path, settings: BackupSettings) -> tuple:
+    """Upload backup file to FTP/SFTP server"""
+    import ftplib
+    try:
+        if settings.ftp_use_sftp:
+            # SFTP using paramiko
+            import paramiko
+            transport = paramiko.Transport((settings.ftp_host, settings.ftp_port or 22))
+            transport.connect(username=settings.ftp_username, password=settings.ftp_password)
+            sftp = paramiko.SFTPClient.from_transport(transport)
+            remote_path = f"{settings.ftp_path}/{filepath.name}"
+            sftp.put(str(filepath), remote_path)
+            sftp.close()
+            transport.close()
+            return True, remote_path
+        else:
+            # FTP
+            ftp = ftplib.FTP()
+            ftp.connect(settings.ftp_host, settings.ftp_port or 21)
+            ftp.login(settings.ftp_username, settings.ftp_password)
+            try:
+                ftp.cwd(settings.ftp_path)
+            except:
+                ftp.mkd(settings.ftp_path)
+                ftp.cwd(settings.ftp_path)
+            with open(filepath, 'rb') as f:
+                ftp.storbinary(f'STOR {filepath.name}', f)
+            ftp.quit()
+            return True, f"{settings.ftp_path}/{filepath.name}"
+    except Exception as e:
+        return False, str(e)
+
+
+def upload_to_s3(filepath: Path, settings: BackupSettings) -> tuple:
+    """Upload backup file to AWS S3"""
+    try:
+        import boto3
+        s3 = boto3.client(
+            's3',
+            region_name=settings.s3_region,
+            aws_access_key_id=settings.s3_access_key,
+            aws_secret_access_key=settings.s3_secret_key
+        )
+        s3_key = f"{settings.s3_path.strip('/')}/{filepath.name}"
+        s3.upload_file(str(filepath), settings.s3_bucket, s3_key)
+        return True, f"s3://{settings.s3_bucket}/{s3_key}"
+    except Exception as e:
+        return False, str(e)
+
+
+# Backup encryption key (embedded in compiled binary - not visible to customers)
+BACKUP_ENCRYPTION_KEY = b'OLT_M@n@g3r_S3cur3_B@ckup_K3y_2024!'  # 32 bytes for AES-256
+
+def encrypt_backup(data: bytes) -> bytes:
+    """Encrypt backup data using AES-256"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+    import os
+
+    # Generate random IV
+    iv = os.urandom(16)
+
+    # Pad data to 16-byte boundary
+    pad_len = 16 - (len(data) % 16)
+    padded_data = data + bytes([pad_len] * pad_len)
+
+    # Encrypt
+    cipher = Cipher(algorithms.AES(BACKUP_ENCRYPTION_KEY[:32]), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    encrypted = encryptor.update(padded_data) + encryptor.finalize()
+
+    # Return IV + encrypted data
+    return iv + encrypted
+
+def decrypt_backup(encrypted_data: bytes) -> bytes:
+    """Decrypt backup data using AES-256"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+
+    # Extract IV and encrypted data
+    iv = encrypted_data[:16]
+    encrypted = encrypted_data[16:]
+
+    # Decrypt
+    cipher = Cipher(algorithms.AES(BACKUP_ENCRYPTION_KEY[:32]), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    padded_data = decryptor.update(encrypted) + decryptor.finalize()
+
+    # Remove padding
+    pad_len = padded_data[-1]
+    return padded_data[:-pad_len]
+
+
+def create_system_backup_file(db: Session, include_uploads: bool = False) -> tuple:
+    """Create a full system backup file (encrypted)"""
+    import zipfile
+    import sqlite3
+    import shutil
+
+    backup_dir = Path("/opt/olt-manager/backups")
+    backup_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_filename = f"olt_manager_backup_{timestamp}.zip"
+    backup_path = backup_dir / backup_filename
+
+    try:
+        with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Backup database - check multiple possible locations
+            db_paths = [
+                Path("/opt/olt-manager/olt_manager.db"),  # Compiled binary installation
+                Path("/opt/olt-manager/data/olt_manager.db"),  # Compiled with data folder
+                Path("/root/olt-manager/backend/olt_manager.db"),
+                Path("/opt/olt-manager/backend/olt_manager.db"),
+                Path("/opt/olt-manager/backend/data/olt_manager.db"),
+                Path("./olt_manager.db"),
+                Path("./data/olt_manager.db")
+            ]
+            for db_path in db_paths:
+                if db_path.exists():
+                    # Create a copy to avoid locking issues
+                    temp_db = backup_dir / f"temp_db_{timestamp}.db"
+                    shutil.copy2(db_path, temp_db)
+                    zipf.write(temp_db, "database/olt_manager.db")
+                    temp_db.unlink()
+                    break
+
+            # Backup license files
+            license_dir = Path("/etc/olt-manager")
+            if license_dir.exists():
+                for f in license_dir.iterdir():
+                    if f.is_file():
+                        zipf.write(f, f"config/{f.name}")
+
+            # Backup uploads if requested - check multiple locations
+            if include_uploads:
+                upload_paths = [
+                    Path("/opt/olt-manager/uploads"),  # Compiled binary installation
+                    Path("/root/olt-manager/backend/uploads"),
+                    Path("/opt/olt-manager/backend/uploads")
+                ]
+                for uploads_dir in upload_paths:
+                    if uploads_dir.exists():
+                        for f in uploads_dir.rglob("*"):
+                            if f.is_file():
+                                arcname = f"uploads/{f.relative_to(uploads_dir)}"
+                                zipf.write(f, arcname)
+                        break  # Only backup from first found location
+
+            # Add backup metadata
+            metadata = {
+                "created_at": datetime.now().isoformat(),
+                "version": "1.0",
+                "includes_uploads": include_uploads
+            }
+            zipf.writestr("metadata.json", json.dumps(metadata, indent=2))
+
+        # Encrypt the backup file
+        with open(backup_path, 'rb') as f:
+            zip_data = f.read()
+
+        encrypted_data = encrypt_backup(zip_data)
+
+        # Save encrypted backup with .bak extension (hides that it's a zip)
+        encrypted_path = backup_path.with_suffix('.bak')
+        with open(encrypted_path, 'wb') as f:
+            # Add magic header to identify encrypted backups
+            f.write(b'OLTBAK01')  # 8-byte magic header
+            f.write(encrypted_data)
+
+        # Remove unencrypted zip
+        backup_path.unlink()
+
+        file_size = encrypted_path.stat().st_size
+        return True, encrypted_path, file_size
+    except Exception as e:
+        if backup_path.exists():
+            backup_path.unlink()
+        return False, None, str(e)
+
+
+@app.get("/api/system-backups")
+def get_system_backups(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Get list of system backups"""
+    backups = db.query(SystemBackup).order_by(SystemBackup.created_at.desc()).all()
+
+    return {
+        "total": len(backups),
+        "backups": [
+            {
+                "id": backup.id,
+                "filename": backup.filename,
+                "file_size": backup.file_size,
+                "file_size_mb": round(backup.file_size / 1024 / 1024, 2) if backup.file_size else 0,
+                "backup_type": backup.backup_type,
+                "storage_type": backup.storage_type,
+                "storage_path": backup.storage_path,
+                "includes_db": backup.includes_db,
+                "includes_config": backup.includes_config,
+                "includes_uploads": backup.includes_uploads,
+                "status": backup.status,
+                "error_message": backup.error_message,
+                "notes": backup.notes,
+                "created_at": backup.created_at.isoformat()
+            }
+            for backup in backups
+        ]
+    }
+
+
+@app.post("/api/system-backups")
+async def create_system_backup(
+    include_uploads: bool = Body(False),
+    upload_to: Optional[str] = Body(None),  # 'ftp', 's3', or None for local only
+    notes: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Create a full system backup"""
+    # Get backup settings
+    settings = db.query(BackupSettings).first()
+
+    # Create backup file
+    success, backup_path, file_size = create_system_backup_file(db, include_uploads)
+    if not success:
+        raise HTTPException(status_code=500, detail=f"Backup failed: {file_size}")
+
+    storage_type = 'local'
+    storage_path = str(backup_path)
+    status = 'completed'
+    error_message = None
+
+    # Upload to remote storage if requested
+    if upload_to and settings:
+        if upload_to == 'ftp' and settings.ftp_host:
+            storage_type = 'sftp' if settings.ftp_use_sftp else 'ftp'
+            success, result = upload_to_ftp(backup_path, settings)
+            if success:
+                storage_path = result
+            else:
+                status = 'failed'
+                error_message = f"FTP upload failed: {result}"
+        elif upload_to == 's3' and settings.s3_bucket:
+            storage_type = 's3'
+            success, result = upload_to_s3(backup_path, settings)
+            if success:
+                storage_path = result
+            else:
+                status = 'failed'
+                error_message = f"S3 upload failed: {result}"
+
+    # Save backup record
+    backup = SystemBackup(
+        filename=backup_path.name,
+        file_size=file_size if isinstance(file_size, int) else 0,
+        backup_type='manual',
+        storage_type=storage_type,
+        storage_path=storage_path,
+        includes_db=True,
+        includes_config=True,
+        includes_uploads=include_uploads,
+        status=status,
+        error_message=error_message,
+        notes=notes,
+        created_by=current_user.id
+    )
+    db.add(backup)
+    db.commit()
+
+    # Update backup settings with last backup info
+    if settings:
+        settings.last_backup_at = datetime.now()
+        settings.last_backup_status = status
+        db.commit()
+
+    return {
+        "success": status == 'completed',
+        "backup_id": backup.id,
+        "filename": backup.filename,
+        "file_size_mb": round(backup.file_size / 1024 / 1024, 2) if backup.file_size else 0,
+        "storage_type": storage_type,
+        "storage_path": storage_path,
+        "error": error_message
+    }
+
+
+@app.get("/api/system-backups/{backup_id}/download")
+async def download_system_backup(
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth)
+):
+    """Download a system backup file"""
+    from fastapi.responses import FileResponse
+
+    backup = db.query(SystemBackup).filter(SystemBackup.id == backup_id).first()
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    if backup.storage_type != 'local':
+        raise HTTPException(status_code=400, detail="Cannot download remote backups directly. Use the storage path to access.")
+
+    filepath = Path(f"/opt/olt-manager/backups/{backup.filename}")
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Backup file not found on disk")
+
+    return FileResponse(filepath, filename=backup.filename, media_type='application/zip')
+
+
+@app.post("/api/system-backups/{backup_id}/restore")
+async def restore_system_backup(
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Restore from a system backup"""
+    import zipfile
+    import shutil
+    import sqlite3
+
+    backup = db.query(SystemBackup).filter(SystemBackup.id == backup_id).first()
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    backup_path = Path(f"/opt/olt-manager/backups/{backup.filename}")
+    if not backup_path.exists():
+        raise HTTPException(status_code=404, detail="Backup file not found")
+
+    # Save all current backup records BEFORE restoring (they will be lost when DB is replaced)
+    all_backups = db.query(SystemBackup).all()
+    backup_records = []
+    for b in all_backups:
+        backup_records.append({
+            'id': b.id,
+            'filename': b.filename,
+            'file_size': b.file_size,
+            'backup_type': b.backup_type,
+            'storage_type': b.storage_type,
+            'storage_path': b.storage_path,
+            'includes_db': b.includes_db,
+            'includes_config': b.includes_config,
+            'includes_uploads': b.includes_uploads,
+            'status': b.status,
+            'error_message': b.error_message,
+            'notes': b.notes,
+            'created_by': b.created_by,
+            'created_at': b.created_at.isoformat() if b.created_at else None
+        })
+
+    try:
+        # Check if backup is encrypted
+        with open(backup_path, 'rb') as f:
+            header = f.read(8)
+            is_encrypted = header == b'OLTBAK01'
+
+        temp_dir = Path("/tmp/olt_restore")
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir()
+
+        if is_encrypted:
+            # Decrypt the backup first
+            with open(backup_path, 'rb') as f:
+                f.read(8)  # Skip magic header
+                encrypted_data = f.read()
+
+            zip_data = decrypt_backup(encrypted_data)
+
+            # Write decrypted zip to temp file
+            temp_zip = temp_dir / "backup.zip"
+            with open(temp_zip, 'wb') as f:
+                f.write(zip_data)
+
+            # Extract from decrypted zip
+            with zipfile.ZipFile(temp_zip, 'r') as zipf:
+                zipf.extractall(temp_dir)
+
+            # Remove temp zip
+            temp_zip.unlink()
+        else:
+            # Old unencrypted backup - extract directly
+            with zipfile.ZipFile(backup_path, 'r') as zipf:
+                zipf.extractall(temp_dir)
+
+        # Restore database - find the actual database location
+        db_backup = temp_dir / "database" / "olt_manager.db"
+        if db_backup.exists():
+            # Find actual database location
+            db_target = None
+            db_paths = [
+                Path("/opt/olt-manager/olt_manager.db"),  # Compiled binary installation
+                Path("/opt/olt-manager/data/olt_manager.db"),  # Compiled with data folder
+                Path("/root/olt-manager/backend/olt_manager.db"),
+                Path("/opt/olt-manager/backend/olt_manager.db"),
+                Path("/opt/olt-manager/backend/data/olt_manager.db")
+            ]
+            for p in db_paths:
+                if p.exists():
+                    db_target = p
+                    break
+
+            # If no existing db found, use the first path
+            if not db_target:
+                db_target = db_paths[0]
+                db_target.parent.mkdir(parents=True, exist_ok=True)
+
+            # Close current db connections
+            db.close()
+            # Backup current db just in case
+            if db_target.exists():
+                shutil.copy2(db_target, db_target.with_suffix('.db.bak'))
+            # Restore
+            shutil.copy2(db_backup, db_target)
+
+        # Restore config files
+        config_dir = temp_dir / "config"
+        if config_dir.exists():
+            target_config = Path("/etc/olt-manager")
+            target_config.mkdir(exist_ok=True)
+            for f in config_dir.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, target_config / f.name)
+
+        # Restore uploads if present - find actual uploads location
+        uploads_backup = temp_dir / "uploads"
+        if uploads_backup.exists():
+            # Find actual uploads location
+            uploads_target = None
+            upload_paths = [
+                Path("/opt/olt-manager/uploads"),  # Compiled binary installation
+                Path("/root/olt-manager/backend/uploads"),
+                Path("/opt/olt-manager/backend/uploads")
+            ]
+            for p in upload_paths:
+                if p.exists():
+                    uploads_target = p
+                    break
+
+            if not uploads_target:
+                uploads_target = upload_paths[0]
+
+            uploads_target.mkdir(parents=True, exist_ok=True)
+            for f in uploads_backup.rglob("*"):
+                if f.is_file():
+                    target = uploads_target / f.relative_to(uploads_backup)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, target)
+
+        # Cleanup temp directory
+        shutil.rmtree(temp_dir)
+
+        # Re-insert all backup records into the restored database
+        # This ensures backup history is preserved even after restore
+        if db_target and backup_records:
+            try:
+                conn = sqlite3.connect(str(db_target))
+                cursor = conn.cursor()
+
+                # Ensure table exists
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS system_backups (
+                        id INTEGER PRIMARY KEY,
+                        filename VARCHAR(255) NOT NULL,
+                        file_size INTEGER,
+                        backup_type VARCHAR(20) DEFAULT 'manual',
+                        storage_type VARCHAR(20) DEFAULT 'local',
+                        storage_path VARCHAR(500),
+                        includes_db BOOLEAN DEFAULT 1,
+                        includes_config BOOLEAN DEFAULT 1,
+                        includes_uploads BOOLEAN DEFAULT 0,
+                        status VARCHAR(20) DEFAULT 'completed',
+                        error_message VARCHAR(500),
+                        notes VARCHAR(500),
+                        created_by INTEGER,
+                        created_at DATETIME
+                    )
+                ''')
+
+                # Insert or replace backup records
+                for rec in backup_records:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO system_backups
+                        (id, filename, file_size, backup_type, storage_type, storage_path,
+                         includes_db, includes_config, includes_uploads, status,
+                         error_message, notes, created_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        rec['id'], rec['filename'], rec['file_size'], rec['backup_type'],
+                        rec['storage_type'], rec['storage_path'], rec['includes_db'],
+                        rec['includes_config'], rec['includes_uploads'], rec['status'],
+                        rec['error_message'], rec['notes'], rec['created_by'], rec['created_at']
+                    ))
+
+                conn.commit()
+                conn.close()
+            except Exception as sql_err:
+                print(f"Warning: Could not restore backup records: {sql_err}")
+
+        return {
+            "success": True,
+            "message": "Backup restored successfully. Please restart the service for changes to take effect.",
+            "restart_command": "systemctl restart olt-backend"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Restore failed: {str(e)}")
+
+
+@app.delete("/api/system-backups/{backup_id}")
+async def delete_system_backup(
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete a system backup"""
+    backup = db.query(SystemBackup).filter(SystemBackup.id == backup_id).first()
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    # Delete local file if exists
+    if backup.storage_type == 'local':
+        filepath = Path(f"/opt/olt-manager/backups/{backup.filename}")
+        if filepath.exists():
+            filepath.unlink()
+
+    db.delete(backup)
+    db.commit()
+    return {"success": True, "message": "Backup deleted"}
+
+
+# ============ BACKUP SETTINGS ============
+
+@app.get("/api/backup-settings")
+def get_backup_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Get backup settings"""
+    settings = db.query(BackupSettings).first()
+    if not settings:
+        # Create default settings
+        settings = BackupSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+
+    return {
+        "auto_backup_enabled": settings.auto_backup_enabled,
+        "backup_frequency": settings.backup_frequency,
+        "backup_time": settings.backup_time,
+        "backup_day": settings.backup_day,
+        "retention_days": settings.retention_days,
+        "backup_database": settings.backup_database,
+        "backup_config": settings.backup_config,
+        "backup_uploads": settings.backup_uploads,
+        "storage_type": settings.storage_type,
+        "local_path": settings.local_path,
+        "ftp_host": settings.ftp_host,
+        "ftp_port": settings.ftp_port,
+        "ftp_username": settings.ftp_username,
+        "ftp_password": "***" if settings.ftp_password else None,
+        "ftp_path": settings.ftp_path,
+        "ftp_use_sftp": settings.ftp_use_sftp,
+        "s3_bucket": settings.s3_bucket,
+        "s3_region": settings.s3_region,
+        "s3_access_key": settings.s3_access_key[:8] + "***" if settings.s3_access_key else None,
+        "s3_secret_key": "***" if settings.s3_secret_key else None,
+        "s3_path": settings.s3_path,
+        "last_backup_at": settings.last_backup_at.isoformat() if settings.last_backup_at else None,
+        "last_backup_status": settings.last_backup_status,
+        "next_backup_at": settings.next_backup_at.isoformat() if settings.next_backup_at else None
+    }
+
+
+@app.put("/api/backup-settings")
+def update_backup_settings(
+    auto_backup_enabled: Optional[bool] = Body(None),
+    backup_frequency: Optional[str] = Body(None),
+    backup_time: Optional[str] = Body(None),
+    backup_day: Optional[int] = Body(None),
+    retention_days: Optional[int] = Body(None),
+    backup_database: Optional[bool] = Body(None),
+    backup_config: Optional[bool] = Body(None),
+    backup_uploads: Optional[bool] = Body(None),
+    storage_type: Optional[str] = Body(None),
+    local_path: Optional[str] = Body(None),
+    ftp_host: Optional[str] = Body(None),
+    ftp_port: Optional[int] = Body(None),
+    ftp_username: Optional[str] = Body(None),
+    ftp_password: Optional[str] = Body(None),
+    ftp_path: Optional[str] = Body(None),
+    ftp_use_sftp: Optional[bool] = Body(None),
+    s3_bucket: Optional[str] = Body(None),
+    s3_region: Optional[str] = Body(None),
+    s3_access_key: Optional[str] = Body(None),
+    s3_secret_key: Optional[str] = Body(None),
+    s3_path: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Update backup settings"""
+    settings = db.query(BackupSettings).first()
+    if not settings:
+        settings = BackupSettings()
+        db.add(settings)
+
+    # Update fields if provided
+    if auto_backup_enabled is not None:
+        settings.auto_backup_enabled = auto_backup_enabled
+    if backup_frequency:
+        settings.backup_frequency = backup_frequency
+    if backup_time:
+        settings.backup_time = backup_time
+    if backup_day is not None:
+        settings.backup_day = backup_day
+    if retention_days is not None:
+        settings.retention_days = retention_days
+    if backup_database is not None:
+        settings.backup_database = backup_database
+    if backup_config is not None:
+        settings.backup_config = backup_config
+    if backup_uploads is not None:
+        settings.backup_uploads = backup_uploads
+    if storage_type:
+        settings.storage_type = storage_type
+    if local_path:
+        settings.local_path = local_path
+    if ftp_host is not None:
+        settings.ftp_host = ftp_host
+    if ftp_port is not None:
+        settings.ftp_port = ftp_port
+    if ftp_username is not None:
+        settings.ftp_username = ftp_username
+    if ftp_password and ftp_password != "***":
+        settings.ftp_password = ftp_password
+    if ftp_path is not None:
+        settings.ftp_path = ftp_path
+    if ftp_use_sftp is not None:
+        settings.ftp_use_sftp = ftp_use_sftp
+    if s3_bucket is not None:
+        settings.s3_bucket = s3_bucket
+    if s3_region is not None:
+        settings.s3_region = s3_region
+    if s3_access_key and not s3_access_key.endswith("***"):
+        settings.s3_access_key = s3_access_key
+    if s3_secret_key and s3_secret_key != "***":
+        settings.s3_secret_key = s3_secret_key
+    if s3_path is not None:
+        settings.s3_path = s3_path
+
+    # Calculate next backup time
+    if settings.auto_backup_enabled:
+        settings.next_backup_at = calculate_next_backup_time(settings)
+
+    db.commit()
+    return {"success": True, "message": "Backup settings updated"}
+
+
+def calculate_next_backup_time(settings: BackupSettings) -> datetime:
+    """Calculate the next scheduled backup time"""
+    now = datetime.now()
+    backup_hour, backup_minute = map(int, settings.backup_time.split(':'))
+
+    if settings.backup_frequency == 'hourly':
+        next_time = now.replace(minute=backup_minute, second=0, microsecond=0)
+        if next_time <= now:
+            next_time += timedelta(hours=1)
+    elif settings.backup_frequency == 'daily':
+        next_time = now.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+        if next_time <= now:
+            next_time += timedelta(days=1)
+    elif settings.backup_frequency == 'weekly':
+        next_time = now.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+        days_ahead = (settings.backup_day or 0) - now.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        next_time += timedelta(days=days_ahead)
+    elif settings.backup_frequency == 'monthly':
+        next_time = now.replace(day=settings.backup_day or 1, hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+        if next_time <= now:
+            if now.month == 12:
+                next_time = next_time.replace(year=now.year + 1, month=1)
+            else:
+                next_time = next_time.replace(month=now.month + 1)
+    else:
+        next_time = now + timedelta(days=1)
+
+    return next_time
+
+
+@app.post("/api/backup-settings/test-ftp")
+async def test_ftp_connection(
+    ftp_host: str = Body(...),
+    ftp_port: int = Body(21),
+    ftp_username: str = Body(...),
+    ftp_password: str = Body(...),
+    ftp_path: str = Body("/"),
+    ftp_use_sftp: bool = Body(False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Test FTP/SFTP connection"""
+    try:
+        if ftp_use_sftp:
+            import paramiko
+            transport = paramiko.Transport((ftp_host, ftp_port or 22))
+            transport.connect(username=ftp_username, password=ftp_password)
+            sftp = paramiko.SFTPClient.from_transport(transport)
+            sftp.listdir(ftp_path)
+            sftp.close()
+            transport.close()
+        else:
+            import ftplib
+            ftp = ftplib.FTP()
+            ftp.connect(ftp_host, ftp_port or 21)
+            ftp.login(ftp_username, ftp_password)
+            ftp.cwd(ftp_path)
+            ftp.quit()
+        return {"success": True, "message": "Connection successful"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/backup-settings/test-s3")
+async def test_s3_connection(
+    s3_bucket: str = Body(...),
+    s3_region: str = Body(...),
+    s3_access_key: str = Body(...),
+    s3_secret_key: str = Body(...),
+    s3_path: str = Body("/"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Test AWS S3 connection"""
+    try:
+        import boto3
+        s3 = boto3.client(
+            's3',
+            region_name=s3_region,
+            aws_access_key_id=s3_access_key,
+            aws_secret_access_key=s3_secret_key
+        )
+        # Test by listing bucket contents
+        s3.list_objects_v2(Bucket=s3_bucket, Prefix=s3_path.strip('/'), MaxKeys=1)
+        return {"success": True, "message": "Connection successful"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/system-backups/upload")
+async def upload_backup_file(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Upload a backup file for restore"""
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Only .zip backup files are supported")
+
+    backup_dir = Path("/opt/olt-manager/backups")
+    backup_dir.mkdir(exist_ok=True)
+
+    # Save uploaded file
+    filepath = backup_dir / file.filename
+    with open(filepath, 'wb') as f:
+        content = await file.read()
+        f.write(content)
+
+    # Create backup record
+    backup = SystemBackup(
+        filename=file.filename,
+        file_size=len(content),
+        backup_type='uploaded',
+        storage_type='local',
+        storage_path=str(filepath),
+        includes_db=True,
+        includes_config=True,
+        status='completed',
+        notes='Uploaded for restore',
+        created_by=current_user.id
+    )
+    db.add(backup)
+    db.commit()
+
+    return {
+        "success": True,
+        "backup_id": backup.id,
+        "filename": file.filename,
+        "file_size_mb": round(len(content) / 1024 / 1024, 2)
+    }
+
+
 # ============ FEATURE 7: Scheduled Tasks ============
 
 @app.get("/api/scheduled-tasks")
@@ -6663,6 +7680,195 @@ def mobile_notifications(
             for event in recent_events
         ]
     }
+
+
+# ============ SERVICES MANAGEMENT ============
+
+@app.get("/api/services/status")
+def get_service_status(
+    current_user: User = Depends(require_admin)
+):
+    """Get OLT Manager service status"""
+    import subprocess
+
+    try:
+        # Check olt-manager service status
+        result = subprocess.run(
+            ['systemctl', 'is-active', 'olt-manager'],
+            capture_output=True, text=True, timeout=10
+        )
+        service_status = result.stdout.strip()
+
+        # Get uptime
+        uptime_result = subprocess.run(
+            ['systemctl', 'show', 'olt-manager', '--property=ActiveEnterTimestamp'],
+            capture_output=True, text=True, timeout=10
+        )
+        uptime_line = uptime_result.stdout.strip()
+        service_uptime = uptime_line.split('=')[1] if '=' in uptime_line else None
+
+        # Get system uptime
+        with open('/proc/uptime', 'r') as f:
+            system_uptime_seconds = float(f.read().split()[0])
+
+        # Get memory info
+        mem_result = subprocess.run(
+            ['free', '-m'],
+            capture_output=True, text=True, timeout=10
+        )
+        mem_lines = mem_result.stdout.strip().split('\n')
+        mem_parts = mem_lines[1].split()
+        total_mem = int(mem_parts[1])
+        used_mem = int(mem_parts[2])
+
+        # Get disk info
+        disk_result = subprocess.run(
+            ['df', '-h', '/'],
+            capture_output=True, text=True, timeout=10
+        )
+        disk_lines = disk_result.stdout.strip().split('\n')
+        disk_parts = disk_lines[1].split()
+        disk_total = disk_parts[1]
+        disk_used = disk_parts[2]
+        disk_percent = disk_parts[4]
+
+        return {
+            "service": {
+                "name": "olt-manager",
+                "status": service_status,
+                "uptime": service_uptime
+            },
+            "system": {
+                "uptime_seconds": int(system_uptime_seconds),
+                "uptime_days": round(system_uptime_seconds / 86400, 1),
+                "memory_total_mb": total_mem,
+                "memory_used_mb": used_mem,
+                "memory_percent": round(used_mem / total_mem * 100, 1),
+                "disk_total": disk_total,
+                "disk_used": disk_used,
+                "disk_percent": disk_percent
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting service status: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/services/restart")
+def restart_service(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Restart OLT Manager service"""
+    import subprocess
+
+    try:
+        # Log the action
+        log_event(db, 'service_restart', 'system', None, None,
+                 f"Service restart initiated by {current_user.username}")
+
+        # Schedule restart in background (give time for response)
+        subprocess.Popen(
+            ['bash', '-c', 'sleep 2 && systemctl restart olt-manager'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        return {
+            "success": True,
+            "message": "Service restart initiated. Please wait 10-15 seconds and refresh."
+        }
+    except Exception as e:
+        logger.error(f"Error restarting service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/services/reboot-server")
+def reboot_server(
+    delay: int = Body(default=5, ge=1, le=60),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Reboot the server"""
+    import subprocess
+
+    try:
+        # Log the action
+        log_event(db, 'server_reboot', 'system', None, None,
+                 f"Server reboot initiated by {current_user.username}")
+
+        # Schedule reboot
+        subprocess.Popen(
+            ['bash', '-c', f'sleep {delay} && reboot'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        return {
+            "success": True,
+            "message": f"Server will reboot in {delay} seconds."
+        }
+    except Exception as e:
+        logger.error(f"Error initiating reboot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/services/stop")
+def stop_service(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Stop OLT Manager service"""
+    import subprocess
+
+    try:
+        # Log the action
+        log_event(db, 'service_stop', 'system', None, None,
+                 f"Service stop initiated by {current_user.username}")
+
+        # Schedule stop in background
+        subprocess.Popen(
+            ['bash', '-c', 'sleep 2 && systemctl stop olt-manager'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        return {
+            "success": True,
+            "message": "Service stop initiated."
+        }
+    except Exception as e:
+        logger.error(f"Error stopping service: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Catch-all route to serve React frontend (must be LAST)
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """Serve React frontend for non-API routes"""
+    from fastapi.responses import FileResponse, HTMLResponse
+
+    # Skip API routes
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # Use the global STATIC_DIR found at startup
+    if not STATIC_DIR:
+        raise HTTPException(status_code=404, detail="Frontend not configured")
+
+    index_file = os.path.join(STATIC_DIR, "index.html")
+
+    # Try to serve the exact file first (for assets like favicon, manifest, etc.)
+    if full_path:
+        file_path = os.path.join(STATIC_DIR, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+
+    # Otherwise serve index.html for SPA routing
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
+
+    raise HTTPException(status_code=404, detail="Frontend not found")
 
 
 if __name__ == "__main__":

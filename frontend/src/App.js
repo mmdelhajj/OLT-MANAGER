@@ -1678,6 +1678,9 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
   const [tunnelLoading, setTunnelLoading] = useState(false);
   const [tunnelError, setTunnelError] = useState(null);
 
+  // Version state
+  const [currentVersion, setCurrentVersion] = useState(null);
+
   // Update activeTab when defaultTab changes (when modal opens with specific tab)
   useEffect(() => {
     if (isOpen) {
@@ -1685,13 +1688,14 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
     }
   }, [isOpen, defaultTab]);
 
-  // Check if this is dev server
+  // Check if this is dev server and get current version
   useEffect(() => {
     const checkDevServer = async () => {
       try {
         const response = await api.getDevStatus();
         setIsDevServer(response.data.is_dev_server);
         if (response.data.current_version) {
+          setCurrentVersion(response.data.current_version);
           // Suggest next version
           const parts = response.data.current_version.split('.');
           parts[2] = parseInt(parts[2] || 0) + 1;
@@ -1699,6 +1703,13 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         }
       } catch (error) {
         setIsDevServer(false);
+        // Try to get version from update check
+        try {
+          const updateResponse = await api.checkForUpdates();
+          if (updateResponse.data.current_version) {
+            setCurrentVersion(updateResponse.data.current_version);
+          }
+        } catch {}
       }
     };
     checkDevServer();
@@ -2017,6 +2028,28 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       {activeTab === 'general' && (
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
+            {/* Version Display */}
+            <div className={`p-4 rounded-xl border ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-gray-50 border-gray-200'}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center mr-3 ${darkMode ? 'bg-blue-600' : 'bg-blue-500'}`}>
+                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Software Version</p>
+                    <p className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
+                      {currentVersion ? `v${currentVersion}` : 'Loading...'}
+                    </p>
+                  </div>
+                </div>
+                <div className={`px-3 py-1 rounded-full text-xs font-medium ${darkMode ? 'bg-green-900/50 text-green-400' : 'bg-green-100 text-green-700'}`}>
+                  Active
+                </div>
+              </div>
+            </div>
+
             <div>
               <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>System Name</label>
               <input
@@ -2338,12 +2371,40 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
 
           {/* License Details */}
           <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
-            <h4 className={`font-medium mb-4 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
-              <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              License Details
-            </h4>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className={`font-medium flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
+                <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                License Details
+              </h4>
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/license/refresh', {
+                      method: 'POST',
+                      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                      window.location.reload();
+                    } else {
+                      alert('Failed to refresh: ' + data.message);
+                    }
+                  } catch (e) {
+                    alert('Error refreshing license');
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1 ${
+                  darkMode ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Refresh License
+              </button>
+            </div>
             <div className="space-y-3">
               <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
                 <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>License Key</span>
@@ -2363,18 +2424,21 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               </div>
               <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
                 <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Expires</span>
-                <span className={`font-medium ${darkMode ? 'text-white' : ''}`}>
-                  {licenseInfo?.expires_at ? new Date(licenseInfo.expires_at).toLocaleDateString() : 'Never'}
+                <span className={`font-medium ${licenseInfo?.is_lifetime || licenseInfo?.days_remaining >= 99999 ? 'text-purple-500' : darkMode ? 'text-white' : ''}`}>
+                  {licenseInfo?.is_lifetime || licenseInfo?.days_remaining >= 99999 ? '♾️ Lifetime' :
+                   licenseInfo?.expires_at ? new Date(licenseInfo.expires_at).toLocaleDateString() : 'Never'}
                 </span>
               </div>
               <div className={`flex justify-between items-center py-2 border-b ${darkMode ? 'border-slate-600' : 'border-gray-100'}`}>
                 <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Days Remaining</span>
                 <span className={`font-bold text-lg ${
+                  licenseInfo?.is_lifetime || licenseInfo?.days_remaining >= 99999 ? 'text-purple-500' :
                   licenseInfo?.days_remaining <= 7 ? 'text-red-600' :
                   licenseInfo?.days_remaining <= 30 ? 'text-yellow-600' :
                   'text-green-600'
                 }`}>
-                  {licenseInfo?.days_remaining !== undefined ?
+                  {licenseInfo?.is_lifetime || licenseInfo?.days_remaining >= 99999 ? '♾️ Unlimited' :
+                   licenseInfo?.days_remaining !== undefined ?
                     (licenseInfo.days_remaining < 0 ? 'Expired' :
                      licenseInfo.days_remaining === 0 ? 'Expires Today' :
                      `${licenseInfo.days_remaining} days`) :
@@ -2435,7 +2499,8 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
             </div>
           </div>
 
-          {/* Check for Updates */}
+          {/* Check for Updates - Only show on customer servers, not dev server */}
+          {!isDevServer && (
           <div className={`border rounded-xl p-4 ${darkMode ? 'bg-slate-700 border-slate-600' : 'bg-white border-gray-200'}`}>
             <h4 className={`font-medium mb-4 flex items-center ${darkMode ? 'text-slate-200' : 'text-gray-700'}`}>
               <svg className={`w-5 h-5 mr-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2556,6 +2621,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
               )}
             </button>
           </div>
+          )}
 
           {/* Dev Server: Publish Update Section */}
           {isDevServer && (
@@ -6298,18 +6364,1783 @@ function SplitterSimulator({ olts = [], onus = [] }) {
     </div>
   );
 }
+
+// Map Page Component - GPS View with Leaflet
+function MapPage({ onus, regions, olts, darkMode, onSelectONU }) {
+  const [selectedRegion, setSelectedRegion] = useState(null);
+  const [mapOnus, setMapOnus] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measureStart, setMeasureStart] = useState(null); // {lat, lng, name}
+  const [measureEnd, setMeasureEnd] = useState(null);
+  const [distance, setDistance] = useState(null);
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+  const measureLineRef = useRef(null);
+  const measureMarkerRef = useRef(null);
+  const measureModeRef = useRef(false);
+  const measureStartRef = useRef(null);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    measureModeRef.current = measureMode;
+  }, [measureMode]);
+
+  useEffect(() => {
+    measureStartRef.current = measureStart;
+  }, [measureStart]);
+
+  // Calculate distance between two points in meters (Haversine formula)
+  const calculateDistance = (lat1, lng1, lat2, lng2) => {
+    const R = 6371000; // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLng/2) * Math.sin(dLng/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
+
+  // Clear measurement
+  const clearMeasurement = () => {
+    setMeasureStart(null);
+    setMeasureEnd(null);
+    setDistance(null);
+    if (measureLineRef.current) {
+      measureLineRef.current.remove();
+      measureLineRef.current = null;
+    }
+    if (measureMarkerRef.current) {
+      measureMarkerRef.current.remove();
+      measureMarkerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    // Filter ONUs with location data
+    const onusWithLocation = onus.filter(o => o.latitude && o.longitude);
+    setMapOnus(onusWithLocation);
+    setLoading(false);
+  }, [onus]);
+
+  // Fix map size on initial mount and page refresh
+  useEffect(() => {
+    const timers = [100, 300, 500, 1000].map(delay =>
+      setTimeout(() => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      }, delay)
+    );
+
+    return () => timers.forEach(t => clearTimeout(t));
+  }, [loading]);
+
+  const filteredOnus = selectedRegion
+    ? mapOnus.filter(o => o.region_id === selectedRegion)
+    : mapOnus;
+
+  // Initialize Leaflet map
+  useEffect(() => {
+    if (loading || !mapRef.current || typeof window.L === 'undefined') return;
+
+    // Calculate center from ONUs
+    let center = [34.43, 35.84]; // Default Lebanon
+    if (filteredOnus.length > 0) {
+      const avgLat = filteredOnus.reduce((sum, o) => sum + o.latitude, 0) / filteredOnus.length;
+      const avgLng = filteredOnus.reduce((sum, o) => sum + o.longitude, 0) / filteredOnus.length;
+      center = [avgLat, avgLng];
+    }
+
+    // Create map if not exists
+    if (!mapInstanceRef.current) {
+      mapInstanceRef.current = window.L.map(mapRef.current).setView(center, 13);
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(mapInstanceRef.current);
+
+      // Fix for map size issue on page refresh - invalidate size after render
+      setTimeout(() => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      }, 100);
+
+      // Also fix on window resize
+      const handleResize = () => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      };
+      window.addEventListener('resize', handleResize);
+    } else {
+      mapInstanceRef.current.setView(center, 13);
+      // Invalidate size when switching back to map
+      setTimeout(() => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      }, 50);
+    }
+
+    // Add map click handler for distance measurement (only once)
+    if (!mapInstanceRef.current._measureClickHandler) {
+      mapInstanceRef.current._measureClickHandler = (e) => {
+        if (measureModeRef.current && measureStartRef.current) {
+          const startPoint = measureStartRef.current;
+          const endPoint = { lat: e.latlng.lat, lng: e.latlng.lng };
+          setMeasureEnd(endPoint);
+
+          // Calculate distance
+          const dist = calculateDistance(startPoint.lat, startPoint.lng, endPoint.lat, endPoint.lng);
+          setDistance(dist);
+
+          // Draw line
+          if (measureLineRef.current) {
+            measureLineRef.current.remove();
+          }
+          measureLineRef.current = window.L.polyline(
+            [[startPoint.lat, startPoint.lng], [endPoint.lat, endPoint.lng]],
+            { color: '#3B82F6', weight: 3, dashArray: '10, 10' }
+          ).addTo(mapInstanceRef.current);
+
+          // Add end marker
+          if (measureMarkerRef.current) {
+            measureMarkerRef.current.remove();
+          }
+          measureMarkerRef.current = window.L.marker([endPoint.lat, endPoint.lng], {
+            icon: window.L.divIcon({
+              className: 'measure-marker',
+              html: `<div style="background: #3B82F6; color: white; padding: 4px 8px; border-radius: 8px; font-size: 11px; font-weight: 600; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.3); border: 2px solid white;">📍 ${dist >= 1000 ? (dist/1000).toFixed(2) + ' km' : Math.round(dist) + ' m'}</div>`,
+              iconSize: [100, 30],
+              iconAnchor: [50, 15]
+            })
+          }).addTo(mapInstanceRef.current);
+        }
+      };
+      mapInstanceRef.current.on('click', mapInstanceRef.current._measureClickHandler);
+    }
+
+    // Clear old markers
+    markersRef.current.forEach(m => m.remove());
+    markersRef.current = [];
+
+    // Add markers for each ONU
+    filteredOnus.forEach(onu => {
+      const isOnline = onu.is_online;
+
+      // Create custom icon with ONU name
+      const customIcon = window.L.divIcon({
+        className: 'custom-marker',
+        html: `
+          <div style="position: relative; text-align: center;">
+            <div style="
+              background: ${isOnline ? '#10B981' : '#EF4444'};
+              color: white;
+              padding: 4px 8px;
+              border-radius: 12px;
+              font-size: 11px;
+              font-weight: 600;
+              white-space: nowrap;
+              box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+              border: 2px solid white;
+            ">${onu.description || onu.mac_address?.slice(-8) || 'ONU'}</div>
+            <div style="
+              width: 0;
+              height: 0;
+              border-left: 8px solid transparent;
+              border-right: 8px solid transparent;
+              border-top: 10px solid ${isOnline ? '#10B981' : '#EF4444'};
+              margin: 0 auto;
+            "></div>
+          </div>
+        `,
+        iconSize: [100, 40],
+        iconAnchor: [50, 40],
+        popupAnchor: [0, -40]
+      });
+
+      const marker = window.L.marker([onu.latitude, onu.longitude], { icon: customIcon })
+        .addTo(mapInstanceRef.current);
+
+      // Create popup content
+      const popupContent = `
+        <div style="min-width: 200px; font-family: Inter, sans-serif;">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px; color: #111827;">
+            ${onu.description || 'No Name'}
+          </div>
+          <div style="font-size: 12px; color: #6B7280; line-height: 1.6;">
+            <div><strong>MAC:</strong> ${onu.mac_address}</div>
+            <div><strong>OLT:</strong> ${onu.olt_name || 'N/A'}</div>
+            <div><strong>PON:</strong> ${onu.pon_port} / ONU: ${onu.onu_id}</div>
+            <div><strong>Signal:</strong> <span style="color: ${onu.rx_power > -25 ? '#10B981' : '#F59E0B'}">${onu.rx_power || 'N/A'} dBm</span></div>
+            <div><strong>Distance:</strong> ${onu.distance || 'N/A'}m</div>
+            <div><strong>Status:</strong> <span style="color: ${isOnline ? '#10B981' : '#EF4444'}">${isOnline ? 'Online' : 'Offline'}</span></div>
+            ${onu.address ? `<div style="margin-top: 4px;"><strong>Address:</strong> ${onu.address}</div>` : ''}
+            ${onu.region_name ? `<div><strong>Region:</strong> ${onu.region_name}</div>` : ''}
+          </div>
+          <div style="margin-top: 10px; display: flex; gap: 8px;">
+            <a href="${onu.google_maps_url || `https://www.google.com/maps?q=${onu.latitude},${onu.longitude}`}"
+               target="_blank"
+               style="background: #3B82F6; color: white; padding: 6px 12px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: 500;">
+              Google Maps
+            </a>
+          </div>
+        </div>
+      `;
+
+      marker.bindPopup(popupContent);
+      marker.on('click', () => {
+        if (measureModeRef.current) {
+          // Set this ONU as start point for measurement
+          clearMeasurement();
+          setMeasureStart({
+            lat: onu.latitude,
+            lng: onu.longitude,
+            name: onu.description || onu.mac_address?.slice(-8) || 'ONU'
+          });
+        } else {
+          if (onSelectONU) onSelectONU(onu);
+        }
+      });
+
+      markersRef.current.push(marker);
+    });
+
+    // Fit bounds if multiple markers
+    if (filteredOnus.length > 1) {
+      const bounds = window.L.latLngBounds(filteredOnus.map(o => [o.latitude, o.longitude]));
+      mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
+    }
+
+  }, [filteredOnus, loading]);
+
+  return (
+    <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+      <div className={`p-4 border-b flex justify-between items-center ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+        <div className="flex items-center gap-3">
+          <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+          </svg>
+          <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>ONU Map View</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Measure Distance Button */}
+          <button
+            onClick={() => {
+              if (measureMode) {
+                setMeasureMode(false);
+                clearMeasurement();
+              } else {
+                setMeasureMode(true);
+              }
+            }}
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              measureMode
+                ? 'bg-blue-500 text-white'
+                : (darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-gray-700 hover:bg-gray-200')
+            }`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+            {measureMode ? 'Exit Measure' : 'Measure Distance'}
+          </button>
+
+          {/* Distance Display */}
+          {measureMode && measureStart && (
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${darkMode ? 'bg-blue-900/50 text-blue-300' : 'bg-blue-50 text-blue-700'}`}>
+              {distance !== null ? (
+                <>
+                  <span className="font-medium">{measureStart.name}</span>
+                  <span>→</span>
+                  <span className="font-bold">{distance >= 1000 ? (distance/1000).toFixed(2) + ' km' : Math.round(distance) + ' m'}</span>
+                </>
+              ) : (
+                <span>Click on map to measure from <strong>{measureStart.name}</strong></span>
+              )}
+            </div>
+          )}
+
+          <select
+            value={selectedRegion || ''}
+            onChange={(e) => setSelectedRegion(e.target.value ? parseInt(e.target.value) : null)}
+            className={`px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+          >
+            <option value="">All Regions</option>
+            {regions.map(r => (
+              <option key={r.id} value={r.id}>{r.name}</option>
+            ))}
+          </select>
+          <span className={`px-3 py-1 rounded-full text-sm ${darkMode ? 'bg-slate-700 text-slate-300' : 'bg-gray-100 text-gray-600'}`}>
+            {filteredOnus.length} ONUs with location
+          </span>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="h-[600px] flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        </div>
+      ) : mapOnus.length === 0 ? (
+        <div className="h-[600px] flex flex-col items-center justify-center text-gray-500">
+          <svg className="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          <p className="text-lg font-medium">No ONUs with Location Data</p>
+          <p className="text-sm mt-2">Edit ONUs to add their GPS coordinates</p>
+        </div>
+      ) : (
+        <div style={{ height: 'calc(100vh - 200px)', minHeight: '400px' }} className="flex flex-col">
+          {/* Leaflet Map Container */}
+          <div className="flex-1 relative">
+            <div ref={mapRef} style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }} />
+
+            {/* Legend */}
+            <div className={`absolute bottom-4 left-4 p-3 rounded-lg shadow-lg z-[1000] ${darkMode ? 'bg-slate-800/95 border border-slate-700' : 'bg-white/95'}`}>
+              <div className="flex items-center gap-4 text-xs">
+                <div className="flex items-center gap-1">
+                  <div className="w-3 h-3 rounded-full bg-green-500"></div>
+                  <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Online</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                  <span className={darkMode ? 'text-slate-300' : 'text-gray-600'}>Offline</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Reports Page Component
+function ReportsPage({ darkMode, token }) {
+  const [reportType, setReportType] = useState('onus');
+  const [format, setFormat] = useState('excel');
+  const [loading, setLoading] = useState(false);
+  const [signalReport, setSignalReport] = useState(null);
+  const [loadingSignal, setLoadingSignal] = useState(false);
+
+  const downloadReport = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/reports/${reportType}?format=${format}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (format === 'json') {
+        const data = await response.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${reportType}_report.json`;
+        a.click();
+      } else {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${reportType}_report.${format === 'excel' ? 'xlsx' : 'csv'}`;
+        a.click();
+      }
+    } catch (error) {
+      console.error('Download failed:', error);
+    }
+    setLoading(false);
+  };
+
+  const loadSignalReport = async () => {
+    setLoadingSignal(true);
+    try {
+      const response = await fetch('/api/reports/signal-quality', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setSignalReport(data);
+    } catch (error) {
+      console.error('Failed to load signal report:', error);
+    }
+    setLoadingSignal(false);
+  };
+
+  useEffect(() => {
+    loadSignalReport();
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      {/* Download Reports Section */}
+      <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+        <div className={`p-4 border-b ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+          <div className="flex items-center gap-3">
+            <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Download Reports</h2>
+          </div>
+        </div>
+        <div className="p-6">
+          <div className="flex flex-wrap items-center gap-4">
+            <div>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Report Type</label>
+              <select
+                value={reportType}
+                onChange={(e) => setReportType(e.target.value)}
+                className={`px-4 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+              >
+                <option value="onus">All ONUs</option>
+                <option value="signal-quality">Signal Quality</option>
+              </select>
+            </div>
+            <div>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Format</label>
+              <select
+                value={format}
+                onChange={(e) => setFormat(e.target.value)}
+                className={`px-4 py-2 rounded-lg border ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+              >
+                <option value="excel">Excel (.xlsx)</option>
+                <option value="csv">CSV</option>
+                <option value="json">JSON</option>
+              </select>
+            </div>
+            <div className="pt-6">
+              <button
+                onClick={downloadReport}
+                disabled={loading}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {loading ? (
+                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                )}
+                Download Report
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Signal Quality Report */}
+      <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+        <div className={`p-4 border-b flex justify-between items-center ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+          <div className="flex items-center gap-3">
+            <svg className="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Signal Quality Alerts</h2>
+          </div>
+          <button
+            onClick={loadSignalReport}
+            className={`px-3 py-1 rounded-lg text-sm ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+          >
+            Refresh
+          </button>
+        </div>
+        <div className="p-4">
+          {loadingSignal ? (
+            <div className="flex justify-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+          ) : signalReport ? (
+            <div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+                <div className={`p-4 rounded-lg ${darkMode ? 'bg-orange-900/30' : 'bg-orange-50'}`}>
+                  <p className="text-2xl font-bold text-orange-500">{signalReport.total_low_signal || 0}</p>
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Low Signal ONUs</p>
+                </div>
+                <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-700' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>{signalReport.threshold || -25} dBm</p>
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Warning Threshold</p>
+                </div>
+                <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-700' : 'bg-gray-50'}`}>
+                  <p className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{new Date(signalReport.generated_at).toLocaleString()}</p>
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Generated At</p>
+                </div>
+              </div>
+
+              {signalReport.onus && signalReport.onus.length > 0 ? (
+                <div>
+                  <h3 className={`font-semibold mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                    Problem ONUs ({signalReport.onus.length})
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className={`min-w-full divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+                      <thead className={darkMode ? 'bg-slate-700' : 'bg-gray-50'}>
+                        <tr>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>ONU</th>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>MAC</th>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>OLT</th>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>RX Power</th>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Distance</th>
+                          <th className={`px-4 py-2 text-left text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+                        {signalReport.onus.slice(0, 20).map((onu, idx) => (
+                          <tr key={idx} className={darkMode ? 'hover:bg-slate-700' : 'hover:bg-gray-50'}>
+                            <td className={`px-4 py-2 text-sm ${darkMode ? 'text-white' : 'text-gray-800'}`}>{onu.description || '-'}</td>
+                            <td className={`px-4 py-2 text-sm font-mono ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{onu.mac_address}</td>
+                            <td className={`px-4 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{onu.olt_name}</td>
+                            <td className="px-4 py-2 text-sm">
+                              <span className={onu.rx_power < -28 ? 'text-red-500 font-semibold' : 'text-orange-500'}>
+                                {onu.rx_power} dBm
+                              </span>
+                            </td>
+                            <td className={`px-4 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{onu.distance}m</td>
+                            <td className="px-4 py-2">
+                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
+                                onu.severity === 'critical' ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'
+                              }`}>
+                                {onu.severity}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <svg className="w-16 h-16 mx-auto mb-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <p className={`text-lg font-medium ${darkMode ? 'text-green-400' : 'text-green-600'}`}>All ONUs have good signal!</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className={`text-center py-8 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>No signal data available</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Events Page Component
+function EventsPage({ darkMode, token, olts }) {
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filters, setFilters] = useState({ eventType: '', oltId: '', limit: 100 });
+  const [pagination, setPagination] = useState({ total: 0, skip: 0 });
+
+  const loadEvents = async () => {
+    setLoading(true);
+    try {
+      let url = `/api/events?limit=${filters.limit}&skip=${pagination.skip}`;
+      if (filters.eventType) url += `&event_type=${filters.eventType}`;
+      if (filters.oltId) url += `&olt_id=${filters.oltId}`;
+
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setEvents(data.events || []);
+      setPagination({ ...pagination, total: data.total || 0 });
+    } catch (error) {
+      console.error('Failed to load events:', error);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadEvents();
+  }, [filters, pagination.skip]);
+
+  const eventTypeColors = {
+    'onu_online': 'bg-green-100 text-green-800',
+    'onu_offline': 'bg-red-100 text-red-800',
+    'olt_online': 'bg-blue-100 text-blue-800',
+    'olt_offline': 'bg-orange-100 text-orange-800',
+    'signal_warning': 'bg-yellow-100 text-yellow-800',
+    'signal_critical': 'bg-red-100 text-red-800',
+    'config_change': 'bg-purple-100 text-purple-800',
+  };
+
+  return (
+    <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+      <div className={`p-4 border-b ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Event History</h2>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <select
+              value={filters.eventType}
+              onChange={(e) => setFilters({ ...filters, eventType: e.target.value })}
+              className={`px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+            >
+              <option value="">All Events</option>
+              <option value="onu_online">ONU Online</option>
+              <option value="onu_offline">ONU Offline</option>
+              <option value="olt_online">OLT Online</option>
+              <option value="olt_offline">OLT Offline</option>
+              <option value="signal_warning">Signal Warning</option>
+              <option value="signal_critical">Signal Critical</option>
+            </select>
+            <select
+              value={filters.oltId}
+              onChange={(e) => setFilters({ ...filters, oltId: e.target.value })}
+              className={`px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+            >
+              <option value="">All OLTs</option>
+              {olts.map(olt => (
+                <option key={olt.id} value={olt.id}>{olt.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={loadEvents}
+              className={`px-3 py-2 rounded-lg text-sm ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        {loading ? (
+          <div className="flex justify-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+          </div>
+        ) : events.length === 0 ? (
+          <div className="text-center py-12">
+            <svg className="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className={`${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>No events found</p>
+          </div>
+        ) : (
+          <table className={`min-w-full divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+            <thead className={darkMode ? 'bg-slate-700' : 'bg-gray-50'}>
+              <tr>
+                <th className={`px-4 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Time</th>
+                <th className={`px-4 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Type</th>
+                <th className={`px-4 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Entity</th>
+                <th className={`px-4 py-3 text-left text-xs font-semibold uppercase ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Description</th>
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${darkMode ? 'divide-slate-700' : 'divide-gray-200'}`}>
+              {events.map((event) => (
+                <tr key={event.id} className={darkMode ? 'hover:bg-slate-700' : 'hover:bg-gray-50'}>
+                  <td className={`px-4 py-3 text-sm whitespace-nowrap ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                    {new Date(event.created_at).toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`px-2 py-1 rounded-full text-xs font-semibold ${eventTypeColors[event.event_type] || 'bg-gray-100 text-gray-800'}`}>
+                      {event.event_type.replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td className={`px-4 py-3 text-sm ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                    {event.entity_type} #{event.entity_id}
+                  </td>
+                  <td className={`px-4 py-3 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                    {event.description}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {pagination.total > filters.limit && (
+        <div className={`p-4 border-t flex justify-between items-center ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
+          <span className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+            Showing {pagination.skip + 1} - {Math.min(pagination.skip + filters.limit, pagination.total)} of {pagination.total}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPagination({ ...pagination, skip: Math.max(0, pagination.skip - filters.limit) })}
+              disabled={pagination.skip === 0}
+              className={`px-3 py-1 rounded text-sm disabled:opacity-50 ${darkMode ? 'bg-slate-700 text-white' : 'bg-gray-100 text-gray-700'}`}
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPagination({ ...pagination, skip: pagination.skip + filters.limit })}
+              disabled={pagination.skip + filters.limit >= pagination.total}
+              className={`px-3 py-1 rounded text-sm disabled:opacity-50 ${darkMode ? 'bg-slate-700 text-white' : 'bg-gray-100 text-gray-700'}`}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Services Tab Component - Service Management
+function ServicesTab({ darkMode }) {
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [restarting, setRestarting] = useState(false);
+  const [rebooting, setRebooting] = useState(false);
+  const [showRebootConfirm, setShowRebootConfirm] = useState(false);
+
+  const borderClass = darkMode ? 'border-slate-700' : 'border-gray-200';
+
+  const loadStatus = async () => {
+    try {
+      const response = await fetch('/api/services/status', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      const data = await response.json();
+      setStatus(data);
+    } catch (err) {
+      console.error('Error loading service status:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadStatus();
+    const interval = setInterval(loadStatus, 30000); // Refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  const restartService = async () => {
+    if (!window.confirm('Are you sure you want to restart the OLT Manager service?')) return;
+    setRestarting(true);
+    try {
+      const response = await fetch('/api/services/restart', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      const data = await response.json();
+      if (data.success) {
+        alert(data.message);
+        // Wait and reload
+        setTimeout(() => window.location.reload(), 15000);
+      }
+    } catch (err) {
+      alert('Error: ' + err.message);
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  const rebootServer = async () => {
+    setShowRebootConfirm(false);
+    setRebooting(true);
+    try {
+      const response = await fetch('/api/services/reboot-server', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ delay: 5 })
+      });
+      const data = await response.json();
+      if (data.success) {
+        alert(data.message + '\n\nThe page will become unavailable. Please wait and refresh manually.');
+      }
+    } catch (err) {
+      alert('Error: ' + err.message);
+    } finally {
+      setRebooting(false);
+    }
+  };
+
+  const formatUptime = (seconds) => {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h ${mins}m`;
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-12">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* Service Status Card */}
+      <div className={`p-6 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-700/50' : 'bg-gray-50'}`}>
+        <h3 className={`text-lg font-semibold mb-4 ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+          Service Status
+        </h3>
+
+        {status?.service && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${borderClass}`}>
+              <div className="flex items-center gap-3">
+                <div className={`w-3 h-3 rounded-full ${status.service.status === 'active' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                <div>
+                  <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>OLT Manager</p>
+                  <p className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                    {status.service.status === 'active' ? 'Running' : status.service.status}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${borderClass}`}>
+              <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>System Uptime</p>
+              <p className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                {status.system ? formatUptime(status.system.uptime_seconds) : 'N/A'}
+              </p>
+            </div>
+
+            <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${borderClass}`}>
+              <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Memory Usage</p>
+              <p className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                {status.system ? `${status.system.memory_percent}%` : 'N/A'}
+                <span className={`text-sm font-normal ml-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                  ({status.system?.memory_used_mb || 0} / {status.system?.memory_total_mb || 0} MB)
+                </span>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status?.system && (
+          <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${borderClass}`}>
+            <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Disk Usage</p>
+            <div className="flex items-center gap-4 mt-1">
+              <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full"
+                  style={{ width: status.system.disk_percent }}
+                ></div>
+              </div>
+              <span className={`font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                {status.system.disk_used} / {status.system.disk_total}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Service Actions Card */}
+      <div className={`p-6 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-700/50' : 'bg-gray-50'}`}>
+        <h3 className={`text-lg font-semibold mb-4 ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+          Service Actions
+        </h3>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Restart Service */}
+          <div className={`p-4 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-lg bg-yellow-100 flex items-center justify-center flex-shrink-0">
+                <svg className="w-6 h-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h4 className={`font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>Restart Service</h4>
+                <p className={`text-sm mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                  Restart the OLT Manager service. The web interface will be briefly unavailable.
+                </p>
+                <button
+                  onClick={restartService}
+                  disabled={restarting}
+                  className="mt-3 px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {restarting ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  )}
+                  Restart Service
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Reboot Server */}
+          <div className={`p-4 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0">
+                <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h4 className={`font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>Reboot Server</h4>
+                <p className={`text-sm mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                  Reboot the entire server. All services will be unavailable during restart.
+                </p>
+                <button
+                  onClick={() => setShowRebootConfirm(true)}
+                  disabled={rebooting}
+                  className="mt-3 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {rebooting ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                  )}
+                  Reboot Server
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Reboot Confirmation Modal */}
+      {showRebootConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className={`w-full max-w-md rounded-xl p-6 ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center">
+                <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Confirm Server Reboot</h3>
+                <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>This action cannot be undone</p>
+              </div>
+            </div>
+            <p className={`mb-6 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+              Are you sure you want to reboot the server? All services will be unavailable for 1-2 minutes during the restart.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowRebootConfirm(false)}
+                className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-white hover:bg-slate-600' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'}`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={rebootServer}
+                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+              >
+                Yes, Reboot Server
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Backups Page Component (Admin Only) - Professional Backup System
+function BackupsPage({ darkMode, token, olts }) {
+  const [activeTab, setActiveTab] = useState('system'); // 'system', 'olt', 'settings'
+  const [systemBackups, setSystemBackups] = useState([]);
+  const [oltBackups, setOltBackups] = useState([]);
+  const [settings, setSettings] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [restoring, setRestoring] = useState(null);
+  const [selectedOlt, setSelectedOlt] = useState('');
+  const [includeUploads, setIncludeUploads] = useState(false);
+  const [uploadTo, setUploadTo] = useState('local');
+  const [showSettings, setShowSettings] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+
+  const loadSystemBackups = async () => {
+    try {
+      const response = await fetch('/api/system-backups', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setSystemBackups(data.backups || []);
+    } catch (error) {
+      console.error('Failed to load system backups:', error);
+    }
+  };
+
+  const loadOltBackups = async () => {
+    try {
+      const response = await fetch('/api/backups', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setOltBackups(data.backups || []);
+    } catch (error) {
+      console.error('Failed to load OLT backups:', error);
+    }
+  };
+
+  const loadSettings = async () => {
+    try {
+      const response = await fetch('/api/backup-settings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setSettings(data);
+      }
+    } catch (error) {
+      console.error('Failed to load backup settings:', error);
+    }
+  };
+
+  useEffect(() => {
+    const loadData = async () => {
+      setLoading(true);
+      await Promise.all([loadSystemBackups(), loadOltBackups(), loadSettings()]);
+      setLoading(false);
+    };
+    loadData();
+  }, []);
+
+  const createSystemBackup = async () => {
+    setCreating(true);
+    try {
+      const response = await fetch('/api/system-backups', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          include_uploads: includeUploads,
+          upload_to: uploadTo !== 'local' ? uploadTo : null,
+          notes: `Manual backup - ${new Date().toLocaleString()}`
+        })
+      });
+      const result = await response.json();
+      if (result.success) {
+        alert('Backup created successfully!');
+        loadSystemBackups();
+      } else {
+        alert('Backup failed: ' + (result.error || 'Unknown error'));
+      }
+    } catch (error) {
+      console.error('Failed to create backup:', error);
+      alert('Failed to create backup');
+    }
+    setCreating(false);
+  };
+
+  const createOltBackup = async () => {
+    if (!selectedOlt) return alert('Please select an OLT');
+    setCreating(true);
+    try {
+      const response = await fetch(`/api/backups/${selectedOlt}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ notes: `Manual backup - ${new Date().toLocaleString()}` })
+      });
+      if (response.ok) {
+        loadOltBackups();
+      }
+    } catch (error) {
+      console.error('Failed to create OLT backup:', error);
+    }
+    setCreating(false);
+  };
+
+  const downloadBackup = async (backupId, filename, isSystem = true) => {
+    try {
+      const endpoint = isSystem ? `/api/system-backups/${backupId}/download` : `/api/backups/${backupId}/download`;
+      const response = await fetch(endpoint, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'Download failed');
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+    } catch (error) {
+      alert('Download failed: ' + error.message);
+    }
+  };
+
+  const restoreBackup = async (backupId) => {
+    if (!window.confirm('Are you sure you want to restore this backup? This will overwrite current data. The service will need to be restarted after restore.')) return;
+    setRestoring(backupId);
+    try {
+      const response = await fetch(`/api/system-backups/${backupId}/restore`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const result = await response.json();
+      if (result.success) {
+        alert('Backup restored successfully!\n\nPlease restart the service:\n' + result.restart_command);
+      } else {
+        alert('Restore failed: ' + (result.detail || 'Unknown error'));
+      }
+    } catch (error) {
+      alert('Restore failed: ' + error.message);
+    }
+    setRestoring(null);
+  };
+
+  const deleteBackup = async (backupId, isSystem = true) => {
+    if (!window.confirm('Delete this backup permanently?')) return;
+    try {
+      const endpoint = isSystem ? `/api/system-backups/${backupId}` : `/api/backups/${backupId}`;
+      await fetch(endpoint, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      isSystem ? loadSystemBackups() : loadOltBackups();
+    } catch (error) {
+      console.error('Failed to delete backup:', error);
+    }
+  };
+
+  const updateSettings = async (newSettings) => {
+    try {
+      const response = await fetch('/api/backup-settings', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(newSettings)
+      });
+      if (response.ok) {
+        loadSettings();
+        return true;
+      }
+    } catch (error) {
+      console.error('Failed to update settings:', error);
+    }
+    return false;
+  };
+
+  const testConnection = async (type) => {
+    setTestingConnection(true);
+    try {
+      const endpoint = type === 'ftp' ? '/api/backup-settings/test-ftp' : '/api/backup-settings/test-s3';
+      const body = type === 'ftp' ? {
+        ftp_host: settings.ftp_host,
+        ftp_port: settings.ftp_port || 21,
+        ftp_username: settings.ftp_username,
+        ftp_password: settings.ftp_password === '***' ? '' : settings.ftp_password,
+        ftp_path: settings.ftp_path || '/',
+        ftp_use_sftp: settings.ftp_use_sftp
+      } : {
+        s3_bucket: settings.s3_bucket,
+        s3_region: settings.s3_region,
+        s3_access_key: settings.s3_access_key,
+        s3_secret_key: settings.s3_secret_key === '***' ? '' : settings.s3_secret_key,
+        s3_path: settings.s3_path || '/'
+      };
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+      const result = await response.json();
+      alert(result.success ? 'Connection successful!' : 'Connection failed: ' + result.message);
+    } catch (error) {
+      alert('Test failed: ' + error.message);
+    }
+    setTestingConnection(false);
+  };
+
+  const formatBytes = (bytes) => {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  };
+
+  const cardClass = `rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`;
+  const borderClass = darkMode ? 'border-slate-700' : 'border-gray-200';
+  const inputClass = `w-full px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`;
+
+  return (
+    <div className="space-y-6">
+      {/* Header with Tabs */}
+      <div className={cardClass}>
+        <div className={`p-4 border-b ${borderClass}`}>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                </svg>
+              </div>
+              <div>
+                <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Backup & Restore</h2>
+                <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Manage system and OLT configuration backups</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className={`p-2 rounded-lg ${darkMode ? 'hover:bg-slate-700' : 'hover:bg-gray-100'}`}
+              title="Backup Settings"
+            >
+              <svg className={`w-5 h-5 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex gap-4 mt-4">
+            {[
+              { id: 'system', label: 'System Backups', icon: 'M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2' },
+              { id: 'olt', label: 'OLT Configs', icon: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2z' },
+              { id: 'services', label: 'Services', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+                  activeTab === tab.id
+                    ? 'bg-blue-600 text-white'
+                    : darkMode ? 'text-slate-400 hover:bg-slate-700' : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={tab.icon} />
+                </svg>
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* System Backups Tab */}
+        {activeTab === 'system' && (
+          <div className="p-4">
+            {/* Create Backup Form */}
+            <div className={`p-4 rounded-lg border ${borderClass} mb-4`}>
+              <h3 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>Create New Backup</h3>
+              <div className="flex flex-wrap items-end gap-4">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeUploads}
+                    onChange={(e) => setIncludeUploads(e.target.checked)}
+                    className="w-4 h-4 rounded border-gray-300"
+                  />
+                  <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>Include uploads/images</span>
+                </label>
+                <select
+                  value={uploadTo}
+                  onChange={(e) => setUploadTo(e.target.value)}
+                  className={`px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                >
+                  <option value="local">Save Locally</option>
+                  {settings?.ftp_host && <option value="ftp">{settings.ftp_use_sftp ? 'Upload to SFTP' : 'Upload to FTP'}</option>}
+                  {settings?.s3_bucket && <option value="s3">Upload to S3</option>}
+                </select>
+                <button
+                  onClick={createSystemBackup}
+                  disabled={creating}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {creating ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  )}
+                  Create Full Backup
+                </button>
+              </div>
+            </div>
+
+            {/* Backups List */}
+            {loading ? (
+              <div className="flex justify-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              </div>
+            ) : systemBackups.length === 0 ? (
+              <div className="text-center py-12">
+                <svg className="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                </svg>
+                <p className={darkMode ? 'text-slate-400' : 'text-gray-500'}>No system backups found</p>
+                <p className={`text-sm mt-2 ${darkMode ? 'text-slate-500' : 'text-gray-400'}`}>Create your first full backup to protect all your data</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {systemBackups.map((backup) => (
+                  <div
+                    key={backup.id}
+                    className={`p-4 rounded-lg border flex flex-wrap items-center justify-between gap-4 ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-gray-50 border-gray-200'}`}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${
+                        backup.status === 'completed' ? 'bg-green-100 text-green-600' :
+                        backup.status === 'failed' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'
+                      }`}>
+                        {backup.status === 'completed' ? (
+                          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : backup.status === 'failed' ? (
+                          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        ) : (
+                          <svg className="w-6 h-6 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                        )}
+                      </div>
+                      <div>
+                        <p className={`font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                          {backup.filename}
+                        </p>
+                        <div className={`flex flex-wrap items-center gap-2 text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                          <span>{new Date(backup.created_at).toLocaleString()}</span>
+                          <span>•</span>
+                          <span>{formatBytes(backup.file_size)}</span>
+                          <span>•</span>
+                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            backup.storage_type === 'local' ? 'bg-gray-200 text-gray-700' :
+                            backup.storage_type === 'ftp' || backup.storage_type === 'sftp' ? 'bg-purple-100 text-purple-700' :
+                            'bg-orange-100 text-orange-700'
+                          }`}>
+                            {backup.storage_type.toUpperCase()}
+                          </span>
+                          {backup.includes_uploads && (
+                            <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-xs font-medium">+Uploads</span>
+                          )}
+                        </div>
+                        {backup.error_message && (
+                          <p className="text-sm text-red-500 mt-1">{backup.error_message}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {backup.storage_type === 'local' && backup.status === 'completed' && (
+                        <>
+                          <button
+                            onClick={() => downloadBackup(backup.id, backup.filename, true)}
+                            className={`p-2 rounded-lg ${darkMode ? 'hover:bg-slate-600 text-slate-300' : 'hover:bg-gray-200 text-gray-600'}`}
+                            title="Download"
+                          >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={() => restoreBackup(backup.id)}
+                            disabled={restoring === backup.id}
+                            className="p-2 rounded-lg hover:bg-green-100 text-green-600"
+                            title="Restore"
+                          >
+                            {restoring === backup.id ? (
+                              <div className="animate-spin rounded-full h-5 w-5 border-2 border-green-500 border-t-transparent"></div>
+                            ) : (
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                              </svg>
+                            )}
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onClick={() => deleteBackup(backup.id, true)}
+                        className="p-2 rounded-lg hover:bg-red-100 text-red-500"
+                        title="Delete"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* OLT Configs Tab */}
+        {activeTab === 'olt' && (
+          <div className="p-4">
+            {/* Create OLT Backup */}
+            <div className={`p-4 rounded-lg border ${borderClass} mb-4`}>
+              <h3 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>Backup OLT Configuration</h3>
+              <div className="flex items-center gap-3">
+                <select
+                  value={selectedOlt}
+                  onChange={(e) => setSelectedOlt(e.target.value)}
+                  className={`flex-1 max-w-xs px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-gray-300'}`}
+                >
+                  <option value="">Select OLT</option>
+                  {olts.map(olt => (
+                    <option key={olt.id} value={olt.id}>{olt.name} ({olt.ip_address})</option>
+                  ))}
+                </select>
+                <button
+                  onClick={createOltBackup}
+                  disabled={creating || !selectedOlt}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {creating ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  )}
+                  Backup Config
+                </button>
+              </div>
+            </div>
+
+            {/* OLT Backups List */}
+            {oltBackups.length === 0 ? (
+              <div className="text-center py-12">
+                <p className={darkMode ? 'text-slate-400' : 'text-gray-500'}>No OLT configuration backups</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {oltBackups.map((backup) => (
+                  <div
+                    key={backup.id}
+                    className={`p-4 rounded-lg border flex items-center justify-between ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-gray-50 border-gray-200'}`}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${darkMode ? 'bg-slate-600' : 'bg-white'}`}>
+                        <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <p className={`font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>{backup.filename}</p>
+                        <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                          {new Date(backup.created_at).toLocaleString()} • {formatBytes(backup.file_size)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => downloadBackup(backup.id, backup.filename, false)}
+                        className={`p-2 rounded-lg ${darkMode ? 'hover:bg-slate-600 text-slate-300' : 'hover:bg-gray-200 text-gray-600'}`}
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => deleteBackup(backup.id, false)}
+                        className="p-2 rounded-lg hover:bg-red-100 text-red-500"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Services Tab */}
+        {activeTab === 'services' && (
+          <ServicesTab darkMode={darkMode} />
+        )}
+      </div>
+
+      {/* Settings Modal */}
+      {showSettings && settings && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className={`w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+            <div className={`sticky top-0 p-4 border-b ${borderClass} ${darkMode ? 'bg-slate-800' : 'bg-white'} flex items-center justify-between`}>
+              <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Backup Settings</h3>
+              <button onClick={() => setShowSettings(false)} className="p-2 rounded-lg hover:bg-gray-200">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-4 space-y-6">
+              {/* Auto Backup */}
+              <div>
+                <h4 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>Automatic Backup</h4>
+                <div className="space-y-3">
+                  <label className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings.auto_backup_enabled}
+                      onChange={(e) => {
+                        setSettings({...settings, auto_backup_enabled: e.target.checked});
+                        updateSettings({auto_backup_enabled: e.target.checked});
+                      }}
+                      className="w-4 h-4 rounded"
+                    />
+                    <span className={darkMode ? 'text-slate-300' : 'text-gray-700'}>Enable automatic backups</span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Frequency</label>
+                      <select
+                        value={settings.backup_frequency}
+                        onChange={(e) => setSettings({...settings, backup_frequency: e.target.value})}
+                        className={inputClass}
+                      >
+                        <option value="hourly">Hourly</option>
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Time</label>
+                      <input
+                        type="time"
+                        value={settings.backup_time}
+                        onChange={(e) => setSettings({...settings, backup_time: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Retention (days)</label>
+                    <input
+                      type="number"
+                      value={settings.retention_days}
+                      onChange={(e) => setSettings({...settings, retention_days: parseInt(e.target.value)})}
+                      className={inputClass}
+                      min="1"
+                      max="365"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Storage Type */}
+              <div>
+                <h4 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>Storage Destination</h4>
+                <select
+                  value={settings.storage_type}
+                  onChange={(e) => setSettings({...settings, storage_type: e.target.value})}
+                  className={inputClass}
+                >
+                  <option value="local">Local Storage</option>
+                  <option value="ftp">FTP Server</option>
+                  <option value="sftp">SFTP Server</option>
+                  <option value="s3">AWS S3</option>
+                </select>
+              </div>
+
+              {/* FTP Settings */}
+              {(settings.storage_type === 'ftp' || settings.storage_type === 'sftp') && (
+                <div className={`p-4 rounded-lg border ${borderClass}`}>
+                  <h4 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>FTP/SFTP Settings</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Host</label>
+                      <input
+                        type="text"
+                        value={settings.ftp_host || ''}
+                        onChange={(e) => setSettings({...settings, ftp_host: e.target.value})}
+                        className={inputClass}
+                        placeholder="ftp.example.com"
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Port</label>
+                      <input
+                        type="number"
+                        value={settings.ftp_port || (settings.storage_type === 'sftp' ? 22 : 21)}
+                        onChange={(e) => setSettings({...settings, ftp_port: parseInt(e.target.value)})}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Username</label>
+                      <input
+                        type="text"
+                        value={settings.ftp_username || ''}
+                        onChange={(e) => setSettings({...settings, ftp_username: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Password</label>
+                      <input
+                        type="password"
+                        value={settings.ftp_password || ''}
+                        onChange={(e) => setSettings({...settings, ftp_password: e.target.value})}
+                        className={inputClass}
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Remote Path</label>
+                      <input
+                        type="text"
+                        value={settings.ftp_path || '/backups'}
+                        onChange={(e) => setSettings({...settings, ftp_path: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => testConnection('ftp')}
+                    disabled={testingConnection}
+                    className="mt-3 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {testingConnection ? 'Testing...' : 'Test Connection'}
+                  </button>
+                </div>
+              )}
+
+              {/* S3 Settings */}
+              {settings.storage_type === 's3' && (
+                <div className={`p-4 rounded-lg border ${borderClass}`}>
+                  <h4 className={`font-medium mb-3 ${darkMode ? 'text-white' : 'text-gray-800'}`}>AWS S3 Settings</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Bucket Name</label>
+                      <input
+                        type="text"
+                        value={settings.s3_bucket || ''}
+                        onChange={(e) => setSettings({...settings, s3_bucket: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Region</label>
+                      <input
+                        type="text"
+                        value={settings.s3_region || ''}
+                        onChange={(e) => setSettings({...settings, s3_region: e.target.value})}
+                        className={inputClass}
+                        placeholder="us-east-1"
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Access Key</label>
+                      <input
+                        type="text"
+                        value={settings.s3_access_key || ''}
+                        onChange={(e) => setSettings({...settings, s3_access_key: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Secret Key</label>
+                      <input
+                        type="password"
+                        value={settings.s3_secret_key || ''}
+                        onChange={(e) => setSettings({...settings, s3_secret_key: e.target.value})}
+                        className={inputClass}
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className={`block text-sm mb-1 ${darkMode ? 'text-slate-400' : 'text-gray-600'}`}>Path Prefix</label>
+                      <input
+                        type="text"
+                        value={settings.s3_path || '/olt-manager-backups'}
+                        onChange={(e) => setSettings({...settings, s3_path: e.target.value})}
+                        className={inputClass}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => testConnection('s3')}
+                    disabled={testingConnection}
+                    className="mt-3 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {testingConnection ? 'Testing...' : 'Test Connection'}
+                  </button>
+                </div>
+              )}
+
+              {/* Save Button */}
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className={`px-4 py-2 rounded-lg ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    const success = await updateSettings(settings);
+                    if (success) {
+                      alert('Settings saved!');
+                      setShowSettings(false);
+                    }
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Save Settings
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Last Backup Info */}
+      {settings?.last_backup_at && (
+        <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800/50' : 'bg-blue-50'} flex items-center gap-3`}>
+          <svg className={`w-5 h-5 ${darkMode ? 'text-blue-400' : 'text-blue-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-blue-800'}`}>
+            Last backup: {new Date(settings.last_backup_at).toLocaleString()}
+            {settings.next_backup_at && ` • Next scheduled: ${new Date(settings.next_backup_at).toLocaleString()}`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pageName, darkMode, onToggleDarkMode }) {
   const isAdmin = user?.role === 'admin';
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
     { id: 'onus', label: 'ONUs', icon: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z' },
+    { id: 'map', label: 'Map', icon: 'M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7' },
     { id: 'regions', label: 'Regions', icon: 'M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z', adminOnly: false },
     { id: 'alarms', label: 'Alarms', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
+    { id: 'reports', label: 'Reports', icon: 'M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+    { id: 'events', label: 'Events', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'splitter', label: 'Splitter Simulator', icon: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1' },
   ];
 
   if (isAdmin) {
+    menuItems.push({ id: 'backups', label: 'Backups', icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4' });
+    menuItems.push({ id: 'services', label: 'Services', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' });
     menuItems.push({ id: 'users', label: 'Users', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' });
   }
 
@@ -8212,6 +10043,140 @@ function Dashboard({ user, onLogout, pageName }) {
                 </table>
               </div>
             </>
+          )}
+
+          {/* Map Page - GPS View */}
+          {currentPage === 'map' && (
+            <MapPage
+              onus={onus}
+              regions={regions}
+              olts={olts}
+              darkMode={darkMode}
+              onSelectONU={(onu) => {
+                setEditingONU(onu);
+                setShowEditONUModal(true);
+              }}
+            />
+          )}
+
+          {/* Reports Page */}
+          {currentPage === 'reports' && (
+            <ReportsPage
+              darkMode={darkMode}
+              token={localStorage.getItem('token')}
+            />
+          )}
+
+          {/* Events Page */}
+          {currentPage === 'events' && (
+            <EventsPage
+              darkMode={darkMode}
+              token={localStorage.getItem('token')}
+              olts={olts}
+            />
+          )}
+
+          {/* Backups Page (Admin only) */}
+          {currentPage === 'backups' && isAdmin && (
+            <BackupsPage
+              darkMode={darkMode}
+              token={localStorage.getItem('token')}
+              olts={olts}
+            />
+          )}
+
+          {/* Services Page (Admin only) */}
+          {currentPage === 'services' && isAdmin && (
+            <div className="space-y-6">
+              <h2 className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
+                System Services
+              </h2>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Restart Service Card */}
+                <div className={`rounded-xl border p-6 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-center mb-4">
+                    <div className="w-12 h-12 rounded-full bg-orange-500 flex items-center justify-center mr-4">
+                      <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Restart Service</h3>
+                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Restart the OLT Manager service</p>
+                    </div>
+                  </div>
+                  <p className={`text-sm mb-4 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                    This will restart the OLT Manager backend service. All active sessions will be briefly disconnected.
+                    Use this to apply updates or refresh the license.
+                  </p>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm('Restart the OLT Manager service?\n\nAll active sessions will be briefly disconnected.')) return;
+                      try {
+                        const res = await fetch('/api/system/restart-service', {
+                          method: 'POST',
+                          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                        });
+                        const data = await res.json();
+                        alert(data.message);
+                        if (data.success) {
+                          setTimeout(() => window.location.reload(), 3000);
+                        }
+                      } catch (e) {
+                        alert('Error restarting service');
+                      }
+                    }}
+                    className="w-full py-3 px-4 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Restart Service
+                  </button>
+                </div>
+
+                {/* Reboot Server Card */}
+                <div className={`rounded-xl border p-6 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                  <div className="flex items-center mb-4">
+                    <div className="w-12 h-12 rounded-full bg-red-500 flex items-center justify-center mr-4">
+                      <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636a9 9 0 11-12.728 0M12 9v4m0 4h.01" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Reboot Server</h3>
+                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Restart the entire server</p>
+                    </div>
+                  </div>
+                  <p className={`text-sm mb-4 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                    This will completely reboot the server. All connections will be lost.
+                    The server will be unavailable for 1-2 minutes during restart.
+                  </p>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm('⚠️ REBOOT SERVER?\n\nThis will restart the entire server.\nAll connections will be lost.\n\nThe server will be unavailable for 1-2 minutes.\n\nAre you sure?')) return;
+                      try {
+                        const res = await fetch('/api/system/reboot', {
+                          method: 'POST',
+                          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                        });
+                        const data = await res.json();
+                        alert(data.message + '\n\nPlease wait 1-2 minutes for the server to restart.');
+                      } catch (e) {
+                        alert('Error rebooting server');
+                      }
+                    }}
+                    className="w-full py-3 px-4 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636a9 9 0 11-12.728 0M12 9v4m0 4h.01" />
+                    </svg>
+                    Reboot Server
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </main>
 

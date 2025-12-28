@@ -207,6 +207,7 @@ class UserListResponse(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     user: UserResponse
+    must_change_password: bool = False
 
 
 # Diagram Schemas

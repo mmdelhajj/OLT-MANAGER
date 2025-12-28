@@ -302,6 +302,72 @@ class SentAlert(Base):
     sent_at = Column(DateTime, default=datetime.utcnow)
 
 
+class SystemBackup(Base):
+    """Full system database backups"""
+    __tablename__ = "system_backups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String(255), nullable=False)
+    file_size = Column(Integer, nullable=True)
+    backup_type = Column(String(20), default='manual')  # manual, scheduled, auto
+    storage_type = Column(String(20), default='local')  # local, ftp, s3, gdrive
+    storage_path = Column(String(500), nullable=True)  # Remote path if uploaded
+    includes_db = Column(Boolean, default=True)
+    includes_config = Column(Boolean, default=True)
+    includes_uploads = Column(Boolean, default=False)
+    status = Column(String(20), default='completed')  # pending, completed, failed, uploading
+    error_message = Column(String(500), nullable=True)
+    notes = Column(String(500), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BackupSettings(Base):
+    """Backup configuration settings"""
+    __tablename__ = "backup_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Auto backup settings
+    auto_backup_enabled = Column(Boolean, default=False)
+    backup_frequency = Column(String(20), default='daily')  # hourly, daily, weekly, monthly
+    backup_time = Column(String(10), default='02:00')  # HH:MM format
+    backup_day = Column(Integer, nullable=True)  # Day of week (0-6) or day of month (1-31)
+    retention_days = Column(Integer, default=30)  # Keep backups for X days
+
+    # What to backup
+    backup_database = Column(Boolean, default=True)
+    backup_config = Column(Boolean, default=True)
+    backup_uploads = Column(Boolean, default=False)
+
+    # Storage settings
+    storage_type = Column(String(20), default='local')  # local, ftp, sftp, s3
+
+    # Local storage
+    local_path = Column(String(500), default='/opt/olt-manager/backups')
+
+    # FTP/SFTP settings
+    ftp_host = Column(String(255), nullable=True)
+    ftp_port = Column(Integer, default=21)
+    ftp_username = Column(String(100), nullable=True)
+    ftp_password = Column(String(255), nullable=True)
+    ftp_path = Column(String(255), default='/backups')
+    ftp_use_sftp = Column(Boolean, default=False)
+
+    # AWS S3 settings
+    s3_bucket = Column(String(255), nullable=True)
+    s3_region = Column(String(50), nullable=True)
+    s3_access_key = Column(String(255), nullable=True)
+    s3_secret_key = Column(String(255), nullable=True)
+    s3_path = Column(String(255), default='/olt-manager-backups')
+
+    # Last backup info
+    last_backup_at = Column(DateTime, nullable=True)
+    last_backup_status = Column(String(20), nullable=True)
+    next_backup_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class User(Base):
     """User model for authentication and authorization"""
     __tablename__ = "users"
