@@ -63,3 +63,4 @@ backend/.dev_server
 # Debug scripts (may contain credentials)
 backend/debug_*.py
 backend/test_*.py
+publish-update.sh
