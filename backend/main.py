@@ -5,6 +5,7 @@ import requests
 import bcrypt
 import json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,35 @@ logger = logging.getLogger(__name__)
 
 # Thread pool for blocking I/O operations (SNMP, web scraping, etc.)
 thread_executor = ThreadPoolExecutor(max_workers=5)
+
+# Helper function to get current time in user's timezone
+def get_user_timezone(db: Session) -> str:
+    """Get the user's configured timezone from settings"""
+    try:
+        tz_setting = db.query(Settings).filter(Settings.key == 'timezone').first()
+        if tz_setting and tz_setting.value:
+            return tz_setting.value
+    except:
+        pass
+    return 'UTC'
+
+def get_current_time_in_timezone(db: Session) -> datetime:
+    """Get current time converted to user's timezone"""
+    try:
+        tz_name = get_user_timezone(db)
+        tz = ZoneInfo(tz_name)
+        return datetime.now(tz)
+    except:
+        return datetime.now()
+
+def format_timestamp_for_filename(db: Session) -> str:
+    """Get timestamp string for filenames in user's timezone"""
+    try:
+        tz_name = get_user_timezone(db)
+        tz = ZoneInfo(tz_name)
+        return datetime.now(tz).strftime('%Y%m%d_%H%M%S')
+    except:
+        return datetime.now().strftime('%Y%m%d_%H%M%S')
 
 # Cleanup counter - run cleanup every N poll cycles
 cleanup_counter = 0
@@ -4313,6 +4343,9 @@ def get_settings(db: Session = Depends(get_db)):
         result["trap_enabled"] = "true"
     if "trap_port" not in result:
         result["trap_port"] = "162"
+    # Timezone default
+    if "timezone" not in result:
+        result["timezone"] = "UTC"
     return result
 
 
@@ -4328,7 +4361,7 @@ def update_settings(
 
     allowed_keys = ["system_name", "page_name", "refresh_interval", "polling_interval", "whatsapp_enabled",
                     "whatsapp_api_url", "whatsapp_secret", "whatsapp_account", "whatsapp_recipients",
-                    "trap_enabled", "trap_port", "trap_community"]
+                    "trap_enabled", "trap_port", "trap_community", "timezone"]
     # Keys that should be encrypted when stored
     sensitive_keys = ["whatsapp_secret", "trap_community"]
 
@@ -6965,7 +6998,8 @@ def create_system_backup_file(db: Session, include_uploads: bool = False) -> tup
     backup_dir = Path("/opt/olt-manager/backups")
     backup_dir.mkdir(exist_ok=True)
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # Use user's configured timezone for timestamp
+    timestamp = format_timestamp_for_filename(db)
     backup_filename = f"olt_manager_backup_{timestamp}.zip"
     backup_path = backup_dir / backup_filename
 

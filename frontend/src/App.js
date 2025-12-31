@@ -8817,14 +8817,18 @@ function Dashboard({ user, onLogout, pageName }) {
     });
   };
 
-  // Timezone state with localStorage persistence
-  const [timezone, setTimezone] = useState(() => {
-    const saved = localStorage.getItem('timezone');
-    return saved || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  });
+  // Timezone state - loaded from backend settings
+  const [timezone, setTimezone] = useState('UTC');
 
   // Current time state - updates every second
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Load timezone from settings when settings are fetched
+  useEffect(() => {
+    if (settings && settings.timezone) {
+      setTimezone(settings.timezone);
+    }
+  }, [settings]);
 
   // Update current time every second
   useEffect(() => {
@@ -8863,10 +8867,15 @@ function Dashboard({ user, onLogout, pageName }) {
     }
   };
 
-  // Update timezone and save to localStorage
-  const updateTimezone = (tz) => {
+  // Update timezone and save to backend
+  const updateTimezone = async (tz) => {
     setTimezone(tz);
-    localStorage.setItem('timezone', tz);
+    // Save to backend so it's used for backups and all timestamps
+    try {
+      await api.updateSettings({ timezone: tz });
+    } catch (error) {
+      console.error('Failed to save timezone:', error);
+    }
   };
   const [mobilePreviewImages, setMobilePreviewImages] = useState(null);
   const [mobilePreviewTitle, setMobilePreviewTitle] = useState('');
