@@ -129,8 +129,9 @@ def decrypt_sensitive(ciphertext: str) -> str:
         _config_logger.error(f"[SECURITY] Decryption failed with both keys: {e}")
         raise ValueError("Decryption failed - data may be corrupted or key changed")
 
-# Database
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./olt_manager.db")
+# Database - Use absolute path to prevent path confusion issues
+# The data folder is the canonical location for the database
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////opt/olt-manager/data/olt_manager.db")
 
 # Polling interval in seconds (1 minute)
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 60))

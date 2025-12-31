@@ -238,6 +238,12 @@ function LoginPage({ onLogin, pageName }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pendingUser, setPendingUser] = useState(null);
+  const [changePasswordError, setChangePasswordError] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -247,11 +253,45 @@ function LoginPage({ onLogin, pageName }) {
       const response = await api.login(username, password);
       localStorage.setItem('token', response.data.token);
       localStorage.setItem('user', JSON.stringify(response.data.user));
-      onLogin(response.data.user);
+
+      // Check if password change is required
+      if (response.data.must_change_password) {
+        setPendingUser(response.data.user);
+        setShowChangePassword(true);
+      } else {
+        onLogin(response.data.user);
+      }
     } catch (err) {
       setError(err.response?.data?.detail || 'Login failed');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setChangePasswordError('');
+
+    if (newPassword.length < 4) {
+      setChangePasswordError('Password must be at least 4 characters');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setChangePasswordError('Passwords do not match');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await api.changePassword({ new_password: newPassword });
+      // Update user to remove must_change_password flag
+      const updatedUser = { ...pendingUser };
+      localStorage.setItem('user', JSON.stringify(updatedUser));
+      onLogin(updatedUser);
+    } catch (err) {
+      setChangePasswordError(err.response?.data?.detail || 'Failed to change password');
+    } finally {
+      setChangingPassword(false);
     }
   };
 
@@ -393,6 +433,63 @@ function LoginPage({ onLogin, pageName }) {
           </div>
         </div>
       </div>
+
+      {/* Password Change Modal */}
+      {showChangePassword && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-8">
+            <div className="text-center mb-6">
+              <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-gray-800">Change Password Required</h2>
+              <p className="text-gray-500 mt-2 text-sm">Please set a new password to continue</p>
+            </div>
+
+            {changePasswordError && (
+              <div className="mb-4 p-3 bg-red-50 border-l-4 border-red-500 rounded-r text-red-700 text-sm">
+                {changePasswordError}
+              </div>
+            )}
+
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                <input
+                  type="password"
+                  required
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Enter new password"
+                  minLength={4}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Confirm Password</label>
+                <input
+                  type="password"
+                  required
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm new password"
+                  minLength={4}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={changingPassword}
+                className="w-full py-3 bg-gradient-to-r from-blue-600 to-blue-500 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-blue-600 disabled:opacity-50 transition-all"
+              >
+                {changingPassword ? 'Changing Password...' : 'Set New Password'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1838,21 +1935,20 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
       setUpdateStatus({ stage: 'installing', progress: 60 });
       const installResponse = await api.installUpdate();
 
-      if (!installResponse.data.success) {
-        throw new Error(installResponse.data.message || 'Installation failed');
+      // API returns {status: "success"} or {success: true}
+      if (!installResponse.data.success && installResponse.data.status !== 'success') {
+        throw new Error(installResponse.data.message || installResponse.data.detail || 'Installation failed');
       }
 
-      setUpdateStatus({ stage: 'restarting', progress: 95 });
+      setUpdateStatus({ stage: 'restarting', progress: 95, message: 'Update installing... Page will refresh in 15 seconds' });
 
-      // Wait a moment then show completion
+      // Auto-refresh page after 15 seconds
       setTimeout(() => {
-        setUpdateStatus({ stage: 'completed', progress: 100, message: 'Update installed! Reloading page...' });
-
-        // Reload page after a few seconds
+        setUpdateStatus({ stage: 'completed', progress: 100, message: 'Refreshing page...' });
         setTimeout(() => {
           window.location.reload();
-        }, 3000);
-      }, 2000);
+        }, 1000);
+      }, 15000);
 
     } catch (error) {
       console.error('Update failed:', error);
@@ -7095,6 +7191,14 @@ function ServicesTab({ darkMode }) {
   const [rebooting, setRebooting] = useState(false);
   const [showRebootConfirm, setShowRebootConfirm] = useState(false);
 
+  // Network Tools states
+  const [toolHost, setToolHost] = useState('');
+  const [toolPort, setToolPort] = useState('161');
+  const [snmpCommunity, setSnmpCommunity] = useState('public');
+  const [toolResult, setToolResult] = useState(null);
+  const [toolLoading, setToolLoading] = useState(false);
+  const [activeTool, setActiveTool] = useState(null);
+
   const borderClass = darkMode ? 'border-slate-700' : 'border-gray-200';
 
   const loadStatus = async () => {
@@ -7170,6 +7274,99 @@ function ServicesTab({ darkMode }) {
     return `${mins}m`;
   };
 
+  // Network tool functions
+  const runPing = async () => {
+    if (!toolHost.trim()) return alert('Please enter a host');
+    setToolLoading(true);
+    setActiveTool('ping');
+    setToolResult(null);
+    try {
+      const response = await fetch('/api/tools/ping', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ host: toolHost, count: 4 })
+      });
+      const data = await response.json();
+      setToolResult({ type: 'ping', ...data });
+    } catch (err) {
+      setToolResult({ type: 'ping', success: false, output: 'Error: ' + err.message });
+    } finally {
+      setToolLoading(false);
+    }
+  };
+
+  const runTraceroute = async () => {
+    if (!toolHost.trim()) return alert('Please enter a host');
+    setToolLoading(true);
+    setActiveTool('traceroute');
+    setToolResult(null);
+    try {
+      const response = await fetch('/api/tools/traceroute', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ host: toolHost, max_hops: 20 })
+      });
+      const data = await response.json();
+      setToolResult({ type: 'traceroute', ...data });
+    } catch (err) {
+      setToolResult({ type: 'traceroute', success: false, output: 'Error: ' + err.message });
+    } finally {
+      setToolLoading(false);
+    }
+  };
+
+  const runPortCheck = async () => {
+    if (!toolHost.trim()) return alert('Please enter a host');
+    setToolLoading(true);
+    setActiveTool('port');
+    setToolResult(null);
+    try {
+      const response = await fetch('/api/tools/port-check', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ host: toolHost, port: parseInt(toolPort) || 161 })
+      });
+      const data = await response.json();
+      setToolResult({ type: 'port', ...data });
+    } catch (err) {
+      setToolResult({ type: 'port', success: false, message: 'Error: ' + err.message });
+    } finally {
+      setToolLoading(false);
+    }
+  };
+
+  const runSnmpCheck = async () => {
+    if (!toolHost.trim()) return alert('Please enter a host');
+    setToolLoading(true);
+    setActiveTool('snmp');
+    setToolResult(null);
+    try {
+      const response = await fetch('/api/tools/snmp-check', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ host: toolHost, port: parseInt(toolPort) || 161, community: snmpCommunity })
+      });
+      const data = await response.json();
+      setToolResult({ type: 'snmp', ...data });
+    } catch (err) {
+      setToolResult({ type: 'snmp', success: false, message: 'Error: ' + err.message });
+    } finally {
+      setToolLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center py-12">
@@ -7213,6 +7410,16 @@ function ServicesTab({ darkMode }) {
                 {status.system ? `${status.system.memory_percent}%` : 'N/A'}
                 <span className={`text-sm font-normal ml-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
                   ({status.system?.memory_used_mb || 0} / {status.system?.memory_total_mb || 0} MB)
+                </span>
+              </p>
+            </div>
+
+            <div className={`p-4 rounded-lg ${darkMode ? 'bg-slate-800' : 'bg-white'} border ${borderClass}`}>
+              <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>CPU Load</p>
+              <p className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+                {status.system?.cpu_percent !== undefined ? `${status.system.cpu_percent}%` : 'N/A'}
+                <span className={`text-sm font-normal ml-2 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                  (Load: {status.system?.cpu_load_1?.toFixed(2) || 0} / {status.system?.cpu_load_5?.toFixed(2) || 0} / {status.system?.cpu_load_15?.toFixed(2) || 0})
                 </span>
               </p>
             </div>
@@ -7306,6 +7513,154 @@ function ServicesTab({ darkMode }) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Network Tools Card */}
+      <div className={`p-6 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-700/50' : 'bg-gray-50'}`}>
+        <h3 className={`text-lg font-semibold mb-4 ${darkMode ? 'text-white' : 'text-gray-800'}`}>
+          Network Diagnostic Tools
+        </h3>
+
+        {/* Input Section */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+          <div className="md:col-span-2">
+            <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+              Host / IP Address
+            </label>
+            <input
+              type="text"
+              value={toolHost}
+              onChange={(e) => setToolHost(e.target.value)}
+              placeholder="e.g. 192.168.1.1 or google.com"
+              className={`w-full px-3 py-2 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800 text-white' : 'bg-white text-gray-800'} focus:ring-2 focus:ring-blue-500 outline-none`}
+            />
+          </div>
+          <div>
+            <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+              Port
+            </label>
+            <input
+              type="number"
+              value={toolPort}
+              onChange={(e) => setToolPort(e.target.value)}
+              placeholder="161"
+              className={`w-full px-3 py-2 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800 text-white' : 'bg-white text-gray-800'} focus:ring-2 focus:ring-blue-500 outline-none`}
+            />
+          </div>
+          <div>
+            <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+              SNMP Community
+            </label>
+            <input
+              type="text"
+              value={snmpCommunity}
+              onChange={(e) => setSnmpCommunity(e.target.value)}
+              placeholder="public"
+              className={`w-full px-3 py-2 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800 text-white' : 'bg-white text-gray-800'} focus:ring-2 focus:ring-blue-500 outline-none`}
+            />
+          </div>
+        </div>
+
+        {/* Tool Buttons */}
+        <div className="flex flex-wrap gap-3 mb-4">
+          <button
+            onClick={runPing}
+            disabled={toolLoading}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 ${activeTool === 'ping' && toolLoading ? 'bg-blue-600' : 'bg-blue-500 hover:bg-blue-600'} text-white disabled:opacity-70`}
+          >
+            {activeTool === 'ping' && toolLoading ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0" />
+              </svg>
+            )}
+            Ping
+          </button>
+          <button
+            onClick={runTraceroute}
+            disabled={toolLoading}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 ${activeTool === 'traceroute' && toolLoading ? 'bg-purple-600' : 'bg-purple-500 hover:bg-purple-600'} text-white disabled:opacity-70`}
+          >
+            {activeTool === 'traceroute' && toolLoading ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+              </svg>
+            )}
+            Traceroute
+          </button>
+          <button
+            onClick={runPortCheck}
+            disabled={toolLoading}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 ${activeTool === 'port' && toolLoading ? 'bg-orange-600' : 'bg-orange-500 hover:bg-orange-600'} text-white disabled:opacity-70`}
+          >
+            {activeTool === 'port' && toolLoading ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            )}
+            Port Check
+          </button>
+          <button
+            onClick={runSnmpCheck}
+            disabled={toolLoading}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 ${activeTool === 'snmp' && toolLoading ? 'bg-green-600' : 'bg-green-500 hover:bg-green-600'} text-white disabled:opacity-70`}
+          >
+            {activeTool === 'snmp' && toolLoading ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+              </svg>
+            )}
+            SNMP Check
+          </button>
+        </div>
+
+        {/* Results Section */}
+        {toolResult && (
+          <div className={`p-4 rounded-lg border ${borderClass} ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+            <div className="flex items-center gap-2 mb-3">
+              <span className={`px-2 py-1 rounded text-xs font-medium ${
+                toolResult.success || toolResult.responding || toolResult.is_open
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-red-100 text-red-700'
+              }`}>
+                {toolResult.success || toolResult.responding || toolResult.is_open ? 'SUCCESS' : 'FAILED'}
+              </span>
+              <span className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+                {toolResult.type === 'ping' && 'Ping Results'}
+                {toolResult.type === 'traceroute' && 'Traceroute Results'}
+                {toolResult.type === 'port' && `Port ${toolResult.port} Check`}
+                {toolResult.type === 'snmp' && 'SNMP Check'}
+              </span>
+              <span className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                - {toolResult.host}
+              </span>
+            </div>
+
+            {/* Output for ping/traceroute */}
+            {toolResult.output && (
+              <pre className={`text-sm overflow-x-auto p-3 rounded ${darkMode ? 'bg-slate-900 text-green-400' : 'bg-gray-900 text-green-400'} font-mono whitespace-pre-wrap`}>
+                {toolResult.output}
+              </pre>
+            )}
+
+            {/* Message for port/snmp */}
+            {toolResult.message && !toolResult.output && (
+              <div className={`text-sm ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                <p className="font-medium">{toolResult.message}</p>
+                {toolResult.sys_descr && (
+                  <p className="mt-2 text-xs opacity-75">System: {toolResult.sys_descr}</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Reboot Confirmation Modal */}
@@ -10087,96 +10442,7 @@ function Dashboard({ user, onLogout, pageName }) {
 
           {/* Services Page (Admin only) */}
           {currentPage === 'services' && isAdmin && (
-            <div className="space-y-6">
-              <h2 className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                System Services
-              </h2>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Restart Service Card */}
-                <div className={`rounded-xl border p-6 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
-                  <div className="flex items-center mb-4">
-                    <div className="w-12 h-12 rounded-full bg-orange-500 flex items-center justify-center mr-4">
-                      <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Restart Service</h3>
-                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Restart the OLT Manager service</p>
-                    </div>
-                  </div>
-                  <p className={`text-sm mb-4 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
-                    This will restart the OLT Manager backend service. All active sessions will be briefly disconnected.
-                    Use this to apply updates or refresh the license.
-                  </p>
-                  <button
-                    onClick={async () => {
-                      if (!window.confirm('Restart the OLT Manager service?\n\nAll active sessions will be briefly disconnected.')) return;
-                      try {
-                        const res = await fetch('/api/system/restart-service', {
-                          method: 'POST',
-                          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-                        });
-                        const data = await res.json();
-                        alert(data.message);
-                        if (data.success) {
-                          setTimeout(() => window.location.reload(), 3000);
-                        }
-                      } catch (e) {
-                        alert('Error restarting service');
-                      }
-                    }}
-                    className="w-full py-3 px-4 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Restart Service
-                  </button>
-                </div>
-
-                {/* Reboot Server Card */}
-                <div className={`rounded-xl border p-6 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
-                  <div className="flex items-center mb-4">
-                    <div className="w-12 h-12 rounded-full bg-red-500 flex items-center justify-center mr-4">
-                      <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636a9 9 0 11-12.728 0M12 9v4m0 4h.01" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h3 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Reboot Server</h3>
-                      <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Restart the entire server</p>
-                    </div>
-                  </div>
-                  <p className={`text-sm mb-4 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
-                    This will completely reboot the server. All connections will be lost.
-                    The server will be unavailable for 1-2 minutes during restart.
-                  </p>
-                  <button
-                    onClick={async () => {
-                      if (!window.confirm('⚠️ REBOOT SERVER?\n\nThis will restart the entire server.\nAll connections will be lost.\n\nThe server will be unavailable for 1-2 minutes.\n\nAre you sure?')) return;
-                      try {
-                        const res = await fetch('/api/system/reboot', {
-                          method: 'POST',
-                          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-                        });
-                        const data = await res.json();
-                        alert(data.message + '\n\nPlease wait 1-2 minutes for the server to restart.');
-                      } catch (e) {
-                        alert('Error rebooting server');
-                      }
-                    }}
-                    className="w-full py-3 px-4 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636a9 9 0 11-12.728 0M12 9v4m0 4h.01" />
-                    </svg>
-                    Reboot Server
-                  </button>
-                </div>
-              </div>
-            </div>
+            <ServicesTab darkMode={darkMode} />
           )}
         </main>
 

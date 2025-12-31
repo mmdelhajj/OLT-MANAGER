@@ -3419,21 +3419,31 @@ async def install_update(current_user: User = Depends(require_admin)):
             update_status["stage"] = "applying"
             update_status["progress"] = 75
 
-            # Make script executable and run it
+            # Make script executable
             package_install_script.chmod(0o755)
-            result = subprocess.run(
-                ["/bin/bash", str(package_install_script), str(extract_dir), new_version],
-                capture_output=True,
-                text=True,
-                timeout=120
+
+            # Run install script using systemd-run to ensure it survives service restart
+            # This creates a transient service that runs independently
+            install_cmd = f"/bin/bash {package_install_script} {extract_dir} {new_version}"
+
+            # Use systemd-run to launch as independent transient service
+            subprocess.Popen(
+                [
+                    "systemd-run", "--scope", "--quiet",
+                    "/bin/bash", "-c",
+                    f"sleep 2 && {install_cmd} > /tmp/olt-update.log 2>&1"
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
 
-            if result.returncode != 0:
-                logger.error(f"Install script failed: {result.stderr}")
-                raise Exception(f"Install script failed: {result.stderr}")
-
-            logger.info(f"Install script output: {result.stdout}")
+            logger.info("Install script launched in background")
             update_status["progress"] = 85
+            update_status["stage"] = "restarting"
+
+            # Return success - the install will happen in background
+            return {"status": "success", "message": "Update installing... Service will restart automatically."}
 
         else:
             # Fallback: Legacy install logic for old packages without install.sh
@@ -3583,13 +3593,15 @@ if [ -f /opt/olt-manager/olt-manager.new ]; then
     exit 0
 fi
 
-# Try different service names used by different install methods
-if systemctl is-active --quiet olt-backend; then
-    systemctl restart olt-backend
-elif systemctl is-active --quiet olt-manager; then
-    systemctl restart olt-manager
+# Try to restart service - check if service EXISTS (not just active)
+if systemctl list-unit-files | grep -q olt-manager.service; then
+    systemctl daemon-reload
+    systemctl start olt-manager
+elif systemctl list-unit-files | grep -q olt-backend.service; then
+    systemctl daemon-reload
+    systemctl start olt-backend
 else
-    # Fallback: manual restart
+    # Fallback: manual restart (for source installations without systemd)
     cd /opt/olt-manager/backend 2>/dev/null || cd /root/olt-manager/backend
     pkill -f "uvicorn main:app" 2>/dev/null
     sleep 1
@@ -3617,7 +3629,8 @@ fi
         return {
             "success": True,
             "message": "Update installed successfully. Service is restarting...",
-            "restart_in_seconds": 3
+            "restart_in_seconds": 3,
+            "require_logout": True
         }
 
     except Exception as e:
@@ -3814,13 +3827,21 @@ async def publish_update(
 
         shutil.copy(binary_path, package_dir / "olt-manager")
         shutil.copy(version_file, package_dir / "VERSION")
-        (package_dir / "data").mkdir(exist_ok=True)
-        (package_dir / "uploads").mkdir(exist_ok=True)
+        # Note: data/ and uploads/ folders are NOT included in package
+        # to prevent overwriting customer database during updates
 
         # Create start script
         start_script = package_dir / "start.sh"
         start_script.write_text("#!/bin/bash\ncd \"$(dirname \"$0\")\"\n./olt-manager\n")
         start_script.chmod(0o755)
+
+        # Copy static folder (frontend files)
+        static_source = Path("/opt/olt-manager/static")
+        if not static_source.exists():
+            static_source = Path(__file__).parent / "static"
+        if static_source.exists():
+            shutil.copytree(static_source, package_dir / "static")
+            result_steps.append("Included frontend static files")
 
         # Create tarball
         package_path = Path("/tmp/olt-manager.tar.gz")
@@ -3834,44 +3855,65 @@ async def publish_update(
         # Step 3: Upload to license server via SCP
         license_server = os.environ.get("LICENSE_SERVER", "109.110.185.101")
         license_user = os.environ.get("LICENSE_USER", "testuser")
-        license_pass = os.environ.get("LICENSE_PASS")
+
+        # Read password directly from file to avoid shell escaping issues
+        license_pass_file = Path("/opt/olt-manager/.license_pass")
+        if license_pass_file.exists():
+            license_pass = license_pass_file.read_text().strip()
+        else:
+            license_pass = os.environ.get("LICENSE_PASS")
         if not license_pass:
-            raise Exception("LICENSE_PASS environment variable not set")
+            raise Exception("LICENSE_PASS not found in file or environment")
 
-        scp_result = subprocess.run(
-            ["sshpass", "-p", license_pass, "scp", "-o", "StrictHostKeyChecking=no",
-             str(package_path), f"{license_user}@{license_server}:/tmp/"],
-            capture_output=True, text=True, timeout=300
-        )
-        if scp_result.returncode != 0:
-            raise Exception(f"SCP upload failed: {scp_result.stderr}")
+        import subprocess
+        import tempfile
 
-        # Copy to web directory and update version
+        # Create a bash script that handles the upload
+        # This avoids subprocess escaping issues with special characters
         import json as json_module
         changelog_escaped = json_module.dumps(changelog)
 
-        ssh_commands = f'''
-echo '{license_pass}' | sudo -S bash -c '
-# Upload to both locations
-cp /tmp/olt-manager.tar.gz /var/www/html/downloads/olt-manager.tar.gz
-chmod 644 /var/www/html/downloads/olt-manager.tar.gz
-cp /tmp/olt-manager.tar.gz /opt/license-server/updates/olt-manager-{version}.tar.gz
-chmod 644 /opt/license-server/updates/olt-manager-{version}.tar.gz
+        upload_script = f'''#!/bin/bash
+set -e
 
-python3 << PYEOF
+# First try SSH key authentication (no password needed)
+if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 {license_user}@{license_server} "echo OK" >/dev/null 2>&1; then
+    echo "Using SSH key authentication"
+    scp -o StrictHostKeyChecking=no "{package_path}" {license_user}@{license_server}:/tmp/olt-manager.tar.gz
+else
+    # Fall back to password authentication
+    echo "Using password authentication"
+    PASS=$(cat /opt/olt-manager/.license_pass)
+    sshpass -p "$PASS" scp -o StrictHostKeyChecking=no "{package_path}" {license_user}@{license_server}:/tmp/olt-manager.tar.gz
+fi
+
+# SSH commands for post-upload steps
+ssh_cmd() {{
+    if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 {license_user}@{license_server} "echo OK" >/dev/null 2>&1; then
+        ssh -o StrictHostKeyChecking=no {license_user}@{license_server} "$1"
+    else
+        PASS=$(cat /opt/olt-manager/.license_pass)
+        sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no {license_user}@{license_server} "$1"
+    fi
+}}
+
+ssh_cmd "sudo cp /tmp/olt-manager.tar.gz /var/www/html/downloads/olt-manager.tar.gz && sudo chmod 644 /var/www/html/downloads/olt-manager.tar.gz"
+ssh_cmd "sudo cp /tmp/olt-manager.tar.gz /opt/license-server/updates/olt-manager-{version}.tar.gz && sudo chmod 644 /opt/license-server/updates/olt-manager-{version}.tar.gz"
+ssh_cmd "sudo cp /tmp/olt-manager.tar.gz /opt/license-server/updates/olt-manager.tar.gz && sudo chmod 644 /opt/license-server/updates/olt-manager.tar.gz"
+
+# Update JSON
+ssh_cmd 'sudo python3 << PYEOF
 import json
 from datetime import datetime
 with open("/opt/license-server/updates.json", "r") as f:
     data = json.load(f)
 
-# Update both latest fields
 data["latest"] = "{version}"
 data["latest_version"] = "{version}"
 data["download_url"] = "https://lic.proxpanel.com/downloads/olt-manager.tar.gz"
 data["changelog"] = {changelog_escaped}
 data["release_date"] = datetime.now().strftime("%Y-%m-%d")
 
-# Add to versions list
 new_version = {{
     "version": "{version}",
     "changelog": {changelog_escaped},
@@ -3886,18 +3928,36 @@ data["versions"].insert(0, new_version)
 with open("/opt/license-server/updates.json", "w") as f:
     json.dump(data, f, indent=2)
 print("OK")
-PYEOF
-'
-'''
-        ssh_result = subprocess.run(
-            ["sshpass", "-p", license_pass, "ssh", "-o", "StrictHostKeyChecking=no",
-             f"{license_user}@{license_server}", ssh_commands],
-            capture_output=True, text=True, timeout=60
-        )
-        if ssh_result.returncode != 0:
-            raise Exception(f"SSH command failed: {ssh_result.stderr}")
+PYEOF'
 
-        result_steps.append("Uploaded to license server successfully")
+echo "Upload completed successfully"
+'''
+
+        try:
+            # Write the script to a temp file and execute it
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+                f.write(upload_script)
+                script_path = f.name
+
+            os.chmod(script_path, 0o755)
+            result = subprocess.run(['bash', script_path], capture_output=True, text=True, timeout=300)
+            os.unlink(script_path)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip()
+                raise Exception(f"Upload failed: {error_msg}")
+
+            result_steps.append("Package uploaded via SCP")
+            result_steps.append("Uploaded to license server successfully")
+
+        except subprocess.TimeoutExpired:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+            raise Exception("Upload timed out after 5 minutes")
+        except Exception as e:
+            raise Exception(f"Upload failed: {str(e)}")
 
         # Cleanup
         package_path.unlink()
@@ -3922,6 +3982,298 @@ PYEOF
         logger.error(f"Publish failed: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Build and Publish status file
+BUILD_PUBLISH_STATUS_FILE = Path("/tmp/build_publish_status.json")
+
+@app.post("/api/dev/build-and-publish")
+async def build_and_publish(
+    request: PublishRequest,
+    current_user: User = Depends(require_admin)
+):
+    """One-click: Build binary AND publish to license server (dev server only)"""
+    import subprocess
+    import json as json_module
+
+    version = request.version
+    changelog = request.changelog
+
+    if not is_dev_server():
+        raise HTTPException(status_code=403, detail="This feature is only available on development server")
+
+    # Check if already building
+    ps_result = subprocess.run(["pgrep", "-f", "nuitka"], capture_output=True)
+    if ps_result.returncode == 0:
+        raise HTTPException(status_code=400, detail="Build already in progress. Please wait.")
+
+    # Check syntax first
+    syntax_check = subprocess.run(
+        ["python3", "-m", "py_compile", "/root/olt-manager/backend/main.py"],
+        capture_output=True
+    )
+    if syntax_check.returncode != 0:
+        raise HTTPException(status_code=400, detail=f"Syntax error in code: {syntax_check.stderr.decode()}")
+
+    # Initialize status
+    status = {
+        "stage": "starting",
+        "progress": 0,
+        "version": version,
+        "changelog": changelog,
+        "message": "Starting build and publish...",
+        "error": None,
+        "completed": False
+    }
+    BUILD_PUBLISH_STATUS_FILE.write_text(json_module.dumps(status))
+
+    # Create the build and publish script
+    changelog_escaped = changelog.replace("'", "'\\''")
+
+    build_publish_script = f'''#!/bin/bash
+set -e
+
+STATUS_FILE="/tmp/build_publish_status.json"
+VERSION="{version}"
+CHANGELOG='{changelog_escaped}'
+
+update_status() {{
+    echo '{{"stage": "'$1'", "progress": '$2', "version": "'$VERSION'", "changelog": "'"$CHANGELOG"'", "message": "'$3'", "error": null, "completed": false}}' > "$STATUS_FILE"
+}}
+
+error_status() {{
+    echo '{{"stage": "error", "progress": '$2', "version": "'$VERSION'", "changelog": "'"$CHANGELOG"'", "message": "'$3'", "error": "'$1'", "completed": true}}' > "$STATUS_FILE"
+    exit 1
+}}
+
+# Step 1: Update version
+update_status "version" 5 "Updating version to $VERSION..."
+echo "$VERSION" > /root/olt-manager/backend/VERSION
+
+# Step 2: Build binary
+update_status "building" 10 "Building binary (this takes 30-60 minutes)..."
+cd /root/olt-manager/backend
+source venv/bin/activate
+
+BUILD_DIR="/root/olt-manager/nuitka_build"
+rm -rf "$BUILD_DIR" main.build main.dist main.onefile-build 2>/dev/null || true
+mkdir -p "$BUILD_DIR"
+
+python -m nuitka --standalone --onefile --output-dir="$BUILD_DIR" --output-filename=olt-manager --follow-imports --prefer-source-code main.py 2>&1 || {{
+    error_status "Build failed" 50 "Nuitka build failed"
+}}
+
+if [ ! -f "$BUILD_DIR/olt-manager" ]; then
+    error_status "Binary not created" 50 "Build completed but binary not found"
+fi
+
+update_status "packaging" 70 "Creating package..."
+
+# Step 3: Create package
+PACKAGE_DIR="$BUILD_DIR/package"
+rm -rf "$PACKAGE_DIR" 2>/dev/null || true
+mkdir -p "$PACKAGE_DIR"
+mkdir -p "$PACKAGE_DIR/data"
+mkdir -p "$PACKAGE_DIR/uploads"
+
+cp "$BUILD_DIR/olt-manager" "$PACKAGE_DIR/"
+cp /root/olt-manager/backend/VERSION "$PACKAGE_DIR/"
+
+# Copy install script
+cat > "$PACKAGE_DIR/install.sh" << 'INSTALLEOF'
+#!/bin/bash
+set -e
+EXTRACT_DIR="${{1:-.}}"
+if [ "$EXTRACT_DIR" != "." ] && [ -d "$EXTRACT_DIR" ]; then cd "$EXTRACT_DIR"; fi
+echo "Installing OLT Manager..."
+systemctl stop olt-manager 2>/dev/null || true
+sleep 2
+mkdir -p /opt/olt-manager/data /opt/olt-manager/uploads
+
+# Database migration: Application uses /opt/olt-manager/data/olt_manager.db (absolute path)
+DB_BACKED_UP=false
+OLD_DB="/opt/olt-manager/olt_manager.db"
+NEW_DB="/opt/olt-manager/data/olt_manager.db"
+
+echo "Checking database locations..."
+
+# If old location is a symlink, resolve it
+if [ -L "$OLD_DB" ]; then
+    OLD_DB_REAL=$(readlink -f "$OLD_DB")
+    echo "  Old location is symlink -> $OLD_DB_REAL"
+else
+    OLD_DB_REAL="$OLD_DB"
+fi
+
+# Check what exists
+OLD_EXISTS=false
+NEW_EXISTS=false
+[ -f "$OLD_DB_REAL" ] && [ ! -L "$OLD_DB" ] && OLD_EXISTS=true
+[ -f "$NEW_DB" ] && NEW_EXISTS=true
+
+if [ "$OLD_EXISTS" = true ] && [ "$NEW_EXISTS" = true ]; then
+    OLD_SIZE=$(stat -c%s "$OLD_DB_REAL" 2>/dev/null || echo 0)
+    NEW_SIZE=$(stat -c%s "$NEW_DB" 2>/dev/null || echo 0)
+    if [ "$OLD_SIZE" -gt "$NEW_SIZE" ]; then
+        cp "$OLD_DB_REAL" /tmp/olt_manager.db.backup
+        echo "  Using larger database from old location"
+    else
+        cp "$NEW_DB" /tmp/olt_manager.db.backup
+        echo "  Using larger database from new location"
+    fi
+    DB_BACKED_UP=true
+elif [ "$OLD_EXISTS" = true ]; then
+    cp "$OLD_DB_REAL" /tmp/olt_manager.db.backup
+    echo "  Backed up database from old location (will migrate)"
+    DB_BACKED_UP=true
+elif [ "$NEW_EXISTS" = true ]; then
+    cp "$NEW_DB" /tmp/olt_manager.db.backup
+    echo "  Backed up database from new location"
+    DB_BACKED_UP=true
+fi
+
+[ -f "/opt/olt-manager/.license_pass" ] && cp /opt/olt-manager/.license_pass /tmp/.license_pass.backup
+
+# Install binary - ALWAYS use package binary if available
+if [ -f "olt-manager" ]; then
+    rm -f /opt/olt-manager/olt-manager.new 2>/dev/null || true
+    cp olt-manager /opt/olt-manager/
+    echo "Installed binary from package"
+elif [ -f "/opt/olt-manager/olt-manager.new" ]; then
+    mv /opt/olt-manager/olt-manager.new /opt/olt-manager/olt-manager
+    echo "Installed binary from .new file (fallback)"
+fi
+chmod +x /opt/olt-manager/olt-manager
+[ -f "VERSION" ] && cp VERSION /opt/olt-manager/
+
+if [ "$DB_BACKED_UP" = true ]; then
+    cp /tmp/olt_manager.db.backup /opt/olt-manager/data/olt_manager.db
+    echo "Database restored to /opt/olt-manager/data/olt_manager.db"
+fi
+
+# CRITICAL: Remove old database and create symlink for compatibility
+rm -f /opt/olt-manager/olt_manager.db 2>/dev/null || true
+ln -sf /opt/olt-manager/data/olt_manager.db /opt/olt-manager/olt_manager.db
+
+[ -f "/tmp/.license_pass.backup" ] && cp /tmp/.license_pass.backup /opt/olt-manager/.license_pass
+systemctl daemon-reload
+systemctl enable olt-manager
+systemctl start olt-manager
+sleep 3
+echo "OLT Manager installed successfully!"
+echo "Database: /opt/olt-manager/data/olt_manager.db"
+INSTALLEOF
+chmod +x "$PACKAGE_DIR/install.sh"
+
+# Copy static files if exist
+[ -d "/root/olt-manager/nuitka_build/main.dist/static" ] && cp -r /root/olt-manager/nuitka_build/main.dist/static "$PACKAGE_DIR/"
+
+# Create service file
+cat > "$PACKAGE_DIR/olt-manager.service" << 'SVCEOF'
+[Unit]
+Description=OLT Manager Backend
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/opt/olt-manager
+ExecStart=/opt/olt-manager/run.sh
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+cd "$PACKAGE_DIR"
+tar -czf /tmp/olt-manager-$VERSION.tar.gz .
+
+update_status "uploading" 85 "Uploading to license server..."
+
+# Step 4: Upload to license server
+scp -o StrictHostKeyChecking=no /tmp/olt-manager-$VERSION.tar.gz testuser@109.110.185.101:/tmp/ || {{
+    error_status "SCP upload failed" 85 "Failed to upload to license server"
+}}
+
+ssh -o StrictHostKeyChecking=no testuser@109.110.185.101 "
+sudo cp /tmp/olt-manager-$VERSION.tar.gz /var/www/html/downloads/olt-manager.tar.gz
+sudo cp /tmp/olt-manager-$VERSION.tar.gz /opt/license-server/updates/olt-manager-$VERSION.tar.gz
+sudo cp /tmp/olt-manager-$VERSION.tar.gz /opt/license-server/updates/olt-manager.tar.gz
+sudo chmod 644 /var/www/html/downloads/olt-manager.tar.gz
+sudo chmod 644 /opt/license-server/updates/*.tar.gz
+" || {{
+    error_status "SSH commands failed" 90 "Failed to copy files on license server"
+}}
+
+update_status "updating" 95 "Updating version info..."
+
+# Step 5: Update updates.json
+ssh -o StrictHostKeyChecking=no testuser@109.110.185.101 "
+sudo python3 << PYEOF
+import json
+from datetime import datetime
+with open('/opt/license-server/updates.json', 'r') as f:
+    data = json.load(f)
+data['latest'] = '$VERSION'
+data['latest_version'] = '$VERSION'
+data['download_url'] = 'https://lic.proxpanel.com/downloads/olt-manager.tar.gz'
+data['changelog'] = \"$CHANGELOG\"
+data['release_date'] = datetime.now().strftime('%Y-%m-%d')
+new_version = {{'version': '$VERSION', 'changelog': \"$CHANGELOG\", 'filename': 'olt-manager-$VERSION.tar.gz', 'uploaded_at': datetime.now().strftime('%Y-%m-%d')}}
+if 'versions' not in data: data['versions'] = []
+data['versions'] = [v for v in data['versions'] if v.get('version') != '$VERSION']
+data['versions'].insert(0, new_version)
+with open('/opt/license-server/updates.json', 'w') as f:
+    json.dump(data, f, indent=2)
+print('OK')
+PYEOF
+" || {{
+    error_status "Failed to update version info" 95 "Could not update updates.json"
+}}
+
+# Done!
+echo '{{"stage": "completed", "progress": 100, "version": "'$VERSION'", "changelog": "'"$CHANGELOG"'", "message": "Version '$VERSION' published successfully!", "error": null, "completed": true}}' > "$STATUS_FILE"
+'''
+
+    # Write script to file and execute in background
+    script_path = Path("/tmp/build_and_publish.sh")
+    script_path.write_text(build_publish_script)
+    script_path.chmod(0o755)
+
+    subprocess.Popen(
+        ["bash", str(script_path)],
+        stdout=open("/tmp/build_publish.log", "w"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True
+    )
+
+    return {
+        "success": True,
+        "message": f"Build and publish started for version {version}. Check progress with /api/dev/build-publish-status"
+    }
+
+
+@app.get("/api/dev/build-publish-status")
+async def get_build_publish_status(current_user: User = Depends(require_admin)):
+    """Get status of build and publish process"""
+    import json as json_module
+
+    if not BUILD_PUBLISH_STATUS_FILE.exists():
+        return {
+            "stage": "idle",
+            "progress": 0,
+            "message": "No build in progress",
+            "completed": True
+        }
+
+    try:
+        status = json_module.loads(BUILD_PUBLISH_STATUS_FILE.read_text())
+        return status
+    except:
+        return {
+            "stage": "unknown",
+            "progress": 0,
+            "message": "Could not read status",
+            "completed": True
+        }
 
 
 # ============ Settings API ============
@@ -4116,15 +4468,19 @@ def change_password(
     current_password = data.get("current_password")
     new_password = data.get("new_password")
 
-    if not current_password or not new_password:
-        raise HTTPException(status_code=400, detail="Current password and new password are required")
+    if not new_password:
+        raise HTTPException(status_code=400, detail="New password is required")
 
     if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="New password must be at least 4 characters")
 
-    # Verify current password
-    if not bcrypt.checkpw(current_password.encode('utf-8'), current_user.password_hash.encode('utf-8')):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    # Skip current password check if must_change_password is set (first login)
+    if not current_user.must_change_password:
+        if not current_password:
+            raise HTTPException(status_code=400, detail="Current password is required")
+        # Verify current password
+        if not bcrypt.checkpw(current_password.encode('utf-8'), current_user.password_hash.encode('utf-8')):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     # Update password and reset must_change_password flag
     new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -7732,6 +8088,57 @@ def get_service_status(
         disk_used = disk_parts[2]
         disk_percent = disk_parts[4]
 
+        # Get CPU load averages
+        with open('/proc/loadavg', 'r') as f:
+            loadavg = f.read().split()
+            cpu_load_1 = float(loadavg[0])
+            cpu_load_5 = float(loadavg[1])
+            cpu_load_15 = float(loadavg[2])
+
+        # Get CPU count
+        import os
+        cpu_count = os.cpu_count() or 1
+
+        # Get actual CPU usage from /proc/stat
+        cpu_percent = 0.0
+        try:
+            with open('/proc/stat', 'r') as f:
+                line = f.readline()  # First line is total CPU
+                parts = line.split()
+                # cpu user nice system idle iowait irq softirq
+                user = int(parts[1])
+                nice = int(parts[2])
+                system = int(parts[3])
+                idle = int(parts[4])
+                iowait = int(parts[5]) if len(parts) > 5 else 0
+
+                total = user + nice + system + idle + iowait
+                busy = user + nice + system
+
+                # Read again after short delay to get delta
+                import time
+                time.sleep(0.1)
+
+                with open('/proc/stat', 'r') as f2:
+                    line2 = f2.readline()
+                    parts2 = line2.split()
+                    user2 = int(parts2[1])
+                    nice2 = int(parts2[2])
+                    system2 = int(parts2[3])
+                    idle2 = int(parts2[4])
+                    iowait2 = int(parts2[5]) if len(parts2) > 5 else 0
+
+                    total2 = user2 + nice2 + system2 + idle2 + iowait2
+                    busy2 = user2 + nice2 + system2
+
+                    total_delta = total2 - total
+                    busy_delta = busy2 - busy
+
+                    if total_delta > 0:
+                        cpu_percent = round(busy_delta / total_delta * 100, 1)
+        except:
+            cpu_percent = 0.0
+
         return {
             "service": {
                 "name": "olt-manager",
@@ -7746,7 +8153,12 @@ def get_service_status(
                 "memory_percent": round(used_mem / total_mem * 100, 1),
                 "disk_total": disk_total,
                 "disk_used": disk_used,
-                "disk_percent": disk_percent
+                "disk_percent": disk_percent,
+                "cpu_load_1": cpu_load_1,
+                "cpu_load_5": cpu_load_5,
+                "cpu_load_15": cpu_load_15,
+                "cpu_count": cpu_count,
+                "cpu_percent": cpu_percent
             }
         }
     except Exception as e:
@@ -7763,8 +8175,8 @@ def restart_service(
     import subprocess
 
     try:
-        # Log the action
-        log_event(db, 'service_restart', 'system', None, None,
+        # Log the action (use 0 for system entity_id)
+        log_event(db, 'service_restart', 'system', 0, None,
                  f"Service restart initiated by {current_user.username}")
 
         # Schedule restart in background (give time for response)
@@ -7793,8 +8205,8 @@ def reboot_server(
     import subprocess
 
     try:
-        # Log the action
-        log_event(db, 'server_reboot', 'system', None, None,
+        # Log the action (use 0 for system entity_id)
+        log_event(db, 'server_reboot', 'system', 0, None,
                  f"Server reboot initiated by {current_user.username}")
 
         # Schedule reboot
@@ -7822,8 +8234,8 @@ def stop_service(
     import subprocess
 
     try:
-        # Log the action
-        log_event(db, 'service_stop', 'system', None, None,
+        # Log the action (use 0 for system entity_id)
+        log_event(db, 'service_stop', 'system', 0, None,
                  f"Service stop initiated by {current_user.username}")
 
         # Schedule stop in background
@@ -7840,6 +8252,216 @@ def stop_service(
     except Exception as e:
         logger.error(f"Error stopping service: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ Network Diagnostic Tools ============
+
+@app.post("/api/tools/ping")
+async def ping_host(
+    data: dict,
+    current_user: User = Depends(require_auth)
+):
+    """Ping a host and return results"""
+    import subprocess
+    import re
+
+    host = data.get("host", "").strip()
+    count = min(int(data.get("count", 4)), 10)  # Max 10 pings
+
+    if not host:
+        raise HTTPException(status_code=400, detail="Host is required")
+
+    # Validate host (prevent command injection)
+    if not re.match(r'^[a-zA-Z0-9.\-]+$', host):
+        raise HTTPException(status_code=400, detail="Invalid host format")
+
+    try:
+        result = subprocess.run(
+            ['ping', '-c', str(count), '-W', '2', host],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        return {
+            "success": result.returncode == 0,
+            "output": result.stdout + result.stderr,
+            "host": host
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "output": "Ping timeout", "host": host}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tools/traceroute")
+async def traceroute_host(
+    data: dict,
+    current_user: User = Depends(require_auth)
+):
+    """Traceroute to a host"""
+    import subprocess
+    import re
+
+    host = data.get("host", "").strip()
+    max_hops = min(int(data.get("max_hops", 20)), 30)  # Max 30 hops
+
+    if not host:
+        raise HTTPException(status_code=400, detail="Host is required")
+
+    # Validate host (prevent command injection)
+    if not re.match(r'^[a-zA-Z0-9.\-]+$', host):
+        raise HTTPException(status_code=400, detail="Invalid host format")
+
+    try:
+        result = subprocess.run(
+            ['traceroute', '-m', str(max_hops), '-w', '2', host],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        return {
+            "success": True,
+            "output": result.stdout + result.stderr,
+            "host": host
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "output": "Traceroute timeout", "host": host}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tools/port-check")
+async def check_port(
+    data: dict,
+    current_user: User = Depends(require_auth)
+):
+    """Check if a port is open on a host"""
+    import socket
+    import re
+
+    host = data.get("host", "").strip()
+    port = int(data.get("port", 161))  # Default SNMP port
+    timeout = min(float(data.get("timeout", 3)), 10)  # Max 10 seconds
+
+    if not host:
+        raise HTTPException(status_code=400, detail="Host is required")
+
+    # Validate host (prevent command injection)
+    if not re.match(r'^[a-zA-Z0-9.\-]+$', host):
+        raise HTTPException(status_code=400, detail="Invalid host format")
+
+    if port < 1 or port > 65535:
+        raise HTTPException(status_code=400, detail="Port must be between 1 and 65535")
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+
+        is_open = result == 0
+        return {
+            "success": True,
+            "host": host,
+            "port": port,
+            "is_open": is_open,
+            "message": f"Port {port} is {'OPEN' if is_open else 'CLOSED/FILTERED'} on {host}"
+        }
+    except socket.gaierror:
+        return {
+            "success": False,
+            "host": host,
+            "port": port,
+            "is_open": False,
+            "message": f"Could not resolve hostname: {host}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tools/snmp-check")
+async def check_snmp(
+    data: dict,
+    current_user: User = Depends(require_auth)
+):
+    """Check if SNMP is responding on a host using snmpget command"""
+    import subprocess
+    import re
+
+    host = data.get("host", "").strip()
+    community = data.get("community", "public")
+    port = int(data.get("port", 161))
+
+    if not host:
+        raise HTTPException(status_code=400, detail="Host is required")
+
+    # Validate host format
+    if not re.match(r'^[a-zA-Z0-9.\-]+$', host):
+        raise HTTPException(status_code=400, detail="Invalid host format")
+
+    # Validate community string (prevent injection)
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', community):
+        raise HTTPException(status_code=400, detail="Invalid community string format")
+
+    try:
+        # Use snmpget command to query sysDescr (OID 1.3.6.1.2.1.1.1.0)
+        result = subprocess.run(
+            ['snmpget', '-v', '2c', '-c', community, '-t', '3', '-r', '1',
+             f'{host}:{port}', '1.3.6.1.2.1.1.1.0'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout:
+            # Parse sysDescr from output
+            output = result.stdout.strip()
+            # Extract value after "STRING:" or "="
+            sys_descr = "Unknown"
+            if "STRING:" in output:
+                sys_descr = output.split("STRING:")[-1].strip().strip('"')
+            elif "=" in output:
+                sys_descr = output.split("=")[-1].strip().strip('"')
+
+            return {
+                "success": True,
+                "host": host,
+                "port": port,
+                "responding": True,
+                "sys_descr": sys_descr,
+                "message": f"SNMP responding on {host}:{port}"
+            }
+        else:
+            error_msg = result.stderr.strip() if result.stderr else "No response"
+            # Clean up error message
+            if "Timeout" in error_msg or "No Response" in error_msg:
+                error_msg = "SNMP timeout - device not responding"
+            elif "Unknown host" in error_msg:
+                error_msg = "Unknown host"
+
+            return {
+                "success": False,
+                "host": host,
+                "port": port,
+                "responding": False,
+                "message": error_msg
+            }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "host": host,
+            "port": port,
+            "responding": False,
+            "message": "SNMP check timeout"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "host": host,
+            "port": port,
+            "responding": False,
+            "message": f"SNMP check failed: {str(e)}"
+        }
 
 
 # Catch-all route to serve React frontend (must be LAST)
