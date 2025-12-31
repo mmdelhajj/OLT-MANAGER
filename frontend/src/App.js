@@ -1737,8 +1737,31 @@ function UserModal({ isOpen, onClose, user, onSubmit, olts }) {
   );
 }
 
+// Common Timezones List
+const COMMON_TIMEZONES = [
+  { value: 'UTC', label: 'UTC (Coordinated Universal Time)', offset: '+00:00' },
+  { value: 'Europe/London', label: 'London (GMT/BST)', offset: '+00:00' },
+  { value: 'Europe/Paris', label: 'Paris, Berlin (CET)', offset: '+01:00' },
+  { value: 'Europe/Athens', label: 'Athens, Helsinki (EET)', offset: '+02:00' },
+  { value: 'Asia/Beirut', label: 'Beirut (EET)', offset: '+02:00' },
+  { value: 'Asia/Jerusalem', label: 'Jerusalem (IST)', offset: '+02:00' },
+  { value: 'Asia/Dubai', label: 'Dubai (GST)', offset: '+04:00' },
+  { value: 'Asia/Karachi', label: 'Karachi (PKT)', offset: '+05:00' },
+  { value: 'Asia/Kolkata', label: 'Mumbai, Kolkata (IST)', offset: '+05:30' },
+  { value: 'Asia/Bangkok', label: 'Bangkok, Jakarta (ICT)', offset: '+07:00' },
+  { value: 'Asia/Singapore', label: 'Singapore, Hong Kong (SGT)', offset: '+08:00' },
+  { value: 'Asia/Tokyo', label: 'Tokyo, Seoul (JST)', offset: '+09:00' },
+  { value: 'Australia/Sydney', label: 'Sydney (AEST)', offset: '+10:00' },
+  { value: 'Pacific/Auckland', label: 'Auckland (NZST)', offset: '+12:00' },
+  { value: 'America/New_York', label: 'New York (EST/EDT)', offset: '-05:00' },
+  { value: 'America/Chicago', label: 'Chicago (CST/CDT)', offset: '-06:00' },
+  { value: 'America/Denver', label: 'Denver (MST/MDT)', offset: '-07:00' },
+  { value: 'America/Los_Angeles', label: 'Los Angeles (PST/PDT)', offset: '-08:00' },
+  { value: 'America/Sao_Paulo', label: 'Sao Paulo (BRT)', offset: '-03:00' },
+];
+
 // Settings Modal
-function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, licenseInfo, defaultTab = 'general' }) {
+function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, licenseInfo, defaultTab = 'general', timezone, onTimezoneChange }) {
   const darkMode = useContext(DarkModeContext);
   const [formData, setFormData] = useState({
     system_name: 'OLT Manager',
@@ -2168,6 +2191,30 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
                 onChange={(e) => setFormData({ ...formData, polling_interval: parseInt(e.target.value) })}
               />
               <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>How often to poll OLTs for ONU status (60-3600 seconds)</p>
+            </div>
+
+            {/* Timezone Selector */}
+            <div>
+              <label className={`block text-sm font-medium mb-1 ${darkMode ? 'text-slate-300' : 'text-gray-700'}`}>
+                <span className="flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  Timezone
+                </span>
+              </label>
+              <select
+                className={`w-full rounded-lg shadow-sm border p-3 focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'border-gray-300'}`}
+                value={timezone || 'UTC'}
+                onChange={(e) => onTimezoneChange && onTimezoneChange(e.target.value)}
+              >
+                {COMMON_TIMEZONES.map((tz) => (
+                  <option key={tz.value} value={tz.value}>
+                    {tz.label} ({tz.offset})
+                  </option>
+                ))}
+              </select>
+              <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Select your timezone for the clock display in the header</p>
             </div>
           </div>
           <div className="mt-6 flex justify-end">
@@ -8769,6 +8816,58 @@ function Dashboard({ user, onLogout, pageName }) {
       return newValue;
     });
   };
+
+  // Timezone state with localStorage persistence
+  const [timezone, setTimezone] = useState(() => {
+    const saved = localStorage.getItem('timezone');
+    return saved || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  });
+
+  // Current time state - updates every second
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Update current time every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Format time based on selected timezone
+  const formatTime = (date) => {
+    try {
+      return date.toLocaleTimeString('en-US', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      });
+    } catch (e) {
+      return date.toLocaleTimeString();
+    }
+  };
+
+  // Format date based on selected timezone
+  const formatDate = (date) => {
+    try {
+      return date.toLocaleDateString('en-US', {
+        timeZone: timezone,
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric'
+      });
+    } catch (e) {
+      return date.toLocaleDateString();
+    }
+  };
+
+  // Update timezone and save to localStorage
+  const updateTimezone = (tz) => {
+    setTimezone(tz);
+    localStorage.setItem('timezone', tz);
+  };
   const [mobilePreviewImages, setMobilePreviewImages] = useState(null);
   const [mobilePreviewTitle, setMobilePreviewTitle] = useState('');
   const [trafficData, setTrafficData] = useState(null);
@@ -9323,6 +9422,16 @@ function Dashboard({ user, onLogout, pageName }) {
               </h1>
             </div>
             <div className="flex items-center gap-2">
+              {/* Clock Display */}
+              <div className={`hidden md:flex items-center gap-2 px-3 py-1 rounded-lg ${darkMode ? 'bg-slate-700' : 'bg-gray-100'}`}>
+                <svg className={`w-4 h-4 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div className="text-right">
+                  <p className={`text-sm font-semibold tabular-nums ${darkMode ? 'text-white' : 'text-gray-900'}`}>{formatTime(currentTime)}</p>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>{formatDate(currentTime)}</p>
+                </div>
+              </div>
               <div className="hidden sm:flex items-center gap-1 px-2 py-0.5 bg-[#d1fae5] rounded-full">
                 <span className="w-1.5 h-1.5 bg-[#059669] rounded-full animate-pulse"></span>
                 <span className="text-xs font-medium text-[#059669]">Live</span>
@@ -10505,6 +10614,8 @@ function Dashboard({ user, onLogout, pageName }) {
         onChangePassword={handleChangePassword}
         licenseInfo={licenseInfo}
         defaultTab={settingsDefaultTab}
+        timezone={timezone}
+        onTimezoneChange={updateTimezone}
       />
       <TrafficGraphModal
         isOpen={showTrafficGraphModal}
