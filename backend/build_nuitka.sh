@@ -113,14 +113,30 @@ NEW_VERSION="$2"
 if [ -z "$OLT_UPDATE_SYSTEMD" ]; then
     echo "$(date): Launching update via systemd transient service" > $LOG
 
-    # Copy script to fixed location
+    # Copy script and extract dir to fixed locations
     cp "$0" /tmp/olt-install-runner.sh
     chmod +x /tmp/olt-install-runner.sh
 
+    # Copy extract dir contents to a fixed location that persists
+    FIXED_EXTRACT="/tmp/olt-update-files"
+    rm -rf "$FIXED_EXTRACT"
+    cp -r "$EXTRACT_DIR" "$FIXED_EXTRACT"
+    echo "$(date): Copied files to $FIXED_EXTRACT" >> $LOG
+
     # Create and run as transient systemd service (survives parent death)
-    systemd-run --unit=olt-update-$(date +%s) --description="OLT Manager Update" \
+    UNIT_NAME="olt-update-$(date +%s)"
+    systemd-run --unit="$UNIT_NAME" --description="OLT Manager Update" \
         --setenv=OLT_UPDATE_SYSTEMD=1 \
-        /bin/bash /tmp/olt-install-runner.sh "$EXTRACT_DIR" "$NEW_VERSION" >> $LOG 2>&1 &
+        /bin/bash /tmp/olt-install-runner.sh "$FIXED_EXTRACT" "$NEW_VERSION" >> $LOG 2>&1
+
+    RESULT=$?
+    echo "$(date): systemd-run exit code: $RESULT" >> $LOG
+
+    if [ $RESULT -ne 0 ]; then
+        echo "$(date): systemd-run failed, trying direct execution" >> $LOG
+        export OLT_UPDATE_SYSTEMD=1
+        nohup /bin/bash /tmp/olt-install-runner.sh "$FIXED_EXTRACT" "$NEW_VERSION" >> $LOG 2>&1 &
+    fi
 
     echo "$(date): Update service launched" >> $LOG
     exit 0

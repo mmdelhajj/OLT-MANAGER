@@ -2848,13 +2848,15 @@ def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(r
 
         # Log event in same transaction (optional - don't fail if this fails)
         try:
+            current_time = get_current_time_in_timezone(db)
             event = EventLog(
                 event_type='onu_deleted',
                 entity_type='onu',
                 entity_id=onu_id,
                 olt_id=olt_id,
                 description=f"ONU '{onu_name}' ({onu_mac}) deleted by {user.username}" +
-                           (f" - also removed from OLT" if olt_delete_success else "")
+                           (f" - also removed from OLT" if olt_delete_success else ""),
+                created_at=current_time
             )
             db.add(event)
             logger.info(f"Created event log for ONU deletion")
@@ -8077,13 +8079,16 @@ def log_event(db: Session, event_type: str, entity_type: str, entity_id: int,
               olt_id: int = None, description: str = None, details: dict = None):
     """Helper function to log events"""
     try:
+        # Use timezone from settings
+        current_time = get_current_time_in_timezone(db)
         event = EventLog(
             event_type=event_type,
             entity_type=entity_type,
             entity_id=entity_id,
             olt_id=olt_id,
             description=description,
-            details=json.dumps(details) if details else None
+            details=json.dumps(details) if details else None,
+            created_at=current_time
         )
         db.add(event)
         db.commit()
