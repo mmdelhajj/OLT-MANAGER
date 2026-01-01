@@ -99,6 +99,94 @@ EOF
 # Copy version file from backend (just the version number)
 cp "$BACKEND_DIR/VERSION" "$BUILD_DIR/package/VERSION"
 
+# Create install.sh for automatic update handling
+# Uses systemd transient unit for reliable execution that survives service restart
+cat > "$BUILD_DIR/package/install.sh" << 'INSTALLEOF'
+#!/bin/bash
+# OLT Manager Update Install Script
+
+LOG="/tmp/olt-update-install.log"
+EXTRACT_DIR="$1"
+NEW_VERSION="$2"
+
+# If called directly (not via systemd-run), re-launch as transient systemd service
+if [ -z "$OLT_UPDATE_SYSTEMD" ]; then
+    echo "$(date): Launching update via systemd transient service" > $LOG
+
+    # Copy script to fixed location
+    cp "$0" /tmp/olt-install-runner.sh
+    chmod +x /tmp/olt-install-runner.sh
+
+    # Create and run as transient systemd service (survives parent death)
+    systemd-run --unit=olt-update-$(date +%s) --description="OLT Manager Update" \
+        --setenv=OLT_UPDATE_SYSTEMD=1 \
+        /bin/bash /tmp/olt-install-runner.sh "$EXTRACT_DIR" "$NEW_VERSION" >> $LOG 2>&1 &
+
+    echo "$(date): Update service launched" >> $LOG
+    exit 0
+fi
+
+# Running via systemd - do the actual update
+echo "$(date): Starting update install" >> $LOG
+
+# Wait a moment for calling process to finish
+sleep 3
+
+check_health() {
+    for i in {1..15}; do
+        sleep 2
+        if curl -s --connect-timeout 3 http://127.0.0.1:8000/api/update-check > /dev/null 2>&1; then
+            echo "$(date): Health check passed on attempt $i" >> $LOG
+            return 0
+        fi
+        echo "$(date): Health check attempt $i failed" >> $LOG
+    done
+    return 1
+}
+
+# Stop service
+echo "$(date): Stopping service..." >> $LOG
+systemctl stop olt-manager 2>/dev/null || systemctl stop olt-backend 2>/dev/null
+sleep 2
+
+# Backup and install new binary
+cd /opt/olt-manager
+[ -f olt-manager ] && cp olt-manager olt-manager.backup && echo "$(date): Backed up old binary" >> $LOG
+[ -f "$EXTRACT_DIR/olt-manager" ] && cp "$EXTRACT_DIR/olt-manager" /opt/olt-manager/olt-manager && chmod +x /opt/olt-manager/olt-manager && echo "$(date): Installed new binary" >> $LOG
+[ -f "$EXTRACT_DIR/VERSION" ] && cp "$EXTRACT_DIR/VERSION" /opt/olt-manager/VERSION && echo "$(date): Updated VERSION" >> $LOG
+
+# Download and install frontend
+echo "$(date): Downloading frontend..." >> $LOG
+curl -sSL https://lic.proxpanel.com/downloads/frontend.tar.gz -o /tmp/frontend.tar.gz 2>>$LOG
+if [ -f /tmp/frontend.tar.gz ]; then
+    rm -rf /var/www/html/*
+    tar -xzf /tmp/frontend.tar.gz -C /var/www/html/
+    rm -f /tmp/frontend.tar.gz
+    echo "$(date): Frontend installed" >> $LOG
+fi
+
+# Start service
+echo "$(date): Starting service..." >> $LOG
+systemctl start olt-manager 2>/dev/null || systemctl start olt-backend 2>/dev/null
+
+# Health check with rollback
+if check_health; then
+    echo "$(date): UPDATE SUCCESSFUL!" >> $LOG
+    rm -f /opt/olt-manager/olt-manager.backup
+    rm -f /tmp/olt-install-runner.sh
+    exit 0
+else
+    echo "$(date): Health check failed, rolling back..." >> $LOG
+    systemctl stop olt-manager 2>/dev/null || systemctl stop olt-backend 2>/dev/null
+    [ -f /opt/olt-manager/olt-manager.backup ] && mv /opt/olt-manager/olt-manager.backup /opt/olt-manager/olt-manager && chmod +x /opt/olt-manager/olt-manager
+    systemctl start olt-manager 2>/dev/null || systemctl start olt-backend 2>/dev/null
+    echo "$(date): Rollback completed" >> $LOG
+    rm -f /tmp/olt-install-runner.sh
+    exit 1
+fi
+INSTALLEOF
+chmod +x "$BUILD_DIR/package/install.sh"
+
 # Package
 cd "$BUILD_DIR/package"
 FILENAME="olt-manager-compiled-$(date +%Y%m%d).tar.gz"

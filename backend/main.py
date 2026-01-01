@@ -1099,7 +1099,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
 
                         # Update OLT status
                         olt.is_online = True
-                        olt.last_poll = datetime.utcnow()
+                        olt.last_poll = get_current_time_in_timezone(db)
                         olt.last_error = None
 
                         # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data)
@@ -1255,6 +1255,9 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                                 # Check ONU limit before creating new ONU
                                 if onu_limit_reached:
                                     logger.warning(f"ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
+                                    # Log event so user can see in Event History
+                                    log_event(db, 'onu_limit_reached', 'system', 0, olt.id,
+                                              f"ONU limit reached ({max_onus}). New ONU {onu_data.mac_address} not added. Upgrade license to add more ONUs.")
                                     continue
 
                                 # Create new ONU from SNMP (now includes pon_port and onu_id)
@@ -1335,7 +1338,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
             except Exception as e:
                 logger.error(f"Failed to poll OLT {olt.name}: {e}")
                 olt.is_online = False
-                olt.last_poll = datetime.utcnow()
+                olt.last_poll = get_current_time_in_timezone(db)
                 olt.last_error = str(e)
 
                 # Send OLT offline notification if it was online before
@@ -1401,6 +1404,63 @@ async def cleanup_old_data(db_session_factory, retention_days: int = 7):
         db.close()
 
 
+async def check_and_run_auto_backup(db_session_factory):
+    """Check if auto backup is due and run it"""
+    logger.info("Checking for scheduled auto backup...")
+    db = db_session_factory()
+    try:
+        settings = db.query(BackupSettings).first()
+        if not settings or not settings.auto_backup_enabled:
+            logger.info("Auto backup disabled or no settings")
+            return
+
+        if not settings.next_backup_at:
+            logger.info("No next_backup_at time set")
+            return
+
+        now = datetime.now()
+        logger.info(f"Auto backup check: now={now}, scheduled={settings.next_backup_at}")
+        if now >= settings.next_backup_at:
+            logger.info("Auto backup triggered - running scheduled backup")
+
+            # Run the backup
+            success, backup_path, file_size = create_system_backup_file(db, include_uploads=False)
+
+            if success:
+                # Save backup record
+                backup = SystemBackup(
+                    filename=backup_path.name,
+                    file_size=file_size if isinstance(file_size, int) else 0,
+                    backup_type='scheduled',
+                    storage_type='local',
+                    storage_path=str(backup_path),
+                    includes_db=True,
+                    includes_config=True,
+                    includes_uploads=False,
+                    status='completed',
+                    notes='Automatic scheduled backup'
+                )
+                db.add(backup)
+
+                # Update last backup info
+                settings.last_backup_at = now
+                settings.last_backup_status = 'completed'
+
+                logger.info(f"Auto backup completed: {backup_path.name}")
+            else:
+                settings.last_backup_status = 'failed'
+                logger.error(f"Auto backup failed: {file_size}")
+
+            # Calculate next backup time
+            settings.next_backup_at = calculate_next_backup_time(settings)
+            db.commit()
+
+    except Exception as e:
+        logger.error(f"Auto backup check error: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
 async def polling_loop(db_session_factory):
     """Background loop to poll OLTs periodically"""
     global cleanup_counter
@@ -1412,6 +1472,9 @@ async def polling_loop(db_session_factory):
             await asyncio.sleep(POLL_INTERVAL)
             logger.info("Starting scheduled poll cycle")
             await poll_all_olts(db_session_factory)
+
+            # Check for auto backup
+            await check_and_run_auto_backup(db_session_factory)
 
             # Run cleanup periodically (every CLEANUP_INTERVAL_CYCLES polls)
             cleanup_counter += 1
@@ -1837,6 +1900,10 @@ def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Ses
     db.commit()
     db.refresh(olt)
 
+    # Log event
+    log_event(db, 'olt_created', 'olt', olt.id, olt.id,
+              f"OLT '{olt.name}' ({olt.ip_address}) added by {user.username}")
+
     return OLTResponse(
         id=olt.id,
         name=olt.name,
@@ -1903,8 +1970,19 @@ def delete_olt(olt_id: int, user: User = Depends(require_admin), db: Session = D
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
+    # Store info before delete for logging
+    olt_name = olt.name
+    olt_ip = olt.ip_address
+    onu_count = db.query(ONU).filter(ONU.olt_id == olt_id).count()
+
     db.delete(olt)
     db.commit()
+
+    # Log event
+    log_event(db, 'olt_deleted', 'olt', olt_id, None,
+              f"OLT '{olt_name}' ({olt_ip}) deleted by {user.username}" +
+              (f" - {onu_count} ONUs also removed" if onu_count > 0 else ""))
+
     return None
 
 
@@ -1928,7 +2006,7 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
 
         # Update database (same logic as polling loop)
         olt.is_online = True
-        olt.last_poll = datetime.utcnow()
+        olt.last_poll = get_current_time_in_timezone(db)
         olt.last_error = None
 
         existing_onus = {
@@ -1994,6 +2072,9 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
                 # Check ONU limit before creating new ONU
                 if onu_limit_reached:
                     logger.warning(f"[Manual Poll] ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
+                    # Log event so user can see in Event History
+                    log_event(db, 'onu_limit_reached', 'system', 0, olt.id,
+                              f"ONU limit reached ({max_onus}). New ONU {onu_data.mac_address} not added. Upgrade license to add more ONUs.")
                     continue
 
                 new_onu = ONU(
@@ -2054,7 +2135,7 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
 
     except Exception as e:
         olt.is_online = False
-        olt.last_poll = datetime.utcnow()
+        olt.last_poll = get_current_time_in_timezone(db)
         olt.last_error = str(e)
         db.commit()
 
@@ -2713,45 +2794,83 @@ def delete_onu_image(onu_id: int, image_index: int = 0, user: User = Depends(req
 @app.delete("/api/onus/{onu_id}", status_code=204)
 def delete_onu(onu_id: int, delete_from_olt: bool = True, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Delete ONU record (admin only). Also deletes from OLT if delete_from_olt=true."""
-    from olt_web_scraper import delete_onu_web
+    logger.info(f"Delete ONU request: onu_id={onu_id}, delete_from_olt={delete_from_olt}, user={user.username}")
+    try:
+        from olt_web_scraper import delete_onu_web
 
-    onu = db.query(ONU).filter(ONU.id == onu_id).first()
-    if not onu:
-        raise HTTPException(status_code=404, detail="ONU not found")
+        onu = db.query(ONU).filter(ONU.id == onu_id).first()
+        if not onu:
+            raise HTTPException(status_code=404, detail="ONU not found")
 
-    # Try to delete from OLT first if requested
-    olt_delete_success = False
-    olt_delete_error = None
+        # Try to delete from OLT first if requested
+        olt_delete_success = False
 
-    # Delete from OLT if requested and OLT is online
-    if delete_from_olt:
-        # Get the OLT
-        olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
-        if olt and olt.is_online:
-            try:
-                # Use web credentials if set, otherwise fall back to standard credentials
-                web_user = olt.web_username or olt.username or 'admin'
-                web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) or 'admin'
+        # Delete from OLT if requested and OLT is online
+        if delete_from_olt:
+            # Get the OLT
+            olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
+            if olt and olt.is_online:
+                try:
+                    # Use web credentials if set, otherwise fall back to standard credentials
+                    web_user = olt.web_username or olt.username or 'admin'
+                    web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) or 'admin'
 
-                olt_delete_success = delete_onu_web(
-                    ip=olt.ip_address,
-                    pon_port=onu.pon_port,
-                    onu_id=onu.onu_id,
-                    username=web_user,
-                    password=web_pass
-                )
-                if olt_delete_success:
-                    logger.info(f"Successfully deleted ONU {onu.mac_address} from OLT {olt.name}")
-            except Exception as e:
-                olt_delete_error = str(e)
-                logger.warning(f"Failed to delete ONU from OLT: {e}")
-        elif olt and not olt.is_online:
-            logger.warning(f"OLT {olt.name} is offline - cannot delete ONU from OLT")
+                    olt_delete_success = delete_onu_web(
+                        ip=olt.ip_address,
+                        pon_port=onu.pon_port,
+                        onu_id=onu.onu_id,
+                        username=web_user,
+                        password=web_pass
+                    )
+                    if olt_delete_success:
+                        logger.info(f"Successfully deleted ONU {onu.mac_address} from OLT {olt.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete ONU from OLT: {e}")
+            elif olt and not olt.is_online:
+                logger.warning(f"OLT {olt.name} is offline - cannot delete ONU from OLT")
 
-    # Delete from database only (not from OLT if offline)
-    db.delete(onu)
-    db.commit()
-    return None
+        # Store info before delete for logging
+        onu_mac = onu.mac_address
+        onu_name = onu.description or onu_mac
+        olt_id = onu.olt_id
+
+        # Delete related traffic history records first (foreign key constraint)
+        logger.info(f"Deleting traffic history for ONU {onu_id}")
+        try:
+            deleted_count = db.query(TrafficHistory).filter(TrafficHistory.onu_db_id == onu_id).delete(synchronize_session='fetch')
+            logger.info(f"Deleted {deleted_count} traffic history records")
+        except Exception as e:
+            logger.warning(f"Error deleting traffic history: {e}")
+
+        # Delete from database
+        logger.info(f"Deleting ONU {onu_id} from database")
+        db.delete(onu)
+
+        # Log event in same transaction (optional - don't fail if this fails)
+        try:
+            event = EventLog(
+                event_type='onu_deleted',
+                entity_type='onu',
+                entity_id=onu_id,
+                olt_id=olt_id,
+                description=f"ONU '{onu_name}' ({onu_mac}) deleted by {user.username}" +
+                           (f" - also removed from OLT" if olt_delete_success else "")
+            )
+            db.add(event)
+            logger.info(f"Created event log for ONU deletion")
+        except Exception as e:
+            logger.warning(f"Failed to create event log: {e}")
+
+        logger.info(f"Committing ONU deletion")
+        db.commit()
+        logger.info(f"ONU {onu_id} deleted successfully")
+        return None
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting ONU {onu_id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete ONU: {str(e)}")
 
 
 @app.post("/api/onus/{onu_id}/reboot")
@@ -3104,6 +3223,10 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     user.last_login = datetime.utcnow()
     db.commit()
 
+    # Log login event
+    log_event(db, 'user_login', 'user', user.id, None,
+              f"User '{user.username}' logged in")
+
     # Create access token
     token = create_access_token({"user_id": user.id, "role": user.role})
 
@@ -3207,6 +3330,10 @@ def create_user(user_data: UserCreate, user: User = Depends(require_admin), db: 
                 db.execute(user_olts.insert().values(user_id=new_user.id, olt_id=olt_id))
         db.commit()
 
+    # Log event
+    log_event(db, 'user_created', 'user', new_user.id, None,
+              f"User '{new_user.username}' created with role '{new_user.role}' by {user.username}")
+
     return UserResponse(
         id=new_user.id,
         username=new_user.username,
@@ -3275,8 +3402,14 @@ def delete_user(user_id: int, user: User = Depends(require_admin), db: Session =
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    username = target_user.username
     db.delete(target_user)
     db.commit()
+
+    # Log event
+    log_event(db, 'user_deleted', 'user', user_id, None,
+              f"User '{username}' deleted by {user.username}")
+
     return None
 
 
@@ -3381,8 +3514,29 @@ async def download_update(
                         if total_size > 0:
                             update_status["progress"] = 10 + int((downloaded / total_size) * 40)
 
-            update_status["stage"] = "downloaded"
+            update_status["stage"] = "downloading_frontend"
             update_status["progress"] = 50
+
+            # Also download frontend
+            try:
+                frontend_response = requests.get(
+                    f"{LICENSE_SERVER_URL}/downloads/frontend.tar.gz",
+                    timeout=120,
+                    stream=True
+                )
+                if frontend_response.status_code == 200:
+                    frontend_path = updates_dir / "frontend.tar.gz"
+                    with open(frontend_path, 'wb') as f:
+                        for chunk in frontend_response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    update_status["frontend_path"] = str(frontend_path)
+                    logger.info("Frontend package downloaded successfully")
+            except Exception as fe:
+                logger.warning(f"Could not download frontend: {fe}")
+
+            update_status["stage"] = "downloaded"
+            update_status["progress"] = 55
             update_status["package_path"] = str(package_path)
             update_status["new_version"] = latest_version  # Save version for install step
 
@@ -3453,22 +3607,35 @@ async def install_update(current_user: User = Depends(require_admin)):
             package_install_script.chmod(0o755)
 
             # Run install script using systemd-run to ensure it survives service restart
-            # This creates a transient service that runs independently
+            # systemd-run creates a transient service that runs independently
             install_cmd = f"/bin/bash {package_install_script} {extract_dir} {new_version}"
 
-            # Use systemd-run to launch as independent transient service
-            subprocess.Popen(
+            # Use systemd-run to launch as a transient service
+            systemd_result = subprocess.run(
                 [
-                    "systemd-run", "--scope", "--quiet",
-                    "/bin/bash", "-c",
-                    f"sleep 2 && {install_cmd} > /tmp/olt-update.log 2>&1"
+                    "systemd-run",
+                    "--unit=olt-update-install",
+                    "--description=OLT Manager Update Install",
+                    "--no-block",
+                    "/bin/bash", "-c", f"sleep 5 && {install_cmd}"
                 ],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                capture_output=True,
+                text=True
             )
 
-            logger.info("Install script launched in background")
+            if systemd_result.returncode != 0:
+                # Fallback: direct execution with nohup
+                logger.warning(f"systemd-run failed: {systemd_result.stderr}, using direct fallback")
+                subprocess.Popen(
+                    ["/bin/bash", "-c",
+                     f"nohup /bin/bash -c 'sleep 5 && {install_cmd}' > /tmp/olt-update.log 2>&1 &"],
+                    start_new_session=True,
+                    close_fds=True
+                )
+            else:
+                logger.info(f"systemd-run success: {systemd_result.stdout}")
+
+            logger.info("Install script scheduled to run in background")
             update_status["progress"] = 85
             update_status["stage"] = "restarting"
 
@@ -3559,7 +3726,7 @@ async def install_update(current_user: User = Depends(require_admin)):
                             else:
                                 shutil.copy2(item, dest)
 
-            # Apply frontend update
+            # Apply frontend update from package
             extracted_frontend = extract_dir / "frontend" / "build"
             if extracted_frontend.exists():
                 for nginx_dir in [Path("/var/www/olt-manager"), Path("/var/www/html")]:
@@ -3572,6 +3739,39 @@ async def install_update(current_user: User = Depends(require_admin)):
                                 shutil.copytree(item, dest)
                             else:
                                 shutil.copy2(item, dest)
+
+            # Apply separately downloaded frontend (frontend.tar.gz)
+            frontend_path = update_status.get("frontend_path")
+            if frontend_path and Path(frontend_path).exists():
+                logger.info("Installing frontend from separate package...")
+                frontend_extract = Path("/tmp/frontend-extract")
+                if frontend_extract.exists():
+                    shutil.rmtree(frontend_extract)
+                frontend_extract.mkdir()
+
+                with tarfile.open(frontend_path, 'r:gz') as tar:
+                    tar.extractall(frontend_extract)
+
+                # Install to nginx folder
+                nginx_html = Path("/var/www/html")
+                if nginx_html.exists():
+                    # Clear old files
+                    for item in nginx_html.iterdir():
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
+                    # Copy new files
+                    for item in frontend_extract.iterdir():
+                        dest = nginx_html / item.name
+                        if item.is_dir():
+                            shutil.copytree(item, dest)
+                        else:
+                            shutil.copy2(item, dest)
+                    logger.info("Frontend updated in /var/www/html")
+
+                # Cleanup
+                shutil.rmtree(frontend_extract)
 
             # Update version file
             update_status["progress"] = 85
@@ -3600,12 +3800,32 @@ async def install_update(current_user: User = Depends(require_admin)):
         update_status["progress"] = 90
 
         # Create a script to restart the service after response is sent
+        # With health check and auto-rollback if service fails to start
         restart_script = Path("/tmp/restart-olt-manager.sh")
         restart_script.write_text("""#!/bin/bash
 sleep 2
 
+LOG_FILE="/tmp/olt-update-restart.log"
+echo "$(date): Starting update restart script" > $LOG_FILE
+
+# Function to check if service is healthy
+check_health() {
+    sleep 5
+    for i in {1..6}; do
+        if curl -s --connect-timeout 3 http://127.0.0.1:8000/api/system/info > /dev/null 2>&1; then
+            echo "$(date): Health check passed on attempt $i" >> $LOG_FILE
+            return 0
+        fi
+        echo "$(date): Health check attempt $i failed, waiting..." >> $LOG_FILE
+        sleep 3
+    done
+    return 1
+}
+
 # For compiled installations, swap the binary before restart
 if [ -f /opt/olt-manager/olt-manager.new ]; then
+    echo "$(date): Compiled installation detected" >> $LOG_FILE
+
     # Stop service first
     systemctl stop olt-manager 2>/dev/null || systemctl stop olt-backend 2>/dev/null
     sleep 1
@@ -3614,22 +3834,45 @@ if [ -f /opt/olt-manager/olt-manager.new ]; then
     cd /opt/olt-manager
     if [ -f olt-manager ]; then
         mv olt-manager olt-manager.old
+        echo "$(date): Backed up old binary" >> $LOG_FILE
     fi
     mv olt-manager.new olt-manager
     chmod +x olt-manager
 
     # Start service
     systemctl start olt-manager 2>/dev/null || systemctl start olt-backend 2>/dev/null
-    exit 0
+    echo "$(date): Service started, checking health..." >> $LOG_FILE
+
+    # Check if service started successfully
+    if check_health; then
+        echo "$(date): Update successful!" >> $LOG_FILE
+        rm -f olt-manager.old  # Clean up old binary
+        exit 0
+    else
+        # ROLLBACK: Service failed to start, restore old binary
+        echo "$(date): Service failed to start! Rolling back..." >> $LOG_FILE
+        systemctl stop olt-manager 2>/dev/null || systemctl stop olt-backend 2>/dev/null
+        sleep 1
+        if [ -f olt-manager.old ]; then
+            mv olt-manager olt-manager.failed
+            mv olt-manager.old olt-manager
+            chmod +x olt-manager
+            systemctl start olt-manager 2>/dev/null || systemctl start olt-backend 2>/dev/null
+            echo "$(date): Rollback completed" >> $LOG_FILE
+        fi
+        exit 1
+    fi
 fi
 
 # Try to restart service - check if service EXISTS (not just active)
 if systemctl list-unit-files | grep -q olt-manager.service; then
     systemctl daemon-reload
     systemctl start olt-manager
+    echo "$(date): Started olt-manager service" >> $LOG_FILE
 elif systemctl list-unit-files | grep -q olt-backend.service; then
     systemctl daemon-reload
     systemctl start olt-backend
+    echo "$(date): Started olt-backend service" >> $LOG_FILE
 else
     # Fallback: manual restart (for source installations without systemd)
     cd /opt/olt-manager/backend 2>/dev/null || cd /root/olt-manager/backend
@@ -3637,6 +3880,14 @@ else
     sleep 1
     source venv/bin/activate
     nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/olt-manager.log 2>&1 &
+    echo "$(date): Started via fallback method" >> $LOG_FILE
+fi
+
+# Verify service started
+if check_health; then
+    echo "$(date): Service restart successful" >> $LOG_FILE
+else
+    echo "$(date): WARNING: Service may not be running properly" >> $LOG_FILE
 fi
 """)
         restart_script.chmod(0o755)
@@ -4377,6 +4628,13 @@ def update_settings(
             setting = Settings(key=key, value=store_value)
             db.add(setting)
     db.commit()
+
+    # Log event
+    changed_keys = [k for k in data.keys() if k in allowed_keys]
+    if changed_keys:
+        log_event(db, 'settings_changed', 'system', 0, None,
+                  f"Settings updated by {current_user.username}: {', '.join(changed_keys)}")
+
     return {"message": "Settings updated successfully"}
 
 
@@ -6848,6 +7106,10 @@ async def create_backup(
         db.add(backup)
         db.commit()
 
+        # Log event
+        log_event(db, 'backup_created', 'olt', olt_id, olt_id,
+                  f"Config backup created for OLT '{olt.name}' by {current_user.username}")
+
         return {"success": True, "backup_id": backup.id, "filename": filename}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
@@ -6884,6 +7146,10 @@ async def delete_backup(
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
 
+    # Store info before delete
+    filename = backup.filename
+    olt_id = backup.olt_id
+
     # Delete file
     filepath = Path(f"/opt/olt-manager/backend/backups/{backup.filename}")
     if filepath.exists():
@@ -6891,6 +7157,11 @@ async def delete_backup(
 
     db.delete(backup)
     db.commit()
+
+    # Log event
+    log_event(db, 'backup_deleted', 'olt', backup_id, olt_id,
+              f"Config backup '{filename}' deleted by {current_user.username}")
+
     return {"success": True, "message": "Backup deleted"}
 
 
@@ -7169,6 +7440,10 @@ async def create_system_backup(
     db.add(backup)
     db.commit()
 
+    # Log event
+    log_event(db, 'system_backup_created', 'system', backup.id, None,
+              f"System backup created by {current_user.username} ({storage_type})")
+
     # Update backup settings with last backup info
     if settings:
         settings.last_backup_at = datetime.now()
@@ -7227,6 +7502,10 @@ async def restore_system_backup(
     backup_path = Path(f"/opt/olt-manager/backups/{backup.filename}")
     if not backup_path.exists():
         raise HTTPException(status_code=404, detail="Backup file not found")
+
+    # Log event before restore (database will be replaced)
+    log_event(db, 'system_restore_started', 'system', backup_id, None,
+              f"System restore from '{backup.filename}' initiated by {current_user.username}")
 
     # Save all current backup records BEFORE restoring (they will be lost when DB is replaced)
     all_backups = db.query(SystemBackup).all()
@@ -7418,6 +7697,9 @@ async def delete_system_backup(
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
 
+    # Store info for logging
+    filename = backup.filename
+
     # Delete local file if exists
     if backup.storage_type == 'local':
         filepath = Path(f"/opt/olt-manager/backups/{backup.filename}")
@@ -7426,6 +7708,11 @@ async def delete_system_backup(
 
     db.delete(backup)
     db.commit()
+
+    # Log event
+    log_event(db, 'system_backup_deleted', 'system', backup_id, None,
+              f"System backup '{filename}' deleted by {current_user.username}")
+
     return {"success": True, "message": "Backup deleted"}
 
 
@@ -7789,16 +8076,21 @@ def delete_scheduled_task(
 def log_event(db: Session, event_type: str, entity_type: str, entity_id: int,
               olt_id: int = None, description: str = None, details: dict = None):
     """Helper function to log events"""
-    event = EventLog(
-        event_type=event_type,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        olt_id=olt_id,
-        description=description,
-        details=json.dumps(details) if details else None
-    )
-    db.add(event)
-    db.commit()
+    try:
+        event = EventLog(
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            olt_id=olt_id,
+            description=description,
+            details=json.dumps(details) if details else None
+        )
+        db.add(event)
+        db.commit()
+    except Exception as e:
+        # Don't let logging failures break the main operation
+        db.rollback()
+        logger.warning(f"Failed to log event: {e}")
 
 
 @app.get("/api/events")
@@ -8230,8 +8522,8 @@ def restart_service(
 
 
 @app.post("/api/services/reboot-server")
-def reboot_server(
-    delay: int = Body(default=5, ge=1, le=60),
+def services_reboot_server(
+    delay: int = 5,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
