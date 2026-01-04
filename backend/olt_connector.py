@@ -3,6 +3,7 @@ import re
 import os
 import logging
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -471,13 +472,21 @@ def poll_olt(ip: str, username: str, password: str) -> Tuple[List[ONUData], Dict
 
 
 # SNMP OIDs for VSOL OLT (Enterprise 37950) - ONU Registration Table
-# OID: 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.{column}.{index}
+# Subtree 12 (V1600D4, V1600D8 models) - OID: 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.{column}.{index}
 SNMP_ONU_REG_TABLE = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1"
 SNMP_ONU_PON_PORT_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.2"   # PON Port (INTEGER: 1-4)
 SNMP_ONU_ID_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.3"         # ONU ID on port (INTEGER)
 SNMP_ONU_STATUS_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.5"     # Online status (INTEGER: 1=online, 0=offline)
 SNMP_ONU_MAC_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.6"        # MAC Address (STRING: "4c:d7:c8:f9:91:00")
 SNMP_ONU_MODEL_OID = "1.3.6.1.4.1.37950.1.1.5.12.1.12.1.7"      # ONU Model (STRING: "V2801S")
+
+# Subtree 10 (V1600G2 models) - Different OID structure
+# OID: 1.3.6.1.4.1.37950.1.1.5.10.3.2.1.{column}.{index}
+# Column 3: MAC (Hex-STRING with spaces), Column 4: Status (1=online), Column 5: Location ("PON4:ONU3")
+SNMP_V2_ONU_REG_TABLE = "1.3.6.1.4.1.37950.1.1.5.10.3.2.1"
+SNMP_V2_ONU_MAC_OID = "1.3.6.1.4.1.37950.1.1.5.10.3.2.1.3"      # MAC Address (Hex-STRING: "04 8D 38 E3 D0 1E")
+SNMP_V2_ONU_STATUS_OID = "1.3.6.1.4.1.37950.1.1.5.10.3.2.1.4"   # Online status (INTEGER: 1=online)
+SNMP_V2_ONU_LOCATION_OID = "1.3.6.1.4.1.37950.1.1.5.10.3.2.1.5" # Location (STRING: "PON4:ONU3")
 
 # ONU Extended Info Table (subtree 25) - indexed by PON.ONU
 # OID: 1.3.6.1.4.1.37950.1.1.5.12.1.25.1.{column}.{pon}.{onu}
@@ -585,14 +594,15 @@ def get_opm_data_via_ssh(ip: str, username: str, password: str, port: int = 22) 
 
         # Parse OPM data
         # Format: EPON0/1:1   39.69   3.38   14.75   2.56   -12.51
+        # Format: GPON0/1:1   39.69   3.38   14.75   2.56   -12.51
         # Columns: ONU-ID, Temperature, Voltage, TX Bias, TX Power, RX Power
         pon_onu_data: Dict[str, Dict[str, float]] = {}
         for line in output.split('\n'):
             line = line.strip()
-            if line.startswith('EPON'):
-                # Parse: EPON0/1:1   39.69   3.38   14.75   2.56   -12.51
+            if line.startswith('EPON') or line.startswith('GPON'):
+                # Parse: EPON0/1:1 or GPON0/1:1   39.69   3.38   14.75   2.56   -12.51
                 match = re.match(
-                    r'EPON0/(\d+):(\d+)\s+'         # PON port : ONU ID
+                    r'[EG]PON0?/(\d+):(\d+)\s+'     # PON port : ONU ID (EPON or GPON)
                     r'([\d.]+)\s+'                  # Temperature
                     r'([\d.]+)\s+'                  # Voltage
                     r'([\d.]+)\s+'                  # TX Bias
@@ -614,13 +624,14 @@ def get_opm_data_via_ssh(ip: str, username: str, password: str, port: int = 22) 
 
         # Parse status output to get MAC addresses
         # Format: EPON0/1:1   online    4C:D7:C8:F9:91:00    4188
+        # Format: GPON0/1:1   online    4C:D7:C8:F9:91:00    4188
         pon_onu_to_mac: Dict[str, str] = {}
         for line in status_output.split('\n'):
             line = line.strip()
-            if line.startswith('EPON'):
+            if line.startswith('EPON') or line.startswith('GPON'):
                 match = re.match(
-                    r'EPON0/(\d+):(\d+)\s+\w+\s+'   # PON:ONU and status
-                    r'([0-9a-fA-F:]{17})',          # MAC Address
+                    r'[EG]PON0?/(\d+):(\d+)\s+\w+\s+'  # PON:ONU and status (EPON or GPON)
+                    r'([0-9a-fA-F:]{17})',              # MAC Address
                     line
                 )
                 if match:
@@ -650,16 +661,27 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
 
     Returns tuple of (list of ONUData, dict of MAC -> is_online status)
 
-    SNMP OID structure (VSOL OLT Enterprise 37950):
-    - 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.2.X = PON Port (INTEGER: 1-4)
-    - 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.3.X = ONU ID on port (INTEGER)
-    - 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.5.X = Online Status (INTEGER: 1=online, 0=offline)
-    - 1.3.6.1.4.1.37950.1.1.5.12.1.12.1.6.X = MAC Address (STRING: "4c:d7:c8:f9:91:00")
+    Supports two VSOL OLT MIB variants:
+    - Subtree 12 (V1600D4, V1600D8): PON/ONU as separate columns
+    - Subtree 10 (V1600G2): Combined location string "PON4:ONU3"
     """
     onus: List[ONUData] = []
     status_map: Dict[str, bool] = {}
 
     try:
+        # First, detect which OID structure the OLT uses by checking the location format
+        # V1600G2 uses "PON4:ONU3" format, V1600D8 uses just "PON1" or "GE10"
+        # Use longer timeout (45s) for large OLTs like V1600G2-B with 800+ ONUs
+        v2_location_result = subprocess.run(
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_V2_ONU_LOCATION_OID, "-Cr10", "-t", "10"],
+            capture_output=True, text=True, timeout=45
+        )
+
+        # Use V2 (subtree 10) if location contains "PON#:ONU#" format
+        if v2_location_result.returncode == 0 and ':ONU' in v2_location_result.stdout:
+            return poll_olt_snmp_v2(ip, community)
+
+        # Fall back to original subtree 12 logic
         # Get PON ports
         port_result = subprocess.run(
             ["snmpwalk", "-v2c", "-c", community, ip, SNMP_ONU_PON_PORT_OID, "-t", "5"],
@@ -863,11 +885,151 @@ def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Di
         return [], {}
 
 
+def poll_olt_snmp_v2(ip: str, community: str = "public") -> Tuple[List[ONUData], Dict[str, bool]]:
+    """
+    Poll V1600G2 OLT via SNMP using subtree 10 OID structure.
+
+    OID structure:
+    - Column 3: MAC Address (Hex-STRING: "04 8D 38 E3 D0 1E")
+    - Column 4: Status (INTEGER: 1=online)
+    - Column 5: Location (STRING: "PON4:ONU3")
+    """
+    onus: List[ONUData] = []
+    status_map: Dict[str, bool] = {}
+
+    try:
+        # Get MAC addresses (Hex-STRING format) - use snmpbulkwalk for speed
+        mac_result = subprocess.run(
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_V2_ONU_MAC_OID, "-t", "10"],
+            capture_output=True, text=True, timeout=90
+        )
+
+        # Get status
+        status_result = subprocess.run(
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_V2_ONU_STATUS_OID, "-t", "10"],
+            capture_output=True, text=True, timeout=90
+        )
+
+        # Get location (PON:ONU)
+        location_result = subprocess.run(
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_V2_ONU_LOCATION_OID, "-t", "10"],
+            capture_output=True, text=True, timeout=90
+        )
+
+        # Get ONU descriptions from ifName (format: "GPONxxONUy description")
+        ifname_result = subprocess.run(
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, "1.3.6.1.2.1.31.1.1.1.1", "-t", "15"],
+            capture_output=True, text=True, timeout=120
+        )
+
+        if mac_result.returncode != 0:
+            logger.warning(f"SNMP V2 query failed for {ip}")
+            return [], {}
+
+        # Parse MAC addresses: index -> MAC (convert Hex-STRING to colon format)
+        mac_by_index: Dict[str, str] = {}
+        for line in mac_result.stdout.split('\n'):
+            if 'Hex-STRING' in line:
+                # Format: .3.1 = Hex-STRING: 04 8D 38 E3 D0 1E
+                match = re.search(r'\.3\.(\d+)\s*=\s*Hex-STRING:\s*([0-9A-Fa-f ]+)', line)
+                if match:
+                    idx = match.group(1)
+                    hex_bytes = match.group(2).strip().split()
+                    if len(hex_bytes) == 6:
+                        mac = ':'.join(hex_bytes).upper()
+                        mac_by_index[idx] = mac
+
+        # Parse status: index -> is_online
+        status_by_index: Dict[str, bool] = {}
+        for line in status_result.stdout.split('\n'):
+            if 'INTEGER:' in line:
+                match = re.search(r'\.4\.(\d+)\s*=\s*INTEGER:\s*(\d+)', line)
+                if match:
+                    idx = match.group(1)
+                    status = int(match.group(2))
+                    status_by_index[idx] = (status == 1)
+
+        # Parse location: index -> (pon_port, onu_id)
+        location_by_index: Dict[str, Tuple[int, int]] = {}
+        for line in location_result.stdout.split('\n'):
+            if 'STRING:' in line:
+                # Format: .5.1 = STRING: "PON4:ONU3"
+                match = re.search(r'\.5\.(\d+)\s*=\s*STRING:\s*"?PON(\d+):ONU(\d+)"?', line)
+                if match:
+                    idx = match.group(1)
+                    pon_port = int(match.group(2))
+                    onu_id = int(match.group(3))
+                    location_by_index[idx] = (pon_port, onu_id)
+
+        # Parse ONU descriptions from ifName: (pon_port, onu_id) -> description
+        # Format: "GPON01ONU5 Customer-Name" or "GPON0/1:5 Customer-Name"
+        desc_by_pon_onu: Dict[Tuple[int, int], str] = {}
+        for line in ifname_result.stdout.split('\n'):
+            if 'STRING:' in line and 'GPON' in line and 'ONU' in line:
+                # Format 1: GPON01ONU5 description (single digit PON)
+                match = re.search(r'STRING:\s*"?GPON0?(\d+)ONU(\d+)\s+([^"]+)"?', line)
+                if match:
+                    pon = int(match.group(1))
+                    onu = int(match.group(2))
+                    desc = match.group(3).strip()
+                    if desc:
+                        desc_by_pon_onu[(pon, onu)] = desc
+                else:
+                    # Format 2: GPON0/1:5 description (with slash and colon)
+                    match = re.search(r'STRING:\s*"?GPON0/(\d+):(\d+)\s+([^"]+)"?', line)
+                    if match:
+                        pon = int(match.group(1))
+                        onu = int(match.group(2))
+                        desc = match.group(3).strip()
+                        if desc:
+                            desc_by_pon_onu[(pon, onu)] = desc
+
+        # Combine all data
+        for idx, mac in mac_by_index.items():
+            is_online = status_by_index.get(idx, False)
+            location = location_by_index.get(idx)
+
+            if location:
+                pon_port, onu_id = location
+            else:
+                # Fallback: derive from index (assume sequential per PON)
+                pon_port = 1
+                onu_id = int(idx)
+
+            # Get description from ifName lookup
+            description = desc_by_pon_onu.get((pon_port, onu_id))
+
+            onus.append(ONUData(
+                pon_port=pon_port,
+                onu_id=onu_id,
+                mac_address=mac,
+                description=description,
+                distance=None,  # V1600G2 doesn't expose distance via SNMP
+                rx_power=None,  # V1600G2 doesn't expose RX power via SNMP
+                model=None
+            ))
+
+            # Use (pon_port, onu_id) as status key
+            status_key = f"{pon_port}:{onu_id}"
+            status_map[status_key] = is_online
+
+        logger.info(f"SNMP V2 poll for {ip}: found {len(onus)} ONUs ({sum(1 for s in status_map.values() if s)} online)")
+        return onus, status_map
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"SNMP V2 timeout for {ip}")
+        return [], {}
+    except Exception as e:
+        logger.error(f"SNMP V2 poll failed for {ip}: {e}")
+        return [], {}
+
+
 # SNMP OIDs for traffic counters (IF-MIB)
 # Uses 64-bit counters (ifHCInOctets/ifHCOutOctets) for accurate high-speed measurements
 # NOTE: From OLT perspective, IN = data received FROM customer (upload), OUT = data sent TO customer (download)
 # We swap them to show from CUSTOMER perspective: RX = download, TX = upload
-SNMP_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"          # Interface description (EPONxxONUyy)
+SNMP_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"          # Interface description (EPONxxONUyy) - V1600D8
+SNMP_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"        # Interface name (GPONxxONUyy) - V1600G2-B
 SNMP_IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"   # OLT IN = Customer Upload (TX)
 SNMP_IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10" # OLT OUT = Customer Download (RX)
 
@@ -886,52 +1048,71 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
 
     try:
         # Get interface descriptions to find ONU interfaces
-        # Format: "EPONxxONUyy description" or just "EPONxxONUyy"
+        # First try ifDescr (works for V1600D8 EPON), then ifName (for V1600G2-B GPON)
+        # Use snmpbulkwalk for better performance on large OLTs
         descr_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_IF_DESCR, "-t", "5"],
-            capture_output=True, text=True, timeout=30
+            ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_IF_DESCR, "-Cr50", "-t", "10"],
+            capture_output=True, text=True, timeout=120
         )
-
-        if descr_result.returncode != 0:
-            logger.warning(f"SNMP traffic poll failed for {ip}: interface descriptions unavailable")
-            return {}
 
         # Parse interface descriptions to find ONU interfaces
         # Build ifIndex -> (pon_port, onu_id) mapping
         onu_interfaces: Dict[str, Tuple[int, int]] = {}  # ifIndex -> (pon, onu)
-        for line in descr_result.stdout.split('\n'):
-            if 'STRING:' in line and 'EPON' in line.upper():
-                # Format 1: "EPON01ONU1 soloo12233" or "EPON0/1ONU1" (V1600D8 style)
-                match = re.search(r'\.2\.(\d+)\s*=\s*STRING:\s*"?EPON0?/?(\d+)ONU(\d+)', line, re.IGNORECASE)
-                if match:
-                    if_index = match.group(1)
-                    pon_port = int(match.group(2))
-                    onu_id = int(match.group(3))
-                    onu_interfaces[if_index] = (pon_port, onu_id)
-                else:
-                    # Format 2: "EPON0/3:1" (V1600G/V1601E style - colon separator)
-                    match = re.search(r'\.2\.(\d+)\s*=\s*STRING:\s*"?EPON0/(\d+):(\d+)', line, re.IGNORECASE)
+
+        if descr_result.returncode == 0:
+            for line in descr_result.stdout.split('\n'):
+                if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()) and 'ONU' in line.upper():
+                    # Format 1: "EPON01ONU1 soloo12233" or "GPON01ONU1" (V1600D8/V1600G2-B style)
+                    match = re.search(r'\.2\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0?/?(\d+)ONU(\d+)', line, re.IGNORECASE)
                     if match:
                         if_index = match.group(1)
                         pon_port = int(match.group(2))
                         onu_id = int(match.group(3))
                         onu_interfaces[if_index] = (pon_port, onu_id)
+                    else:
+                        # Format 2: "EPON0/3:1" or "GPON0/3:1" (colon separator style)
+                        match = re.search(r'\.2\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0/(\d+):(\d+)', line, re.IGNORECASE)
+                        if match:
+                            if_index = match.group(1)
+                            pon_port = int(match.group(2))
+                            onu_id = int(match.group(3))
+                            onu_interfaces[if_index] = (pon_port, onu_id)
+
+        # If no ONU interfaces found in ifDescr, try ifName (for V1600G2-B GPON)
+        if not onu_interfaces:
+            name_result = subprocess.run(
+                ["snmpbulkwalk", "-v2c", "-c", community, ip, SNMP_IF_NAME, "-Cr50", "-t", "10"],
+                capture_output=True, text=True, timeout=120
+            )
+
+            if name_result.returncode == 0:
+                for line in name_result.stdout.split('\n'):
+                    if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()) and 'ONU' in line.upper():
+                        # Format: "GPON01ONU1 description" - ifName uses .1.x index
+                        match = re.search(r'\.1\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0?/?(\d+)ONU(\d+)', line, re.IGNORECASE)
+                        if match:
+                            if_index = match.group(1)
+                            pon_port = int(match.group(2))
+                            onu_id = int(match.group(3))
+                            onu_interfaces[if_index] = (pon_port, onu_id)
 
         if not onu_interfaces:
             logger.info(f"No ONU interfaces found for {ip}")
             return {}
 
-        # Get RX bytes (64-bit counter)
-        rx_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_IF_HC_IN_OCTETS, "-t", "5"],
-            capture_output=True, text=True, timeout=30
-        )
+        # Helper function for parallel SNMP calls
+        def run_snmp_bulk(oid: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["snmpbulkwalk", "-v2c", "-c", community, ip, oid, "-Cr50", "-t", "10"],
+                capture_output=True, text=True, timeout=120
+            )
 
-        # Get TX bytes (64-bit counter)
-        tx_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_IF_HC_OUT_OCTETS, "-t", "5"],
-            capture_output=True, text=True, timeout=30
-        )
+        # Get RX and TX bytes in PARALLEL (cuts poll time in half for large OLTs)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rx_future = executor.submit(run_snmp_bulk, SNMP_IF_HC_IN_OCTETS)
+            tx_future = executor.submit(run_snmp_bulk, SNMP_IF_HC_OUT_OCTETS)
+            rx_result = rx_future.result()
+            tx_result = tx_future.result()
 
         # Parse RX counters
         rx_by_index: Dict[str, int] = {}
@@ -954,23 +1135,21 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
                     tx_by_index[if_index] = tx_bytes
 
         # Now we need to map PON.ONU to MAC address
-        # Get MAC addresses from ONU registration table
-        mac_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_ONU_MAC_OID, "-t", "5"],
-            capture_output=True, text=True, timeout=30
-        )
+        # Helper function for regular SNMP walk
+        def run_snmp_walk(oid: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["snmpwalk", "-v2c", "-c", community, ip, oid, "-t", "5"],
+                capture_output=True, text=True, timeout=30
+            )
 
-        # Get PON ports from ONU registration table
-        port_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_ONU_PON_PORT_OID, "-t", "5"],
-            capture_output=True, text=True, timeout=30
-        )
-
-        # Get ONU IDs from ONU registration table
-        id_result = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, ip, SNMP_ONU_ID_OID, "-t", "5"],
-            capture_output=True, text=True, timeout=30
-        )
+        # Get MAC, PON port, ONU ID in PARALLEL (3 concurrent walks)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            mac_future = executor.submit(run_snmp_walk, SNMP_ONU_MAC_OID)
+            port_future = executor.submit(run_snmp_walk, SNMP_ONU_PON_PORT_OID)
+            id_future = executor.submit(run_snmp_walk, SNMP_ONU_ID_OID)
+            mac_result = mac_future.result()
+            port_result = port_future.result()
+            id_result = id_future.result()
 
         # Parse to build (pon, onu) -> MAC mapping
         mac_by_index: Dict[str, str] = {}
@@ -1007,37 +1186,49 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
             if pon and onu:
                 pon_onu_to_mac[(pon, onu)] = mac
 
+        # Check if MAC lookup worked (V1600G2-B doesn't have this OID)
+        use_pon_onu_key = len(pon_onu_to_mac) == 0
+
         # Combine: ifIndex -> (pon, onu) -> MAC -> traffic data
         # Handle duplicate MACs: prefer entry with actual traffic over zero traffic
         # IMPORTANT: Swap RX/TX to show from CUSTOMER perspective
         # - OLT ifHCInOctets (rx_by_index) = data received BY OLT = Customer UPLOAD
         # - OLT ifHCOutOctets (tx_by_index) = data sent BY OLT = Customer DOWNLOAD
         for if_index, (pon_port, onu_id) in onu_interfaces.items():
-            mac = pon_onu_to_mac.get((pon_port, onu_id))
-            if mac:
-                # Swap: OLT's IN becomes customer's TX (upload), OLT's OUT becomes customer's RX (download)
-                customer_tx_bytes = rx_by_index.get(if_index, 0)  # OLT IN = Customer Upload
-                customer_rx_bytes = tx_by_index.get(if_index, 0)  # OLT OUT = Customer Download
+            # Swap: OLT's IN becomes customer's TX (upload), OLT's OUT becomes customer's RX (download)
+            customer_tx_bytes = rx_by_index.get(if_index, 0)  # OLT IN = Customer Upload
+            customer_rx_bytes = tx_by_index.get(if_index, 0)  # OLT OUT = Customer Download
 
-                # If MAC already exists, only overwrite if new entry has more traffic
-                # This handles cases where same MAC is registered at multiple (pon, onu) locations
-                if mac in traffic_data:
-                    existing = traffic_data[mac]
-                    existing_total = existing['rx_bytes'] + existing['tx_bytes']
-                    new_total = customer_rx_bytes + customer_tx_bytes
-                    if new_total <= existing_total:
-                        # Keep existing entry with more traffic
-                        continue
+            if use_pon_onu_key:
+                # V1600G2-B: Use "pon:onu" as key (caller will map to MAC)
+                key = f"{pon_port}:{onu_id}"
+            else:
+                # V1600D8: Use MAC as key
+                mac = pon_onu_to_mac.get((pon_port, onu_id))
+                if not mac:
+                    continue
+                key = mac
 
-                traffic_data[mac] = {
-                    'rx_bytes': customer_rx_bytes,  # Customer Download
-                    'tx_bytes': customer_tx_bytes,  # Customer Upload
-                    'if_index': int(if_index),
-                    'pon_port': pon_port,
-                    'onu_id': onu_id
-                }
+            # If key already exists, only overwrite if new entry has more traffic
+            # This handles cases where same MAC is registered at multiple (pon, onu) locations
+            if key in traffic_data:
+                existing = traffic_data[key]
+                existing_total = existing['rx_bytes'] + existing['tx_bytes']
+                new_total = customer_rx_bytes + customer_tx_bytes
+                if new_total <= existing_total:
+                    # Keep existing entry with more traffic
+                    continue
 
-        logger.info(f"SNMP traffic poll for {ip}: got counters for {len(traffic_data)} ONUs")
+            traffic_data[key] = {
+                'rx_bytes': customer_rx_bytes,  # Customer Download
+                'tx_bytes': customer_tx_bytes,  # Customer Upload
+                'if_index': int(if_index),
+                'pon_port': pon_port,
+                'onu_id': onu_id
+            }
+
+        key_type = "pon:onu" if use_pon_onu_key else "MAC"
+        logger.info(f"SNMP traffic poll for {ip}: got counters for {len(traffic_data)} ONUs (keyed by {key_type})")
         return traffic_data
 
     except subprocess.TimeoutExpired:

@@ -4182,6 +4182,57 @@ function OLTCard({ olt, onSelect, onPoll, onDelete, onEdit, isSelected, isAdmin,
   );
 }
 
+// Animated Traffic Display - MikroTik-style live fluctuation
+function AnimatedTraffic({ rx, tx }) {
+  const [displayRx, setDisplayRx] = useState(rx);
+  const [displayTx, setDisplayTx] = useState(tx);
+  const targetRef = useRef({ rx, tx });
+
+  // Update target when props change
+  useEffect(() => {
+    targetRef.current = { rx, tx };
+  }, [rx, tx]);
+
+  // Animate with random fluctuations every 500ms (slower, more natural)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const { rx: targetRx, tx: targetTx } = targetRef.current;
+
+      // Add random fluctuation (±2% for active traffic, subtle and realistic)
+      const rxFluctuation = targetRx > 100 ? (Math.random() - 0.5) * 0.04 * targetRx : 0;
+      const txFluctuation = targetTx > 100 ? (Math.random() - 0.5) * 0.04 * targetTx : 0;
+
+      // Smooth interpolation toward target + fluctuation
+      setDisplayRx(prev => {
+        const target = targetRx + rxFluctuation;
+        return prev + (target - prev) * 0.3;
+      });
+      setDisplayTx(prev => {
+        const target = targetTx + txFluctuation;
+        return prev + (target - prev) * 0.3;
+      });
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatBw = (kbps) => {
+    if (kbps > 1000) return `${(kbps/1000).toFixed(1)}M`;  // Show 1 decimal for MB (50.3M)
+    return `${Math.round(kbps)}K`;
+  };
+
+  return (
+    <div className="flex items-center justify-center gap-1.5 text-sm font-mono">
+      <span className={`font-semibold transition-all duration-100 ${displayRx > 10000 ? 'text-green-600' : 'text-gray-600'}`}>
+        ↓{formatBw(displayRx)}
+      </span>
+      <span className={`font-semibold transition-all duration-100 ${displayTx > 10000 ? 'text-blue-600' : 'text-gray-600'}`}>
+        ↑{formatBw(displayTx)}
+      </span>
+    </div>
+  );
+}
+
 // ONU Table Component - Enterprise Pro Design
 function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGraph }) {
   const darkMode = useContext(DarkModeContext);
@@ -4298,19 +4349,12 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
                         {onu.model || '-'}
                       </span>
                     </td>
-                    {/* BW - Traffic */}
+                    {/* BW - Traffic (Animated like MikroTik) */}
                     <td className="px-3 py-2 whitespace-nowrap text-center">
                       {(() => {
                         const traffic = trafficMap[onu.mac_address];
                         if (!traffic) return <span className="text-gray-300 text-sm">-</span>;
-                        const rx = traffic.rx_kbps || 0;
-                        const tx = traffic.tx_kbps || 0;
-                        return (
-                          <div className="flex items-center justify-center gap-1.5 text-sm">
-                            <span className={`font-semibold ${rx > 10000 ? 'text-green-600' : 'text-gray-600'}`}>↓{rx > 1000 ? `${(rx/1000).toFixed(0)}M` : `${rx.toFixed(0)}K`}</span>
-                            <span className={`font-semibold ${tx > 10000 ? 'text-blue-600' : 'text-gray-600'}`}>↑{tx > 1000 ? `${(tx/1000).toFixed(0)}M` : `${tx.toFixed(0)}K`}</span>
-                          </div>
-                        );
+                        return <AnimatedTraffic rx={traffic.rx_kbps || 0} tx={traffic.tx_kbps || 0} />;
                       })()}
                     </td>
                     {/* Distance */}
@@ -8903,10 +8947,18 @@ function Dashboard({ user, onLogout, pageName }) {
   }, []);
 
   // WebSocket connection for live traffic (single OLT)
+  const connectedOltRef = useRef(null);  // Track which OLT we're connected to
   const connectWebSocket = useCallback((oltId) => {
+    // Skip if already connected to this OLT
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && connectedOltRef.current === oltId) {
+      console.log('Already connected to OLT', oltId, ', skipping reconnect');
+      return;
+    }
+
     if (wsRef.current) {
       wsRef.current.close();
     }
+    connectedOltRef.current = oltId;
 
     const wsUrl = getWsUrl(oltId);
     console.log('Connecting to WebSocket:', wsUrl);
@@ -8938,7 +8990,7 @@ function Dashboard({ user, onLogout, pageName }) {
 
           // Create merged traffic array from buffer (keeps old values visible)
           const mergedTraffic = Object.values(trafficBufferRef.current)
-            .filter(t => Date.now() - t.lastUpdate < 30000)  // Remove entries older than 30 seconds
+            .filter(t => Date.now() - t.lastUpdate < 120000)  // Keep entries for 2 minutes
             .sort((a, b) => (b.rx_kbps + b.tx_kbps) - (a.rx_kbps + a.tx_kbps));
 
           setTrafficData({
@@ -8948,7 +9000,7 @@ function Dashboard({ user, onLogout, pageName }) {
         } else {
           // No new traffic, but keep showing buffer data
           const bufferedTraffic = Object.values(trafficBufferRef.current)
-            .filter(t => Date.now() - t.lastUpdate < 30000)
+            .filter(t => Date.now() - t.lastUpdate < 120000)
             .sort((a, b) => (b.rx_kbps + b.tx_kbps) - (a.rx_kbps + a.tx_kbps));
 
           setTrafficData({
@@ -8970,6 +9022,7 @@ function Dashboard({ user, onLogout, pageName }) {
     ws.onclose = () => {
       console.log('WebSocket disconnected');
       setWsConnected(false);
+      connectedOltRef.current = null;  // Reset so we can reconnect
     };
 
     wsRef.current = ws;
@@ -9023,7 +9076,7 @@ function Dashboard({ user, onLogout, pageName }) {
 
           // Create merged traffic array from all OLTs
           const mergedTraffic = Object.values(trafficBufferRef.current)
-            .filter(t => Date.now() - t.lastUpdate < 30000)
+            .filter(t => Date.now() - t.lastUpdate < 120000)
             .sort((a, b) => (b.rx_kbps + b.tx_kbps) - (a.rx_kbps + a.tx_kbps));
 
           setTrafficData({
@@ -9069,46 +9122,52 @@ function Dashboard({ user, onLogout, pageName }) {
   }, []);
 
   // Connect/disconnect WebSocket when OLT is selected on ONUs page
-  useEffect(() => {
-    console.log('WebSocket effect triggered:', { currentPage, selectedOLT, oltsCount: olts.length });
+  // Use olts.length to avoid reconnecting when OLT data refreshes
+  const oltsCount = olts.length;
+  // Store olts in a ref to avoid dependency issues
+  const oltsRef = useRef(olts);
+  oltsRef.current = olts;
 
+  useEffect(() => {
+    // Only log when actually changing pages (reduce console spam)
     if (currentPage !== 'onus') {
       // Close all WebSockets if not on ONUs page
-      console.log('Not on ONUs page, closing connections');
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      if (wsRef.current || Object.keys(wsMapRef.current).length > 0) {
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
+          connectedOltRef.current = null;
+        }
+        Object.values(wsMapRef.current).forEach(ws => ws.close());
+        wsMapRef.current = {};
+        setTrafficData(null);
+        setWsConnected(false);
+        trafficBufferRef.current = {};
       }
-      Object.values(wsMapRef.current).forEach(ws => ws.close());
-      wsMapRef.current = {};
-      setTrafficData(null);
-      setWsConnected(false);
-      trafficBufferRef.current = {};
       return;
     }
 
     if (selectedOLT) {
-      // Close all-OLT connections if any
-      console.log('Connecting to single OLT:', selectedOLT);
-      Object.values(wsMapRef.current).forEach(ws => ws.close());
-      wsMapRef.current = {};
-      // Connect to single OLT
+      // Close all-OLT connections if any (but keep single OLT connection)
+      if (Object.keys(wsMapRef.current).length > 0) {
+        Object.values(wsMapRef.current).forEach(ws => ws.close());
+        wsMapRef.current = {};
+      }
+      // Connect to single OLT (connectWebSocket will skip if already connected)
       connectWebSocket(selectedOLT);
     } else {
       // "All" is selected - connect to all OLTs
-      console.log('ALL selected, olts.length:', olts.length);
-      if (olts.length > 0) {
-        console.log('Connecting to ALL OLTs:', olts.map(o => o.name));
+      if (oltsCount > 0 && Object.keys(wsMapRef.current).length === 0) {
+        // Only connect if not already connected to all OLTs
         if (wsRef.current) {
           wsRef.current.close();
           wsRef.current = null;
+          connectedOltRef.current = null;
         }
-        connectAllWebSockets(olts);
-      } else {
-        console.log('No OLTs available yet, waiting...');
+        connectAllWebSockets(oltsRef.current);
       }
     }
-  }, [currentPage, selectedOLT, olts, connectWebSocket, connectAllWebSockets]);
+  }, [currentPage, selectedOLT, oltsCount, connectWebSocket, connectAllWebSockets]);
 
   // Initial load
   useEffect(() => {

@@ -32,7 +32,7 @@ from schemas import (
     DiagramCreate, DiagramUpdate, DiagramResponse, DiagramListResponse
 )
 from olt_connector import poll_olt_snmp, get_traffic_counters_snmp, get_olt_health_snmp, ONUData, OLTConnector
-from olt_web_scraper import get_onu_opm_data_web
+from olt_web_scraper import get_onu_opm_data_web, get_onu_models_web, get_onu_list_web
 from trap_receiver import SimpleTrapReceiver, TrapEvent
 from config import POLL_INTERVAL, encrypt_sensitive, decrypt_sensitive
 from auth import (
@@ -120,11 +120,15 @@ class TrafficConnectionManager:
 
     async def broadcast(self, olt_id: int, message: dict):
         if olt_id in self.active_connections:
+            connections = list(self.active_connections[olt_id])
+            if connections:
+                logger.info(f"Broadcasting to {len(connections)} clients for OLT {olt_id}: {message.get('onu_count', 0)} ONUs, poll_ms={message.get('poll_ms', 'N/A')}")
             dead_connections = set()
-            for connection in self.active_connections[olt_id]:
+            for connection in connections:
                 try:
                     await connection.send_json(message)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to send to WebSocket for OLT {olt_id}: {e}")
                     dead_connections.add(connection)
             # Clean up dead connections
             for conn in dead_connections:
@@ -871,10 +875,26 @@ async def collect_traffic_history(olt, db):
 
         traffic_data = []
 
-        for mac, counters in current_counters.items():
+        for key, counters in current_counters.items():
             rx_bytes = counters['rx_bytes']
             tx_bytes = counters['tx_bytes']
             pon_port = counters.get('pon_port', 0)
+            onu_id = counters.get('onu_id', 0)
+
+            # Handle both MAC and pon:onu key formats
+            # V1600G2-B returns "pon:onu" keys (e.g., "1:5"), V1600D8 returns MAC keys
+            if ':' in key and len(key) < 10:  # pon:onu format (short like "1:5")
+                # Look up ONU by pon:onu to get MAC
+                onu_for_mac = db.query(ONU).filter(
+                    ONU.olt_id == olt.id,
+                    ONU.pon_port == pon_port,
+                    ONU.onu_id == onu_id
+                ).first()
+                mac = onu_for_mac.mac_address if onu_for_mac else None
+                if not mac:
+                    continue  # Skip if we can't find the ONU
+            else:
+                mac = key  # Key is already a MAC address
 
             rx_kbps = 0
             tx_kbps = 0
@@ -1065,7 +1085,43 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                 # Try SNMP first for fast polling (~2 seconds vs 30-60 seconds for SSH)
                 snmp_onus_data = []
                 snmp_status_map = {}
-                if use_snmp:
+
+                # Get web credentials (needed for multiple operations)
+                web_user = olt.web_username or olt.username or 'admin'
+                web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) if olt.password else 'admin'
+
+                # Check if this is a V1600G2-B GPON OLT - skip SNMP ONU poll (it doesn't work)
+                model_upper = (olt.model or '').upper()
+                is_gpon_olt = 'G2' in model_upper or 'GPON' in model_upper
+
+                if use_snmp and is_gpon_olt:
+                    # V1600G2-B: Skip SNMP ONU poll and use web scraping directly (much faster)
+                    logger.info(f"GPON OLT {olt.name} detected, using web scraping for ONU list...")
+                    loop = asyncio.get_event_loop()
+                    try:
+                        web_onu_list = await loop.run_in_executor(
+                            thread_executor,
+                            get_onu_list_web,
+                            olt.ip_address,
+                            web_user,
+                            web_pass
+                        )
+                        if web_onu_list:
+                            for onu in web_onu_list:
+                                snmp_onus_data.append(ONUData(
+                                    pon_port=onu['pon_port'],
+                                    onu_id=onu['onu_id'],
+                                    mac_address=onu['mac_address'],
+                                    description=onu.get('description'),
+                                    model=onu.get('model')
+                                ))
+                                snmp_status_map[f"{onu['pon_port']}:{onu['onu_id']}"] = onu.get('is_online', True)
+                            logger.info(f"Web ONU list for {olt.name}: got {len(snmp_onus_data)} ONUs")
+                    except Exception as web_list_err:
+                        logger.warning(f"Web ONU list scraping failed for {olt.name}: {web_list_err}")
+
+                elif use_snmp:
+                    # EPON OLTs: Use SNMP polling
                     logger.info(f"Trying SNMP poll for {olt.name}...")
                     loop = asyncio.get_event_loop()
                     snmp_onus_data, snmp_status_map = await loop.run_in_executor(
@@ -1075,265 +1131,341 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                         "public"  # Default community string
                     )
 
-                    if snmp_onus_data:
-                        logger.info(f"SNMP poll successful for {olt.name}: {len(snmp_onus_data)} ONUs")
-
-                        # Get ONU self-reported RX power via web scraping
-                        # This gives the ~-13 dBm value the customer sees (vs ~-26 dBm SNMP measures)
-                        web_opm_data = {}
-                        web_user = olt.web_username or olt.username or 'admin'
-                        web_pass = decrypt_sensitive(olt.web_password) if olt.web_password else decrypt_sensitive(olt.password) if olt.password else 'admin'
-                        if web_user and web_pass:
-                            try:
-                                web_opm_data = await loop.run_in_executor(
-                                    thread_executor,
-                                    get_onu_opm_data_web,
-                                    olt.ip_address,
-                                    web_user,
-                                    web_pass
-                                )
-                                if web_opm_data:
-                                    logger.info(f"Web OPM for {olt.name}: got ONU RX power for {len(web_opm_data)} ONUs")
-                            except Exception as web_err:
-                                logger.warning(f"Web OPM scraping failed for {olt.name}: {web_err}")
-
-                        # Update OLT status
-                        olt.is_online = True
-                        olt.last_poll = get_current_time_in_timezone(db)
-                        olt.last_error = None
-
-                        # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data)
+                    # Fallback for GPON OLTs when SNMP returns empty (shouldn't happen now but keep as safety)
+                    if not snmp_onus_data and olt.model and 'G2' in olt.model:
+                        logger.info(f"SNMP returned empty for GPON OLT {olt.name}, trying web fallback...")
                         try:
-                            health_data = await loop.run_in_executor(
+                            web_onu_list = await loop.run_in_executor(
                                 thread_executor,
-                                get_olt_health_snmp,
+                                get_onu_list_web,
                                 olt.ip_address,
-                                "public",
-                                olt.pon_ports  # Pass number of PON ports for transceiver polling
+                                web_user,
+                                web_pass
                             )
-                            if health_data:
-                                olt.cpu_usage = health_data.get('cpu_usage')
-                                olt.memory_usage = health_data.get('memory_usage')
-                                olt.temperature = health_data.get('temperature')
-                                olt.uptime_seconds = health_data.get('uptime_seconds')
+                            if web_onu_list:
+                                # Convert web ONU list to ONUData format
+                                for onu in web_onu_list:
+                                    snmp_onus_data.append(ONUData(
+                                        pon_port=onu['pon_port'],
+                                        onu_id=onu['onu_id'],
+                                        mac_address=onu['mac_address'],
+                                        description=onu.get('description'),
+                                        model=onu.get('model')
+                                    ))
+                                    # Set status in status_map
+                                    snmp_status_map[f"{onu['pon_port']}:{onu['onu_id']}"] = onu.get('is_online', True)
+                                logger.info(f"Web ONU list for {olt.name}: got {len(snmp_onus_data)} ONUs")
+                        except Exception as web_list_err:
+                            logger.warning(f"Web ONU list scraping failed for {olt.name}: {web_list_err}")
 
-                                # Check high temperature alarm
-                                if olt.temperature is not None:
-                                    alarm_settings = get_alarm_settings(db)
-                                    temp_threshold = float(alarm_settings.get("high_temperature_threshold", 60))
-                                    if olt.temperature > temp_threshold:
-                                        send_high_temperature_notification(db, olt, olt.temperature)
+                # Common processing for all OLT types (after getting ONU list)
+                if snmp_onus_data:
+                    logger.info(f"ONU poll successful for {olt.name}: {len(snmp_onus_data)} ONUs")
 
-                                # Save PON port transceiver diagnostics to OLTPort table
-                                pon_ports_data = health_data.get('pon_ports', [])
-                                for port_info in pon_ports_data:
-                                    port_num = port_info.get('port')
-                                    if port_num:
-                                        # Find or create OLTPort entry for this PON port
-                                        olt_port = db.query(OLTPort).filter(
-                                            OLTPort.olt_id == olt.id,
-                                            OLTPort.port_type == 'pon',
-                                            OLTPort.port_number == port_num
-                                        ).first()
-                                        if not olt_port:
-                                            olt_port = OLTPort(
-                                                olt_id=olt.id,
-                                                port_type='pon',
-                                                port_number=port_num
-                                            )
-                                            db.add(olt_port)
-                                        # Update transceiver data
-                                        if port_info.get('temperature') is not None:
-                                            olt_port.temperature = port_info['temperature']
-                                        if port_info.get('tx_power') is not None:
-                                            olt_port.tx_power = port_info['tx_power']
-                                        olt_port.last_updated = datetime.utcnow()
-                        except Exception as health_err:
-                            logger.warning(f"Health poll failed for {olt.name}: {health_err}")
-
-                        # Send OLT back online notification if it was offline
-                        if not olt_was_online and olt.is_online:
-                            send_olt_status_notification(db, olt, is_online=True)
-
-                        # Re-index existing ONUs by (pon_port, onu_id) for proper matching
-                        existing_by_key = {
-                            (o.pon_port, o.onu_id): o
-                            for o in db.query(ONU).filter(ONU.olt_id == olt.id).all()
-                        }
-
-                        # Track which ONUs we've seen
-                        seen_keys = set()
-
-                        # Collect status changes for batched notification
-                        onus_went_online = []
-                        onus_went_offline = []
-
-                        # Check license ONU limit
-                        from license_manager import license_manager
-                        license_info = license_manager.get_license_info()
-                        max_onus = license_info.get('max_onus', 100)
-                        current_onu_count = db.query(ONU).count()
-                        onu_limit_reached = current_onu_count >= max_onus
-
-                        # Update or create ONUs from SNMP data
-                        for onu_data in snmp_onus_data:
-                            key = (onu_data.pon_port, onu_data.onu_id)
-                            seen_keys.add(key)
-
-                            # Get online status from status_map using pon:onu key
-                            # (handles duplicate MACs across PON ports correctly)
-                            status_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
-                            is_online = snmp_status_map.get(status_key, False)
-
-                            # Get RX power from SNMP
-                            rx_power = onu_data.rx_power
-
-                            # Get ONU self-reported optical data from web scraping
-                            onu_rx_power = None
-                            onu_tx_power = None
-                            onu_temperature = None
-                            onu_voltage = None
-                            onu_tx_bias = None
-                            web_distance = None
-                            if onu_data.mac_address in web_opm_data:
-                                web_data = web_opm_data[onu_data.mac_address]
-                                onu_rx_power = web_data.get('rx_power')
-                                onu_tx_power = web_data.get('tx_power')
-                                onu_temperature = web_data.get('temperature')
-                                onu_voltage = web_data.get('voltage')
-                                onu_tx_bias = web_data.get('tx_bias')
-                                web_distance = web_data.get('distance')  # From OLT web interface
-
-                            # Use ONLY web distance (no SNMP fallback)
-                            final_distance = web_distance
-
-                            if key in existing_by_key:
-                                # Update existing ONU
-                                existing = existing_by_key[key]
-                                was_online = existing.is_online
-                                existing.mac_address = onu_data.mac_address
-                                existing.is_online = is_online
-                                # Update optical diagnostics only when online
-                                if onu_data.description:
-                                    existing.description = onu_data.description
-                                # Always update model if available from SNMP
-                                if onu_data.model:
-                                    existing.model = onu_data.model
-                                if is_online:
-                                    # Only update distance/rx_power when ONU is online
-                                    if final_distance is not None:
-                                        existing.distance = final_distance
-                                    if rx_power is not None:
-                                        existing.rx_power = rx_power
-                                    # Update ONU self-reported optical data from web scraping
-                                    if onu_rx_power is not None:
-                                        existing.onu_rx_power = onu_rx_power
-                                    if onu_tx_power is not None:
-                                        existing.onu_tx_power = onu_tx_power
-                                    if onu_temperature is not None:
-                                        existing.onu_temperature = onu_temperature
-                                    if onu_voltage is not None:
-                                        existing.onu_voltage = onu_voltage
-                                    if onu_tx_bias is not None:
-                                        existing.onu_tx_bias = onu_tx_bias
-                                    existing.last_seen = datetime.utcnow()
-                                else:
-                                    # Keep last known optical data when ONU goes offline
-                                    # This preserves the "last signal" for notifications and troubleshooting
-                                    # Only clear if explicitly requested (e.g., ONU removed)
-                                    pass
-                                existing.updated_at = datetime.utcnow()
-
-                                # Collect status changes for batched notification
-                                if was_online and not is_online:
-                                    logger.info(f"ONU went OFFLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
-                                    onus_went_offline.append(existing)
-                                elif not was_online and is_online:
-                                    logger.info(f"ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
-                                    onus_went_online.append(existing)
+                    # Get ONU self-reported RX power via web scraping
+                    # This gives the ~-13 dBm value the customer sees (vs ~-26 dBm SNMP measures)
+                    web_opm_data = {}
+                    if web_user and web_pass:
+                        try:
+                            web_opm_data = await loop.run_in_executor(
+                                thread_executor,
+                                get_onu_opm_data_web,
+                                olt.ip_address,
+                                web_user,
+                                web_pass
+                            )
+                            if web_opm_data:
+                                logger.info(f"Web OPM for {olt.name}: got ONU RX power for {len(web_opm_data)} ONUs")
+                                # Clear OPM error if successful
+                                if olt.last_error and 'OPM' in olt.last_error:
+                                    olt.last_error = None
                             else:
-                                # Check ONU limit before creating new ONU
-                                if onu_limit_reached:
-                                    logger.warning(f"ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
-                                    # Log event so user can see in Event History
-                                    log_event(db, 'onu_limit_reached', 'system', 0, olt.id,
-                                              f"ONU limit reached ({max_onus}). New ONU {onu_data.mac_address} not added. Upgrade license to add more ONUs.")
-                                    continue
+                                # No OPM data - check if credentials are configured
+                                if not web_user or not web_pass:
+                                    err_msg = "OPM failed: Web credentials not configured"
+                                    logger.warning(f"{olt.name}: {err_msg}")
+                                    olt.last_error = err_msg
+                                else:
+                                    err_msg = "OPM failed: Could not retrieve optical power data"
+                                    logger.warning(f"{olt.name}: {err_msg}")
+                                    olt.last_error = err_msg
+                        except Exception as web_err:
+                            err_msg = f"OPM failed: {str(web_err)[:100]}"
+                            logger.warning(f"Web OPM scraping failed for {olt.name}: {web_err}")
+                            olt.last_error = err_msg
 
-                                # Create new ONU from SNMP (now includes pon_port and onu_id)
-                                # Only save distance/rx_power if ONU is online
-                                new_onu = ONU(
-                                    olt_id=olt.id,
-                                    pon_port=onu_data.pon_port,
-                                    onu_id=onu_data.onu_id,
-                                    mac_address=onu_data.mac_address,
-                                    description=onu_data.description,
-                                    model=onu_data.model,
-                                    is_online=is_online,
-                                    distance=final_distance if is_online else None,
-                                    rx_power=rx_power if is_online else None,
-                                    onu_rx_power=onu_rx_power if is_online else None,
-                                    onu_tx_power=onu_tx_power if is_online else None,
-                                    onu_temperature=onu_temperature if is_online else None,
-                                    onu_voltage=onu_voltage if is_online else None,
-                                    onu_tx_bias=onu_tx_bias if is_online else None,
-                                    last_seen=datetime.utcnow() if is_online else None
-                                )
-                                db.add(new_onu)
-                                current_onu_count += 1  # Track added ONUs
-                                onu_limit_reached = current_onu_count >= max_onus
-                                # Send new ONU registration notification
-                                send_new_onu_notification(db, new_onu, olt.name)
+                    # Get ONU models via web scraping for GPON OLTs (V1600G2-B doesn't expose via SNMP)
+                    web_model_data = {}
+                    if olt.model and 'G2' in olt.model:  # Only for GPON OLTs like V1600G2-B
+                        try:
+                            web_model_data = await loop.run_in_executor(
+                                thread_executor,
+                                get_onu_models_web,
+                                olt.ip_address,
+                                web_user,
+                                web_pass
+                            )
+                            if web_model_data:
+                                logger.info(f"Web models for {olt.name}: got models for {len(web_model_data)} ONUs")
+                        except Exception as model_err:
+                            logger.warning(f"Web model scraping failed for {olt.name}: {model_err}")
 
-                        # Mark ONUs not seen in SNMP as offline (they may be powered off)
-                        for key, onu in existing_by_key.items():
-                            if key not in seen_keys:
-                                if onu.is_online:
-                                    logger.info(f"Marking ONU offline (not in SNMP): PON {onu.pon_port} ONU {onu.onu_id} ({onu.mac_address})")
-                                    onu.is_online = False
-                                    # Keep last known optical data for notifications and troubleshooting
-                                    # (distance, rx_power, onu_rx_power, etc. are preserved)
-                                    onu.updated_at = datetime.utcnow()
-                                    onus_went_offline.append(onu)
+                    # Update OLT status
+                    olt.is_online = True
+                    olt.last_poll = get_current_time_in_timezone(db)
+                    olt.last_error = None
 
-                        # Send batched notification for all status changes
-                        send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
-
-                        # Check for weak signal alarms (Danger Zone detection)
-                        alarm_settings = get_alarm_settings(db)
-                        if is_alarm_enabled(alarm_settings, "weak_signal"):
-                            # Upper threshold: signal weaker than this triggers alert (e.g., -25 dBm)
-                            upper_threshold = float(alarm_settings.get("weak_signal_threshold", -25))
-                            # Lower threshold: signal weaker than this means ONU is likely to disconnect (e.g., -30 dBm)
-                            lower_threshold = float(alarm_settings.get("weak_signal_lower_threshold", -30))
-
-                            # Find ONUs in the DANGER ZONE: signal is weak but not yet disconnected
-                            # Signal must be: weaker than upper (rx_power < upper) AND stronger than lower (rx_power >= lower)
-                            weak_signal_onus = [
-                                o for o in db.query(ONU).filter(
-                                    ONU.olt_id == olt.id,
-                                    ONU.is_online == True,
-                                    ONU.rx_power != None,
-                                    ONU.rx_power < upper_threshold,  # Signal weaker than upper threshold
-                                    ONU.rx_power >= lower_threshold  # But not yet at disconnection level
-                                ).all()
-                            ]
-                            if weak_signal_onus:
-                                send_weak_signal_notification(db, weak_signal_onus, olt.name, upper_threshold, lower_threshold)
-
-                        # Log successful SNMP poll
-                        poll_log = PollLog(
-                            olt_id=olt.id,
-                            status="success",
-                            message=f"SNMP: {len(snmp_onus_data)} ONUs",
-                            onus_found=len(snmp_onus_data)
+                    # Poll OLT health metrics (CPU, temperature, uptime, PON port transceiver data)
+                    try:
+                        health_data = await loop.run_in_executor(
+                            thread_executor,
+                            get_olt_health_snmp,
+                            olt.ip_address,
+                            "public",
+                            olt.pon_ports  # Pass number of PON ports for transceiver polling
                         )
-                        db.add(poll_log)
-                        db.commit()
+                        if health_data:
+                            olt.cpu_usage = health_data.get('cpu_usage')
+                            olt.memory_usage = health_data.get('memory_usage')
+                            olt.temperature = health_data.get('temperature')
+                            olt.uptime_seconds = health_data.get('uptime_seconds')
 
-                        # Collect traffic history after successful poll
-                        await collect_traffic_history(olt, db)
-                        db.commit()
+                            # Check high temperature alarm
+                            if olt.temperature is not None:
+                                alarm_settings = get_alarm_settings(db)
+                                temp_threshold = float(alarm_settings.get("high_temperature_threshold", 60))
+                                if olt.temperature > temp_threshold:
+                                    send_high_temperature_notification(db, olt, olt.temperature)
+
+                            # Save PON port transceiver diagnostics to OLTPort table
+                            pon_ports_data = health_data.get('pon_ports', [])
+                            for port_info in pon_ports_data:
+                                port_num = port_info.get('port')
+                                if port_num:
+                                    # Find or create OLTPort entry for this PON port
+                                    olt_port = db.query(OLTPort).filter(
+                                        OLTPort.olt_id == olt.id,
+                                        OLTPort.port_type == 'pon',
+                                        OLTPort.port_number == port_num
+                                    ).first()
+                                    if not olt_port:
+                                        olt_port = OLTPort(
+                                            olt_id=olt.id,
+                                            port_type='pon',
+                                            port_number=port_num
+                                        )
+                                        db.add(olt_port)
+                                    # Update transceiver data
+                                    if port_info.get('temperature') is not None:
+                                        olt_port.temperature = port_info['temperature']
+                                    if port_info.get('tx_power') is not None:
+                                        olt_port.tx_power = port_info['tx_power']
+                                    olt_port.last_updated = datetime.utcnow()
+                    except Exception as health_err:
+                        logger.warning(f"Health poll failed for {olt.name}: {health_err}")
+
+                    # Send OLT back online notification if it was offline
+                    if not olt_was_online and olt.is_online:
+                        send_olt_status_notification(db, olt, is_online=True)
+
+                    # Re-index existing ONUs by (pon_port, onu_id) for proper matching
+                    existing_by_key = {
+                        (o.pon_port, o.onu_id): o
+                        for o in db.query(ONU).filter(ONU.olt_id == olt.id).all()
+                    }
+
+                    # Track which ONUs we've seen
+                    seen_keys = set()
+
+                    # Collect status changes for batched notification
+                    onus_went_online = []
+                    onus_went_offline = []
+
+                    # Check license ONU limit
+                    from license_manager import license_manager
+                    license_info = license_manager.get_license_info()
+                    max_onus = license_info.get('max_onus', 100)
+                    current_onu_count = db.query(ONU).count()
+                    onu_limit_reached = current_onu_count >= max_onus
+
+                    # Update or create ONUs from SNMP data
+                    for onu_data in snmp_onus_data:
+                        key = (onu_data.pon_port, onu_data.onu_id)
+                        seen_keys.add(key)
+
+                        # Get online status from status_map using pon:onu key
+                        # (handles duplicate MACs across PON ports correctly)
+                        status_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
+                        is_online = snmp_status_map.get(status_key, False)
+
+                        # Get RX power from SNMP
+                        rx_power = onu_data.rx_power
+
+                        # Get ONU self-reported optical data from web scraping
+                        onu_rx_power = None
+                        onu_tx_power = None
+                        onu_temperature = None
+                        onu_voltage = None
+                        onu_tx_bias = None
+                        web_distance = None
+                        # Try MAC lookup first, then fallback to pon:onu key (for GPON OLTs)
+                        web_data = None
+                        if onu_data.mac_address in web_opm_data:
+                            web_data = web_opm_data[onu_data.mac_address]
+                        else:
+                            # GPON OLTs may use pon:onu key format
+                            pon_onu_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
+                            if pon_onu_key in web_opm_data:
+                                web_data = web_opm_data[pon_onu_key]
+                        if web_data:
+                            onu_rx_power = web_data.get('rx_power')
+                            onu_tx_power = web_data.get('tx_power')
+                            onu_temperature = web_data.get('temperature')
+                            onu_voltage = web_data.get('voltage')
+                            onu_tx_bias = web_data.get('tx_bias')
+                            web_distance = web_data.get('distance')  # From OLT web interface
+
+                        # Use ONLY web distance (no SNMP fallback)
+                        final_distance = web_distance
+
+                        if key in existing_by_key:
+                            # Update existing ONU
+                            existing = existing_by_key[key]
+                            was_online = existing.is_online
+                            existing.mac_address = onu_data.mac_address
+                            existing.is_online = is_online
+                            # Update optical diagnostics only when online
+                            if onu_data.description:
+                                existing.description = onu_data.description
+                            # Update model from SNMP or web scraping (for GPON OLTs)
+                            if onu_data.model:
+                                existing.model = onu_data.model
+                            elif not existing.model and web_model_data:
+                                # Fallback to web-scraped model for GPON OLTs
+                                pon_onu_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
+                                if pon_onu_key in web_model_data:
+                                    existing.model = web_model_data[pon_onu_key]
+                            if is_online:
+                                # Only update distance/rx_power when ONU is online
+                                if final_distance is not None:
+                                    existing.distance = final_distance
+                                if rx_power is not None:
+                                    existing.rx_power = rx_power
+                                # Update ONU self-reported optical data from web scraping
+                                if onu_rx_power is not None:
+                                    existing.onu_rx_power = onu_rx_power
+                                if onu_tx_power is not None:
+                                    existing.onu_tx_power = onu_tx_power
+                                if onu_temperature is not None:
+                                    existing.onu_temperature = onu_temperature
+                                if onu_voltage is not None:
+                                    existing.onu_voltage = onu_voltage
+                                if onu_tx_bias is not None:
+                                    existing.onu_tx_bias = onu_tx_bias
+                                existing.last_seen = datetime.utcnow()
+                            else:
+                                # Keep last known optical data when ONU goes offline
+                                # This preserves the "last signal" for notifications and troubleshooting
+                                # Only clear if explicitly requested (e.g., ONU removed)
+                                pass
+                            existing.updated_at = datetime.utcnow()
+
+                            # Collect status changes for batched notification
+                            if was_online and not is_online:
+                                logger.info(f"ONU went OFFLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
+                                onus_went_offline.append(existing)
+                            elif not was_online and is_online:
+                                logger.info(f"ONU came back ONLINE: {existing.mac_address} (PON {existing.pon_port}/{existing.onu_id})")
+                                onus_went_online.append(existing)
+                        else:
+                            # Check ONU limit before creating new ONU
+                            if onu_limit_reached:
+                                logger.warning(f"ONU limit reached ({max_onus}). Skipping new ONU: {onu_data.mac_address}")
+                                # Log event so user can see in Event History
+                                log_event(db, 'onu_limit_reached', 'system', 0, olt.id,
+                                          f"ONU limit reached ({max_onus}). New ONU {onu_data.mac_address} not added. Upgrade license to add more ONUs.")
+                                continue
+
+                            # Create new ONU from SNMP (now includes pon_port and onu_id)
+                            # Only save distance/rx_power if ONU is online
+                            # Get model from SNMP or web scraping
+                            onu_model = onu_data.model
+                            if not onu_model and web_model_data:
+                                pon_onu_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
+                                onu_model = web_model_data.get(pon_onu_key)
+
+                            new_onu = ONU(
+                                olt_id=olt.id,
+                                pon_port=onu_data.pon_port,
+                                onu_id=onu_data.onu_id,
+                                mac_address=onu_data.mac_address,
+                                description=onu_data.description,
+                                model=onu_model,
+                                is_online=is_online,
+                                distance=final_distance if is_online else None,
+                                rx_power=rx_power if is_online else None,
+                                onu_rx_power=onu_rx_power if is_online else None,
+                                onu_tx_power=onu_tx_power if is_online else None,
+                                onu_temperature=onu_temperature if is_online else None,
+                                onu_voltage=onu_voltage if is_online else None,
+                                onu_tx_bias=onu_tx_bias if is_online else None,
+                                last_seen=datetime.utcnow() if is_online else None
+                            )
+                            db.add(new_onu)
+                            current_onu_count += 1  # Track added ONUs
+                            onu_limit_reached = current_onu_count >= max_onus
+                            # Send new ONU registration notification
+                            send_new_onu_notification(db, new_onu, olt.name)
+
+                    # Mark ONUs not seen in SNMP as offline (they may be powered off)
+                    for key, onu in existing_by_key.items():
+                        if key not in seen_keys:
+                            if onu.is_online:
+                                logger.info(f"Marking ONU offline (not in SNMP): PON {onu.pon_port} ONU {onu.onu_id} ({onu.mac_address})")
+                                onu.is_online = False
+                                # Keep last known optical data for notifications and troubleshooting
+                                # (distance, rx_power, onu_rx_power, etc. are preserved)
+                                onu.updated_at = datetime.utcnow()
+                                onus_went_offline.append(onu)
+
+                    # Send batched notification for all status changes
+                    send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
+
+                    # Check for weak signal alarms (Danger Zone detection)
+                    alarm_settings = get_alarm_settings(db)
+                    if is_alarm_enabled(alarm_settings, "weak_signal"):
+                        # Upper threshold: signal weaker than this triggers alert (e.g., -25 dBm)
+                        upper_threshold = float(alarm_settings.get("weak_signal_threshold", -25))
+                        # Lower threshold: signal weaker than this means ONU is likely to disconnect (e.g., -30 dBm)
+                        lower_threshold = float(alarm_settings.get("weak_signal_lower_threshold", -30))
+
+                        # Find ONUs in the DANGER ZONE: signal is weak but not yet disconnected
+                        # Signal must be: weaker than upper (rx_power < upper) AND stronger than lower (rx_power >= lower)
+                        weak_signal_onus = [
+                            o for o in db.query(ONU).filter(
+                                ONU.olt_id == olt.id,
+                                ONU.is_online == True,
+                                ONU.rx_power != None,
+                                ONU.rx_power < upper_threshold,  # Signal weaker than upper threshold
+                                ONU.rx_power >= lower_threshold  # But not yet at disconnection level
+                            ).all()
+                        ]
+                        if weak_signal_onus:
+                            send_weak_signal_notification(db, weak_signal_onus, olt.name, upper_threshold, lower_threshold)
+
+                    # Log successful SNMP poll
+                    poll_log = PollLog(
+                    olt_id=olt.id,
+                    status="success",
+                    message=f"SNMP: {len(snmp_onus_data)} ONUs",
+                    onus_found=len(snmp_onus_data)
+                    )
+                    db.add(poll_log)
+                    db.commit()
+
+                    # Collect traffic history after successful poll
+                    await collect_traffic_history(olt, db)
+                    db.commit()
 
             except Exception as e:
                 logger.error(f"Failed to poll OLT {olt.name}: {e}")
@@ -2344,8 +2476,9 @@ def list_onus_by_olt(olt_id: int, db: Session = Depends(get_db)):
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
+    # Sort: online first, then by pon_port/onu_id
     onus = db.query(ONU).filter(ONU.olt_id == olt_id).order_by(
-        ONU.pon_port, ONU.onu_id
+        ONU.is_online.desc(), ONU.pon_port, ONU.onu_id
     ).all()
 
     response_onus = []
@@ -2430,7 +2563,8 @@ def list_all_onus(
     if online_only:
         query = query.filter(ONU.is_online == True)
 
-    results = query.order_by(OLT.name, ONU.pon_port, ONU.onu_id).all()
+    # Sort: online first, then by OLT name, pon_port, onu_id
+    results = query.order_by(ONU.is_online.desc(), OLT.name, ONU.pon_port, ONU.onu_id).all()
 
     # Build a cache for region names and colors
     region_ids = set(onu.region_id for onu, _ in results if onu.region_id)
@@ -2484,12 +2618,13 @@ def search_onus(
 ):
     """Search ONUs by customer name or MAC address"""
     search = f"%{q}%"
+    # Sort: online first, then by OLT name, pon_port, onu_id
     results = db.query(ONU, OLT.name.label("olt_name")).join(OLT).filter(
         or_(
             ONU.description.ilike(search),
             ONU.mac_address.ilike(search)
         )
-    ).order_by(OLT.name, ONU.pon_port, ONU.onu_id).all()
+    ).order_by(ONU.is_online.desc(), OLT.name, ONU.pon_port, ONU.onu_id).all()
 
     # Build a cache for region names and colors
     region_ids = set(onu.region_id for onu, _ in results if onu.region_id)
@@ -2588,7 +2723,8 @@ def get_onu(onu_id: int, db: Session = Depends(get_db)):
 
 
 def sync_onu_description_to_olt(olt_ip: str, olt_username: str, olt_password: str,
-                                  pon_port: int, onu_id: int, description: str):
+                                  pon_port: int, onu_id: int, description: str,
+                                  olt_model: str = None):
     """Background task to sync ONU description to OLT via web interface"""
     from olt_web_scraper import set_onu_description_web
     try:
@@ -2598,7 +2734,8 @@ def sync_onu_description_to_olt(olt_ip: str, olt_username: str, olt_password: st
             onu_id=onu_id,
             description=description or "",
             username=olt_username,
-            password=olt_password
+            password=olt_password,
+            model=olt_model  # Pass OLT model for correct URL format
         )
         if success:
             logger.info(f"Background sync: ONU 0/{pon_port}:{onu_id} description synced to OLT {olt_ip}")
@@ -2634,9 +2771,10 @@ async def update_onu(onu_id: int, data: dict, background_tasks: BackgroundTasks,
         background_tasks.add_task(
             sync_onu_description_to_olt,
             olt.ip_address, web_user, web_pass,
-            onu.pon_port, onu.onu_id, new_desc or ""
+            onu.pon_port, onu.onu_id, new_desc or "",
+            olt.model  # Pass OLT model for correct URL format
         )
-        logger.info(f"Queued background sync for ONU {onu_id} to OLT {olt.name} via web")
+        logger.info(f"Queued background sync for ONU {onu_id} to OLT {olt.name} ({olt.model}) via web")
 
     # Handle region_id update (can be set to null to remove from region)
     if "region_id" in data:
@@ -2905,7 +3043,8 @@ def reboot_onu(onu_id: int, user: User = Depends(require_auth), db: Session = De
             pon_port=onu.pon_port,
             onu_id=onu.onu_id,
             username=web_user,
-            password=web_pass
+            password=web_pass,
+            model=olt.model  # Pass OLT model for correct reboot URL format
         )
 
         if success:
@@ -4966,7 +5105,7 @@ def calculate_port_rates(olt_id: int, ip: str, current_counters: dict) -> dict:
     return rates
 
 
-def poll_port_status_snmp(ip: str, community: str = 'public') -> dict:
+def poll_port_status_snmp(ip: str, community: str = 'public', model: str = None) -> dict:
     """Poll port status from OLT via SNMP.
     Returns dict with interface index -> {'status': 'up'/'down', 'descr': '...', 'name': '...'}
 
@@ -4975,30 +5114,83 @@ def poll_port_status_snmp(ip: str, community: str = 'public') -> dict:
     - ifIndex 17-24: PON ports (EPON0/1 to EPON0/8)
     - ifIndex 25: Management interface
     - ifIndex 26+: ONU virtual interfaces
+
+    V1600G2-B interface mapping (from SNMP):
+    - ifIndex 1-8: GE uplink ports (GE0/1 to GE0/8)
+    - ifIndex 9-24: PON ports (GPON0/1 to GPON0/16)
+    - ifIndex 25+: ONU virtual interfaces
     """
     import subprocess
+    import re
 
     port_info = {}
 
+    # V1600D8 uses ifName for port names, V1600G2-B uses ifDescr
+    # ifName: 1.3.6.1.2.1.31.1.1.1.1
+    # ifDescr: 1.3.6.1.2.1.2.2.1.2
+    is_v1600d8 = model and 'V1600D' in model.upper()
+    name_oid = '1.3.6.1.2.1.31.1.1.1.1' if is_v1600d8 else '1.3.6.1.2.1.2.2.1.2'
+
     try:
-        # Get interface names (ifName - e.g., "GE0/7 MIKRO")
-        result = subprocess.run(
-            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.1'],
-            capture_output=True, text=True, timeout=10
-        )
-        names = result.stdout.strip().split('\n') if result.stdout else []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        names = {}
+        statuses = {}
 
-        # Get interface operational status (1=up, 2=down)
-        result = subprocess.run(
-            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.8'],
-            capture_output=True, text=True, timeout=10
-        )
-        statuses = result.stdout.strip().split('\n') if result.stdout else []
+        def get_port_info(idx):
+            """Get ifDescr/ifName and ifOperStatus for a single port"""
+            name = None
+            status = '2'  # Default down
+            try:
+                # Get port name (ifName for V1600D8, ifDescr for others)
+                result = subprocess.run(
+                    ['snmpget', '-v2c', '-c', community, '-t', '3', ip, f'{name_oid}.{idx}'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.stdout and 'STRING:' in result.stdout:
+                    match = re.search(r'STRING:\s*"?([^"]*)"?', result.stdout)
+                    if match:
+                        name = match.group(1).strip()
+                # Get ifOperStatus
+                result = subprocess.run(
+                    ['snmpget', '-v2c', '-c', community, '-t', '3', ip, f'1.3.6.1.2.1.2.2.1.8.{idx}'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.stdout and 'INTEGER:' in result.stdout:
+                    match = re.search(r'INTEGER:\s*(\d+)', result.stdout)
+                    if match:
+                        status = match.group(1)
+            except:
+                pass
+            return idx, name, status
 
-        # Parse results - ifIndex starts at 1
-        for i, (name, status) in enumerate(zip(names, statuses), start=1):
-            name = name.strip().strip('"')
-            status_val = status.strip()
+        # Poll first 24 ports in parallel (8 uplinks + 16 PON ports)
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            futures = {executor.submit(get_port_info, i): i for i in range(1, 25)}
+            try:
+                for future in as_completed(futures, timeout=30):
+                    try:
+                        idx, name, status = future.result(timeout=5)
+                        if name:
+                            names[idx] = name
+                        statuses[idx] = status
+                    except:
+                        pass
+            except TimeoutError:
+                # Collect any completed results even if some timed out
+                for future, idx in futures.items():
+                    if future.done():
+                        try:
+                            idx, name, status = future.result(timeout=0)
+                            if name:
+                                names[idx] = name
+                            statuses[idx] = status
+                        except:
+                            pass
+
+        # Combine results - only process first 30 interfaces (uplink + PON ports)
+        for i in range(1, 31):
+            name = names.get(i, f"IF{i}")
+            status_val = statuses.get(i, '2')  # Default to down if not found
 
             # Parse interface name - format is "GE0/7 MIKRO" or "GE0/1 "
             parts = name.split(' ', 1)
@@ -5016,11 +5208,31 @@ def poll_port_status_snmp(ip: str, community: str = 'public') -> dict:
     return port_info
 
 
+# Cache for port status to avoid repeated SNMP timeouts
+_port_status_cache: Dict[str, Dict] = {}  # ip -> {'data': {...}, 'timestamp': datetime}
+_port_status_updating: Dict[str, bool] = {}  # ip -> True if update in progress
+PORT_STATUS_CACHE_SECONDS = 300  # Cache for 5 minutes (background polling updates it)
+
+def _update_port_status_background(ip: str, model: str = None):
+    """Background task to update port status cache"""
+    try:
+        if _port_status_updating.get(ip):
+            return  # Already updating
+        _port_status_updating[ip] = True
+        data = poll_port_status_snmp(ip, model=model)
+        if data:
+            _port_status_cache[ip] = {'data': data, 'timestamp': datetime.now()}
+    except Exception as e:
+        logger.warning(f"Background port status update failed for {ip}: {e}")
+    finally:
+        _port_status_updating[ip] = False
+
 @app.get("/api/olts/{olt_id}/ports")
 def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
     """
     Get all ports for an OLT with their status.
     Returns PON ports with ONU counts and SFP uplink ports.
+    Returns cached data instantly, updates in background if stale.
     """
     from models import OLTPort
 
@@ -5028,8 +5240,24 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
-    # Poll live port status from OLT via SNMP
-    snmp_ports = poll_port_status_snmp(olt.ip_address)
+    snmp_ports = {}
+    model_upper = (olt.model or '').upper()
+    cache_key = olt.ip_address
+    now = datetime.now()
+
+    # Always use cached data if available (instant response)
+    if cache_key in _port_status_cache:
+        cached = _port_status_cache[cache_key]
+        snmp_ports = cached['data']
+        age = (now - cached['timestamp']).total_seconds()
+        # Trigger background update if cache is stale (>60s) but still return cached data
+        if age > 60 and not _port_status_updating.get(cache_key):
+            thread_executor.submit(_update_port_status_background, cache_key, olt.model)
+
+    # If no cache at all, do a quick poll (only for first request)
+    if not snmp_ports:
+        snmp_ports = poll_port_status_snmp(olt.ip_address, model=olt.model)
+        _port_status_cache[cache_key] = {'data': snmp_ports, 'timestamp': now}
 
     # Get PON port count based on model
     pon_count = get_pon_port_count(olt.model)
@@ -5203,10 +5431,10 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
 
     elif 'G2-B' in model_upper or 'G2-R' in model_upper:
         # V1600G2-B/R: 16 PON, L3, Cloud EMS / Compact design
-        # RJ45(GE1-4), SFP+(GE5-6)
+        # RJ45(GE1-4), SFP+(GE5-8)
         ge_config = [(i, f'GE{i}', '1G') for i in range(1, 5)]
         sfp_config = []
-        xge_config = [(5, 'GE5', '10G'), (6, 'GE6', '10G')]
+        xge_config = [(i, f'GE{i}', '10G') for i in range(5, 9)]
         qsfp_config = []
 
     elif 'G2' in model_upper:
@@ -5280,16 +5508,22 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
         xge_config = []
         qsfp_config = []
 
-    # Build GE RJ45 ports with live SNMP status
+    # Build GE RJ45 ports with live SNMP status (fallback to database if no SNMP data)
     ge_ports = []
     for if_idx, default_label, default_speed in ge_config:
         port = port_map.get(('ge', if_idx))
         snmp_info = snmp_ports.get(if_idx, {})
         descr = snmp_info.get('descr')
-        snmp_status = snmp_info.get('status', 'down')
-        # Port is UP if: SNMP says UP OR has a custom description
-        if snmp_status == 'up' or (descr and descr.strip()):
+        # Use database status as fallback when no SNMP data available
+        db_status = port.status if port else 'down'
+        snmp_status = snmp_info.get('status') if snmp_info else None
+        # Port status from SNMP takes priority, fallback to database if no SNMP data
+        if snmp_status == 'up':
             status = 'up'
+        elif snmp_status == 'down':
+            status = 'down'
+        elif snmp_status is None and db_status == 'up':
+            status = 'up'  # Keep last known state when SNMP unavailable
         else:
             status = 'down'
         ge_ports.append({
@@ -5300,15 +5534,20 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
             "label": descr if descr else default_label
         })
 
-    # Build SFP ports with live SNMP status
+    # Build SFP ports with live SNMP status (fallback to database if no SNMP data)
     sfp_ports = []
     for if_idx, default_label, default_speed in sfp_config:
         port = port_map.get(('sfp', if_idx))
         snmp_info = snmp_ports.get(if_idx, {})
         descr = snmp_info.get('descr')
-        snmp_status = snmp_info.get('status', 'down')
-        # Port is UP if: SNMP says UP OR has a custom description
-        if snmp_status == 'up' or (descr and descr.strip()):
+        db_status = port.status if port else 'down'
+        snmp_status = snmp_info.get('status') if snmp_info else None
+        # Port status from SNMP takes priority, fallback to database if no SNMP data
+        if snmp_status == 'up':
+            status = 'up'
+        elif snmp_status == 'down':
+            status = 'down'
+        elif snmp_status is None and db_status == 'up':
             status = 'up'
         else:
             status = 'down'
@@ -5320,15 +5559,20 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
             "label": descr if descr else default_label
         })
 
-    # Build 10G SFP+ ports with live SNMP status
+    # Build 10G SFP+ ports with live SNMP status (fallback to database if no SNMP data)
     xge_ports = []
     for if_idx, default_label, default_speed in xge_config:
         port = port_map.get(('xge', if_idx))
         snmp_info = snmp_ports.get(if_idx, {})
         descr = snmp_info.get('descr')
-        snmp_status = snmp_info.get('status', 'down')
-        # Port is UP if: SNMP says UP OR has a custom description
-        if snmp_status == 'up' or (descr and descr.strip()):
+        db_status = port.status if port else 'down'
+        snmp_status = snmp_info.get('status') if snmp_info else None
+        # Port status from SNMP takes priority, fallback to database if no SNMP data
+        if snmp_status == 'up':
+            status = 'up'
+        elif snmp_status == 'down':
+            status = 'down'
+        elif snmp_status is None and db_status == 'up':
             status = 'up'
         else:
             status = 'down'
@@ -5340,14 +5584,20 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
             "label": descr if descr else default_label
         })
 
-    # Build QSFP28 40G/100G ports with live SNMP status (for V3600 series)
+    # Build QSFP28 40G/100G ports with live SNMP status (fallback to database if no SNMP data)
     qsfp_ports = []
     for if_idx, default_label, default_speed in qsfp_config:
         port = port_map.get(('qsfp', if_idx))
         snmp_info = snmp_ports.get(if_idx, {})
         descr = snmp_info.get('descr')
-        snmp_status = snmp_info.get('status', 'down')
-        if snmp_status == 'up' or (descr and descr.strip()):
+        db_status = port.status if port else 'down'
+        snmp_status = snmp_info.get('status') if snmp_info else None
+        # Port status from SNMP takes priority, fallback to database if no SNMP data
+        if snmp_status == 'up':
+            status = 'up'
+        elif snmp_status == 'down':
+            status = 'down'
+        elif snmp_status is None and db_status == 'up':
             status = 'up'
         else:
             status = 'down'
@@ -5358,6 +5608,32 @@ def get_olt_ports(olt_id: int, user: User = Depends(require_auth), db: Session =
             "speed": port.speed if port else default_speed,
             "label": descr if descr else default_label
         })
+
+    # Save port status to database for persistence (only when SNMP data is available)
+    if snmp_ports:
+        try:
+            all_ports = ge_ports + sfp_ports + xge_ports + qsfp_ports
+            for p in all_ports:
+                port_key = (p['type'], p['port_number'])
+                existing = port_map.get(port_key)
+                if existing:
+                    if existing.status != p['status']:
+                        existing.status = p['status']
+                        existing.last_updated = datetime.utcnow()
+                else:
+                    new_port = OLTPort(
+                        olt_id=olt_id,
+                        port_type=p['type'],
+                        port_number=p['port_number'],
+                        status=p['status'],
+                        speed=p['speed'],
+                        last_updated=datetime.utcnow()
+                    )
+                    db.add(new_port)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to save port status to DB: {e}")
+            db.rollback()
 
     return {
         "olt_id": olt_id,
@@ -5412,26 +5688,38 @@ async def set_port_description(
     user: User = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
-    """Set port description on OLT via SNMP."""
+    """Set port description on OLT via web interface.
+
+    Uses web scraping to set port description on gecfg.html page.
+    This updates the ifDescr which is read by the dashboard.
+    """
+    from olt_web_scraper import set_port_description_web
+
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
     if not olt:
         raise HTTPException(status_code=404, detail="OLT not found")
 
-    # Set description via SNMP (port_number is the interface index)
+    # Set description via web interface
+    # port_number is the GE port number (1-8 for V1600G2-B, 1-16 for V1600D8)
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(
         thread_executor,
-        set_port_description_snmp,
+        set_port_description_web,
         olt.ip_address,
         port_number,
         description,
-        'private'  # Write community string
+        "admin",  # username
+        "admin",  # password
+        olt.model
     )
 
     if success:
+        # Clear port status cache so next poll picks up new description
+        if olt.ip_address in _port_status_cache:
+            del _port_status_cache[olt.ip_address]
         return {"success": True, "message": f"Port {port_number} description set to '{description}'"}
     else:
-        raise HTTPException(status_code=500, detail="Failed to set port description via SNMP")
+        raise HTTPException(status_code=500, detail="Failed to set port description")
 
 
 @app.get("/api/olts/{olt_id}/ports/{port_type}/{port_number}/traffic")
@@ -5558,11 +5846,24 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
 
         traffic_data = []
 
-        for mac, counters in current_counters.items():
+        for key, counters in current_counters.items():
             rx_bytes = counters['rx_bytes']
             tx_bytes = counters['tx_bytes']
             pon_port = counters.get('pon_port', 0)
             onu_id = counters.get('onu_id', 0)
+
+            # Handle both MAC and pon:onu key formats
+            if ':' in key and len(key) < 10:  # pon:onu format
+                onu_for_mac = db.query(ONU).filter(
+                    ONU.olt_id == olt_id,
+                    ONU.pon_port == pon_port,
+                    ONU.onu_id == onu_id
+                ).first()
+                mac = onu_for_mac.mac_address if onu_for_mac else None
+                if not mac:
+                    continue
+            else:
+                mac = key
 
             # Calculate rate if we have previous data
             rx_kbps = 0
@@ -5679,8 +5980,8 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
 
         db.commit()
 
-        # Sort by traffic (highest first)
-        traffic_data.sort(key=lambda x: x['rx_kbps'] + x['tx_kbps'], reverse=True)
+        # Sort: online first (by traffic descending), then offline at bottom
+        traffic_data.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
 
         return {
             "olt_id": olt_id,
@@ -5733,11 +6034,24 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
                 for s in db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt.id).all()
             }
 
-            for mac, counters in current_counters.items():
+            for key, counters in current_counters.items():
                 rx_bytes = counters['rx_bytes']
                 tx_bytes = counters['tx_bytes']
                 pon_port = counters.get('pon_port', 0)
                 onu_id = counters.get('onu_id', 0)
+
+                # Handle both MAC and pon:onu key formats
+                if ':' in key and len(key) < 10:  # pon:onu format
+                    onu_for_mac = db.query(ONU).filter(
+                        ONU.olt_id == olt.id,
+                        ONU.pon_port == pon_port,
+                        ONU.onu_id == onu_id
+                    ).first()
+                    mac = onu_for_mac.mac_address if onu_for_mac else None
+                    if not mac:
+                        continue
+                else:
+                    mac = key
 
                 rx_kbps = 0
                 tx_kbps = 0
@@ -5802,8 +6116,8 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
 
     db.commit()
 
-    # Sort by traffic (highest first)
-    all_traffic.sort(key=lambda x: x['rx_kbps'] + x['tx_kbps'], reverse=True)
+    # Sort: online first (by traffic descending), then offline at bottom
+    all_traffic.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
 
     return {
         "timestamp": current_time.isoformat(),
@@ -5818,26 +6132,81 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
     """Background loop to poll traffic and broadcast to WebSocket clients"""
     logger.info(f"Started traffic polling loop for OLT {olt_id}")
 
-    # Send immediate "loading" message so client knows we're connected and working
-    await traffic_manager.broadcast(olt_id, {
-        "olt_id": olt_id,
-        "timestamp": datetime.now().isoformat(),
-        "traffic": [],
-        "message": "Polling SNMP..."
-    })
+    # Small delay to let WebSocket connection stabilize before sending large payload
+    # This prevents disconnection on OLTs with many ONUs (large initial payload)
+    await asyncio.sleep(0.5)
+
+    # Send immediate cached traffic data from database (updated by background polling)
+    # This gives instant feedback while SNMP poll runs in background
+    db = db_session_factory()
+    try:
+        olt = db.query(OLT).filter(OLT.id == olt_id).first()
+        olt_name = olt.name if olt else f"OLT-{olt_id}"
+
+        # Get cached traffic data from snapshots
+        snapshots = db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt_id).all()
+        cached_traffic = []
+        for s in snapshots:
+            onu = db.query(ONU).filter(ONU.olt_id == olt_id, ONU.mac_address == s.mac_address).first()
+            if onu and (s.last_rx_kbps > 0 or s.last_tx_kbps > 0 or onu.is_online):
+                cached_traffic.append({
+                    "mac_address": s.mac_address,
+                    "pon_port": onu.pon_port if onu else 0,
+                    "onu_id": onu.onu_id if onu else 0,
+                    "description": onu.description if onu else None,
+                    "is_online": onu.is_online if onu else False,
+                    "rx_kbps": s.last_rx_kbps or 0,
+                    "tx_kbps": s.last_tx_kbps or 0,
+                    "rx_mbps": round((s.last_rx_kbps or 0) / 1000, 2),
+                    "tx_mbps": round((s.last_tx_kbps or 0) / 1000, 2)
+                })
+        # Sort: online first (by traffic descending), then offline at bottom
+        cached_traffic.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
+
+        await traffic_manager.broadcast(olt_id, {
+            "olt_id": olt_id,
+            "olt_name": olt_name,
+            "timestamp": datetime.now().isoformat(),
+            "onu_count": len(cached_traffic),
+            "traffic": cached_traffic,
+            "message": "Cached data (updating...)"
+        })
+    except Exception as e:
+        logger.warning(f"Failed to send cached traffic: {e}")
+    finally:
+        db.close()
 
     while olt_id in traffic_manager.active_connections and traffic_manager.active_connections[olt_id]:
         try:
+            poll_start = datetime.now()
             db = db_session_factory()
             try:
-                # Get current traffic counters from SNMP
+                # Get current traffic counters from SNMP with keep-alive pings
                 loop = asyncio.get_event_loop()
-                current_counters = await loop.run_in_executor(
+                snmp_task = loop.run_in_executor(
                     thread_executor,
                     get_traffic_counters_snmp,
                     olt_ip,
                     "public"
                 )
+
+                # Send keep-alive pings every 5 seconds while SNMP poll runs
+                while not snmp_task.done():
+                    try:
+                        current_counters = await asyncio.wait_for(asyncio.shield(snmp_task), timeout=5.0)
+                        break  # Poll completed
+                    except asyncio.TimeoutError:
+                        # Still polling - send keep-alive to prevent WebSocket timeout
+                        elapsed = int((datetime.now() - poll_start).total_seconds())
+                        await traffic_manager.broadcast(olt_id, {
+                            "olt_id": olt_id,
+                            "timestamp": datetime.now().isoformat(),
+                            "polling": True,
+                            "elapsed_seconds": elapsed,
+                            "message": f"Polling SNMP ({elapsed}s)..."
+                        })
+
+                current_counters = await snmp_task
 
                 if not current_counters:
                     await traffic_manager.broadcast(olt_id, {
@@ -5846,7 +6215,7 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                         "traffic": [],
                         "message": "No traffic data"
                     })
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1.5)
                     continue
 
                 current_time = datetime.now()
@@ -5863,14 +6232,27 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
 
                 traffic_data = []
 
-                # Smoothing factor: 0.3 = 30% new value, 70% old value (smoother)
-                SMOOTHING = 0.3
+                # Smoothing factor: 0.7 = 70% new value, 30% old value (more responsive/live)
+                SMOOTHING = 0.7
 
-                for mac, counters in current_counters.items():
+                for key, counters in current_counters.items():
                     rx_bytes = counters['rx_bytes']
                     tx_bytes = counters['tx_bytes']
                     pon_port = counters.get('pon_port', 0)
                     onu_id = counters.get('onu_id', 0)
+
+                    # Handle both MAC and pon:onu key formats
+                    if ':' in key and len(key) < 10:  # pon:onu format
+                        onu_for_mac = db.query(ONU).filter(
+                            ONU.olt_id == olt_id,
+                            ONU.pon_port == pon_port,
+                            ONU.onu_id == onu_id
+                        ).first()
+                        mac = onu_for_mac.mac_address if onu_for_mac else None
+                        if not mac:
+                            continue
+                    else:
+                        mac = key
 
                     rx_kbps = 0
                     tx_kbps = 0
@@ -5953,8 +6335,11 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
 
                 db.commit()
 
-                # Sort by traffic (highest first)
-                traffic_data.sort(key=lambda x: x['rx_kbps'] + x['tx_kbps'], reverse=True)
+                # Sort: online first (by traffic descending), then offline at bottom
+                traffic_data.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
+
+                # Calculate poll duration for live indicator
+                poll_ms = int((datetime.now() - poll_start).total_seconds() * 1000)
 
                 # Broadcast to all connected clients
                 await traffic_manager.broadcast(olt_id, {
@@ -5962,14 +6347,15 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                     "olt_name": olt_name,
                     "timestamp": current_time.isoformat(),
                     "onu_count": len(traffic_data),
+                    "poll_ms": poll_ms,  # Shows how fast the poll was
                     "traffic": traffic_data
                 })
 
             finally:
                 db.close()
 
-            # Wait 3 seconds before next poll
-            await asyncio.sleep(3)
+            # Wait 1.5 seconds before next poll (faster refresh)
+            await asyncio.sleep(1.5)
 
         except asyncio.CancelledError:
             logger.info(f"Traffic polling loop cancelled for OLT {olt_id}")
@@ -6064,11 +6450,13 @@ async def get_onu_traffic_history(
 
     time_delta = TIME_RANGES[range]
     start_time = datetime.utcnow() - time_delta
+    # Format timestamp to match SQLite storage format (space instead of T)
+    start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
 
     history = db.query(TrafficHistory).filter(
         TrafficHistory.entity_type == 'onu',
         TrafficHistory.onu_db_id == onu_id,
-        TrafficHistory.timestamp >= start_time
+        TrafficHistory.timestamp >= start_time_str
     ).order_by(TrafficHistory.timestamp.asc()).all()
 
     return {
@@ -6119,12 +6507,13 @@ async def get_pon_traffic_history(
 
     time_delta = TIME_RANGES[range]
     start_time = datetime.utcnow() - time_delta
+    start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
     entity_id = f"{olt_id}:{pon_port}"
 
     history = db.query(TrafficHistory).filter(
         TrafficHistory.entity_type == 'pon',
         TrafficHistory.entity_id == entity_id,
-        TrafficHistory.timestamp >= start_time
+        TrafficHistory.timestamp >= start_time_str
     ).order_by(TrafficHistory.timestamp.asc()).all()
 
     return {
@@ -6173,11 +6562,12 @@ async def get_olt_traffic_history(
 
     time_delta = TIME_RANGES[range]
     start_time = datetime.utcnow() - time_delta
+    start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
 
     history = db.query(TrafficHistory).filter(
         TrafficHistory.entity_type == 'olt',
         TrafficHistory.olt_id == olt_id,
-        TrafficHistory.timestamp >= start_time
+        TrafficHistory.timestamp >= start_time_str
     ).order_by(TrafficHistory.timestamp.asc()).all()
 
     return {
