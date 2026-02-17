@@ -659,20 +659,6 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
             logger.debug("No weak signal ONUs left after ONU/Region filtering")
             return
 
-        settings = get_whatsapp_settings(db)
-
-        # Check if WhatsApp notifications are enabled
-        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
-            return
-
-        api_url = settings.get('whatsapp_api_url', '').strip()
-        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
-        account = settings.get('whatsapp_account', '').strip()
-        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
-
-        if not recipients or not all([api_url, secret, account]):
-            return
-
         # Filter out ONUs that were recently alerted (within cooldown period)
         now = datetime.utcnow()
         cooldown_threshold = now - timedelta(hours=WEAK_SIGNAL_ALERT_COOLDOWN_HOURS)
@@ -688,14 +674,71 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
         for onu in onus_with_weak_signal:
             if onu.id not in weak_signal_alert_cache:
                 onus_to_alert.append(onu)
-            else:
-                logger.debug(f"Skipping weak signal alert for ONU {onu.mac_address} - already alerted within {WEAK_SIGNAL_ALERT_COOLDOWN_HOURS}h")
 
         if not onus_to_alert:
             logger.debug("All weak signal ONUs were already alerted recently, skipping")
             return
 
-        # Build detailed message for each ONU
+        # Log events to EventLog for ALL weak signal ONUs (so they show in dashboard)
+        for onu in onus_to_alert:
+            onu_name = onu.description if onu.description and onu.description.upper() != "NULL" else onu.mac_address
+            signal = onu.rx_power
+
+            # Calculate risk level
+            if signal is not None:
+                range_size = upper_threshold - lower_threshold
+                position = (signal - lower_threshold) / range_size if range_size != 0 else 0.5
+                if position < 0.33:
+                    risk_level = "CRITICAL"
+                elif position < 0.66:
+                    risk_level = "HIGH"
+                else:
+                    risk_level = "WARNING"
+            else:
+                risk_level = "WARNING"
+
+            # Log to EventLog table
+            event = EventLog(
+                event_type="weak_signal",
+                entity_type="onu",
+                entity_id=onu.id,
+                olt_id=onu.olt_id,
+                description=f"Weak Signal [{risk_level}]: {onu_name} ({onu.mac_address}) on {olt_name} - Signal: {signal} dBm (threshold: {upper_threshold} dBm)",
+                details=json.dumps({
+                    "onu_name": onu_name,
+                    "mac_address": onu.mac_address,
+                    "signal": signal,
+                    "threshold": upper_threshold,
+                    "lower_threshold": lower_threshold,
+                    "risk_level": risk_level,
+                    "pon_port": onu.pon_port,
+                    "onu_id": onu.onu_id
+                })
+            )
+            db.add(event)
+
+            # Mark as alerted in cache
+            weak_signal_alert_cache[onu.id] = now
+
+        db.commit()
+        logger.info(f"Logged {len(onus_to_alert)} weak signal events to EventLog")
+
+        # Now check if WhatsApp is configured for notifications
+        settings = get_whatsapp_settings(db)
+
+        # Check if WhatsApp notifications are enabled
+        if str(settings.get('whatsapp_enabled', '')).lower() != 'true':
+            return
+
+        api_url = settings.get('whatsapp_api_url', '').strip()
+        secret = decrypt_sensitive(settings.get('whatsapp_secret', '')).strip()
+        account = settings.get('whatsapp_account', '').strip()
+        recipients = parse_whatsapp_recipients(settings.get('whatsapp_recipients', ''))
+
+        if not recipients or not all([api_url, secret, account]):
+            return
+
+        # Build detailed message for each ONU (onus_to_alert already filtered above)
         for onu in onus_to_alert[:5]:  # Limit to 5 ONUs per batch to avoid long messages
             onu_name = onu.description if onu.description and onu.description.upper() != "NULL" else "No Name"
             region_name = onu.region.name if onu.region else "No Region"
@@ -763,8 +806,6 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
                     )
                     if response.status_code == 200:
                         logger.info(f"Weak signal notification sent to {phone} for ONU {onu.mac_address}")
-                        # Mark this ONU as alerted in the cache to prevent spam
-                        weak_signal_alert_cache[onu.id] = now
                     else:
                         logger.warning(f"Failed to send weak signal notification to {phone}: {response.text}")
                 except Exception as e:
@@ -7258,35 +7299,78 @@ async def generate_onu_report(
 
 @app.get("/api/reports/signal-quality")
 async def generate_signal_report(
-    threshold: float = Query(-25.0, description="Signal threshold in dBm"),
+    threshold: float = Query(None, description="Signal threshold in dBm (uses alarm setting if not specified)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_auth)
 ):
     """Generate signal quality report - ONUs with low signal"""
+    from sqlalchemy import or_
+
+    # Use alarm threshold from settings if not specified
+    if threshold is None:
+        alarm_settings = get_alarm_settings(db)
+        threshold = float(alarm_settings.get("weak_signal_threshold", -25))
+        lower_threshold = float(alarm_settings.get("weak_signal_lower_threshold", -30))
+    else:
+        lower_threshold = threshold - 5  # Default 5 dBm below upper threshold
+
+    # Query ONUs with weak signal - check BOTH rx_power (OLT measured) AND onu_rx_power (ONU self-reported)
     onus = db.query(ONU).filter(
-        ONU.rx_power.isnot(None),
-        ONU.rx_power < threshold,
-        ONU.is_online == True
-    ).order_by(ONU.rx_power).all()
+        ONU.is_online == True,
+        or_(
+            (ONU.rx_power.isnot(None)) & (ONU.rx_power < threshold),
+            (ONU.onu_rx_power.isnot(None)) & (ONU.onu_rx_power < threshold)
+        )
+    ).all()
+
+    # Sort by the worse signal value
+    def get_signal(onu):
+        # Use onu_rx_power if available (more accurate), otherwise rx_power
+        if onu.onu_rx_power is not None:
+            return onu.onu_rx_power
+        return onu.rx_power or 0
+
+    onus = sorted(onus, key=get_signal)
+
+    # Calculate severity based on danger zone
+    def get_severity(rx_power):
+        if rx_power is None:
+            return "unknown"
+        range_size = threshold - lower_threshold
+        position = (rx_power - lower_threshold) / range_size if range_size != 0 else 0.5
+        if position < 0.33:
+            return "critical"
+        elif position < 0.66:
+            return "high"
+        else:
+            return "warning"
+
+    result_onus = []
+    for onu in onus:
+        # Use best available signal value (prefer ONU self-reported)
+        signal = onu.onu_rx_power if onu.onu_rx_power is not None else onu.rx_power
+        result_onus.append({
+            "id": onu.id,
+            "olt_name": onu.olt.name,
+            "pon_port": onu.pon_port,
+            "onu_id": onu.onu_id,
+            "mac_address": onu.mac_address,
+            "description": onu.description if onu.description and onu.description.upper() != "NULL" else None,
+            "rx_power": signal,
+            "olt_rx_power": onu.rx_power,
+            "onu_rx_power": onu.onu_rx_power,
+            "distance": onu.distance,
+            "address": onu.address,
+            "region": onu.region.name if onu.region else None,
+            "severity": get_severity(signal)
+        })
 
     return {
         "generated_at": datetime.now().isoformat(),
         "threshold": threshold,
-        "total_low_signal": len(onus),
-        "onus": [
-            {
-                "id": onu.id,
-                "olt_name": onu.olt.name,
-                "pon_port": onu.pon_port,
-                "onu_id": onu.onu_id,
-                "mac_address": onu.mac_address,
-                "description": onu.description,
-                "rx_power": onu.rx_power,
-                "distance": onu.distance,
-                "severity": "critical" if onu.rx_power < -28 else "warning"
-            }
-            for onu in onus
-        ]
+        "lower_threshold": lower_threshold,
+        "total_low_signal": len(result_onus),
+        "onus": result_onus
     }
 
 

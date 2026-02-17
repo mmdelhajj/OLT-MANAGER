@@ -6954,6 +6954,7 @@ function ReportsPage({ darkMode, token }) {
   const loadSignalReport = async () => {
     setLoadingSignal(true);
     try {
+      // Don't pass threshold - API will use alarm settings automatically
       const response = await fetch('/api/reports/signal-quality', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -6967,6 +6968,9 @@ function ReportsPage({ darkMode, token }) {
 
   useEffect(() => {
     loadSignalReport();
+    // Auto-refresh every 60 seconds
+    const interval = setInterval(loadSignalReport, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -7026,20 +7030,25 @@ function ReportsPage({ darkMode, token }) {
         </div>
       </div>
 
-      {/* Signal Quality Report */}
+      {/* Signal Quality Report - Auto-updates using Alarm Settings threshold */}
       <div className={`rounded-xl shadow-md overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
         <div className={`p-4 border-b flex justify-between items-center ${darkMode ? 'border-slate-700' : 'border-gray-200'}`}>
           <div className="flex items-center gap-3">
             <svg className="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
-            <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Signal Quality Alerts</h2>
+            <div>
+              <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Signal Quality Alerts</h2>
+              <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>Auto-refreshes every 60 seconds (uses Alarm Settings threshold)</p>
+            </div>
           </div>
           <button
             onClick={loadSignalReport}
-            className={`px-3 py-1 rounded-lg text-sm ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            disabled={loadingSignal}
+            className={`px-4 py-2 rounded-lg text-sm flex items-center gap-2 ${darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'} disabled:opacity-50`}
           >
-            Refresh
+            {loadingSignal && <div className="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>}
+            Refresh Now
           </button>
         </div>
         <div className="p-4">
@@ -7094,8 +7103,10 @@ function ReportsPage({ darkMode, token }) {
                             </td>
                             <td className={`px-4 py-2 text-sm ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>{onu.distance}m</td>
                             <td className="px-4 py-2">
-                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                                onu.severity === 'critical' ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'
+                              <span className={`px-2 py-1 rounded-full text-xs font-semibold uppercase ${
+                                onu.severity === 'critical' ? 'bg-red-100 text-red-800' :
+                                onu.severity === 'high' ? 'bg-orange-100 text-orange-800' :
+                                'bg-yellow-100 text-yellow-800'
                               }`}>
                                 {onu.severity}
                               </span>
