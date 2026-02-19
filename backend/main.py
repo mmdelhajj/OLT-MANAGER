@@ -1063,34 +1063,61 @@ async def collect_traffic_history(olt, db):
         )
 
         if port_counters:
+            logger.info(f"Got {len(port_counters)} port counters for {olt.name}")
             port_rates = calculate_port_rates(olt.id, olt.ip_address, port_counters)
+            logger.info(f"Calculated {len(port_rates)} port rates for {olt.name}")
 
-            # V1600D8 port mapping: SFP=1-4, SFP+=5-8, ETH=9-16
+            # Port mapping based on OLT model
             model = olt.model or ''
             if 'D8' in model:
+                # V1600D8 port mapping: SFP=1-4, SFP+=5-8, ETH=9-16
                 port_mapping = {
                     **{i: ('sfp', i) for i in range(1, 5)},      # GE1-4 = SFP
                     **{i: ('xge', i) for i in range(5, 9)},      # GE5-8 = SFP+
                     **{i: ('ge', i) for i in range(9, 17)}       # GE9-16 = ETH
                 }
+            elif 'G2' in model or 'V1600G' in model:
+                # V1600G2-B port mapping: GE=1-4 (1G LAN), XGE=5-8 (10G SFP+)
+                port_mapping = {
+                    **{i: ('ge', i) for i in range(1, 5)},       # Port 1-4 = GE (1G LAN)
+                    **{i: ('xge', i) for i in range(5, 9)},      # Port 5-8 = XGE (10G SFP+)
+                }
             else:
-                # Default: first ports are GE, then SFP, then XGE
-                port_mapping = {i: ('ge', i) for i in range(1, 17)}
+                # Default: first 8 ports as GE
+                port_mapping = {i: ('ge', i) for i in range(1, 9)}
 
+            uplink_count = 0
             for if_idx, rates in port_rates.items():
-                if if_idx in port_mapping and (rates['rx_kbps'] > 0 or rates['tx_kbps'] > 0):
+                if if_idx in port_mapping:
                     port_type, port_num = port_mapping[if_idx]
+
+                    # Save to PortTraffic table for per-port graphs
                     port_traffic = PortTraffic(
                         olt_id=olt.id,
                         port_type=port_type,
-                        port_number=if_idx,  # Use actual interface index
+                        port_number=port_num,  # Use mapped port number
                         rx_kbps=rates['rx_kbps'],
                         tx_kbps=rates['tx_kbps'],
                         timestamp=current_time
                     )
                     db.add(port_traffic)
 
-            logger.info(f"Port traffic saved for {olt.name}: {len(port_rates)} ports with traffic")
+                    # Also save to TrafficHistory for historical graphs
+                    uplink_history = TrafficHistory(
+                        entity_type=port_type,  # 'ge' or 'xge'
+                        entity_id=f"{olt.id}:{port_type}:{port_num}",
+                        olt_id=olt.id,
+                        pon_port=None,
+                        onu_db_id=None,
+                        rx_kbps=rates['rx_kbps'],
+                        tx_kbps=rates['tx_kbps'],
+                        timestamp=current_time
+                    )
+                    db.add(uplink_history)
+                    uplink_count += 1
+
+            if uplink_count > 0:
+                logger.info(f"Uplink traffic saved for {olt.name}: {uplink_count} ports")
 
         logger.info(f"Traffic history saved for {olt.name}: {len(traffic_data)} ONUs, total {total_rx:.0f}/{total_tx:.0f} kbps")
 
@@ -1359,7 +1386,12 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True):
                             if pon_onu_key in web_opm_data:
                                 web_data = web_opm_data[pon_onu_key]
                         if web_data:
-                            onu_rx_power = web_data.get('rx_power')
+                            # ONU self-reported RX power (what ONU sees from OLT, ~-19dBm)
+                            onu_rx_power = web_data.get('onu_rx_power')
+                            # OLT RX from ONU via web (fallback if SNMP rx_power not available)
+                            web_olt_rx = web_data.get('rx_power')
+                            if rx_power is None and web_olt_rx is not None:
+                                rx_power = web_olt_rx  # Use web-scraped OLT RX as fallback
                             onu_tx_power = web_data.get('tx_power')
                             onu_temperature = web_data.get('temperature')
                             onu_voltage = web_data.get('voltage')
@@ -5053,9 +5085,13 @@ def poll_port_traffic_snmp(ip: str, community: str = 'public') -> dict:
     """Poll port traffic counters from OLT via SNMP.
     Returns dict with interface index -> {'rx_bytes': int, 'tx_bytes': int}
 
-    Uses OIDs:
-    - 1.3.6.1.2.1.2.2.1.10 (ifInOctets) - input bytes
-    - 1.3.6.1.2.1.2.2.1.16 (ifOutOctets) - output bytes
+    Uses 64-bit OIDs (HC = High Capacity) to avoid counter wrap on high-traffic ports:
+    - 1.3.6.1.2.1.31.1.1.1.6 (ifHCInOctets) - 64-bit input bytes
+    - 1.3.6.1.2.1.31.1.1.1.10 (ifHCOutOctets) - 64-bit output bytes
+
+    Falls back to 32-bit counters if 64-bit not available:
+    - 1.3.6.1.2.1.2.2.1.10 (ifInOctets) - 32-bit input bytes
+    - 1.3.6.1.2.1.2.2.1.16 (ifOutOctets) - 32-bit output bytes
     """
     import subprocess
     import time
@@ -5063,19 +5099,37 @@ def poll_port_traffic_snmp(ip: str, community: str = 'public') -> dict:
     port_traffic = {}
 
     try:
-        # Get input octets (ifInOctets)
+        # Try 64-bit counters first (ifHCInOctets/ifHCOutOctets)
         result = subprocess.run(
-            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.10'],
+            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.6'],
             capture_output=True, text=True, timeout=10
         )
         in_octets = result.stdout.strip().split('\n') if result.stdout else []
 
-        # Get output octets (ifOutOctets)
-        result = subprocess.run(
-            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.16'],
-            capture_output=True, text=True, timeout=10
-        )
-        out_octets = result.stdout.strip().split('\n') if result.stdout else []
+        # Check if we got valid 64-bit data
+        use_64bit = len(in_octets) > 0 and in_octets[0] and not in_octets[0].startswith('No Such')
+
+        if use_64bit:
+            result = subprocess.run(
+                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.10'],
+                capture_output=True, text=True, timeout=10
+            )
+            out_octets = result.stdout.strip().split('\n') if result.stdout else []
+            logger.debug(f"Using 64-bit counters for {ip}")
+        else:
+            # Fall back to 32-bit counters
+            logger.debug(f"Falling back to 32-bit counters for {ip}")
+            result = subprocess.run(
+                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.10'],
+                capture_output=True, text=True, timeout=10
+            )
+            in_octets = result.stdout.strip().split('\n') if result.stdout else []
+
+            result = subprocess.run(
+                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.16'],
+                capture_output=True, text=True, timeout=10
+            )
+            out_octets = result.stdout.strip().split('\n') if result.stdout else []
 
         timestamp = time.time()
 
@@ -5808,30 +5862,43 @@ def get_port_traffic_history(
         PortTraffic.timestamp > since
     ).order_by(PortTraffic.timestamp).all()
 
-    # If no per-port traffic data, fall back to aggregated PON traffic from TrafficHistory
-    if not traffic and port_type == 'pon':
-        # Get PON port traffic from TrafficHistory
-        pon_traffic = db.query(TrafficHistory).filter(
-            TrafficHistory.olt_id == olt_id,
-            TrafficHistory.entity_type == 'pon',
-            TrafficHistory.pon_port == port_number,
-            TrafficHistory.timestamp > since
-        ).order_by(TrafficHistory.timestamp).all()
+    # If no per-port traffic data, fall back to TrafficHistory
+    if not traffic:
+        # For PON, GE, XGE ports - check TrafficHistory
+        if port_type in ('pon', 'ge', 'xge'):
+            if port_type == 'pon':
+                # PON uses pon_port field
+                history_traffic = db.query(TrafficHistory).filter(
+                    TrafficHistory.olt_id == olt_id,
+                    TrafficHistory.entity_type == 'pon',
+                    TrafficHistory.pon_port == port_number,
+                    TrafficHistory.timestamp > since
+                ).order_by(TrafficHistory.timestamp).all()
+            else:
+                # GE/XGE uses entity_id format "olt_id:port_type:port_num"
+                entity_id = f"{olt_id}:{port_type}:{port_number}"
+                history_traffic = db.query(TrafficHistory).filter(
+                    TrafficHistory.olt_id == olt_id,
+                    TrafficHistory.entity_type == port_type,
+                    TrafficHistory.entity_id == entity_id,
+                    TrafficHistory.timestamp > since
+                ).order_by(TrafficHistory.timestamp).all()
 
-        return {
-            "olt_id": olt_id,
-            "port_type": port_type,
-            "port_number": port_number,
-            "range": range,
-            "data": [
-                {
-                    "timestamp": t.timestamp.isoformat(),
-                    "rx_kbps": t.rx_kbps,
-                    "tx_kbps": t.tx_kbps
+            if history_traffic:
+                return {
+                    "olt_id": olt_id,
+                    "port_type": port_type,
+                    "port_number": port_number,
+                    "range": range,
+                    "data": [
+                        {
+                            "timestamp": t.timestamp.isoformat(),
+                            "rx_kbps": t.rx_kbps,
+                            "tx_kbps": t.tx_kbps
+                        }
+                        for t in history_traffic
+                    ]
                 }
-                for t in pon_traffic
-            ]
-        }
 
     return {
         "olt_id": olt_id,

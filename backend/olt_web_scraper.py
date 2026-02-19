@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ONUOpticalData:
-    """ONU self-reported optical data from web interface"""
+    """ONU optical data from web interface"""
     pon_port: int
     onu_id: int
     mac_address: str
@@ -37,8 +37,9 @@ class ONUOpticalData:
     temperature: Optional[float] = None  # Celsius
     voltage: Optional[float] = None  # Volts
     tx_bias: Optional[float] = None  # mA
-    tx_power: Optional[float] = None  # dBm (ONU TX)
-    rx_power: Optional[float] = None  # dBm (ONU RX - what customer sees from OLT)
+    tx_power: Optional[float] = None  # dBm (ONU TX power)
+    rx_power: Optional[float] = None  # dBm (OLT RX from ONU - what OLT measures, ~-27dBm)
+    onu_rx_power: Optional[float] = None  # dBm (ONU RX from OLT - what ONU sees, ~-19dBm)
 
 
 class OLTWebScraper:
@@ -184,7 +185,8 @@ class OLTWebScraper:
                         voltage=voltage,
                         tx_bias=tx_bias,
                         tx_power=tx_power,
-                        rx_power=rx_power
+                        rx_power=rx_power,
+                        onu_rx_power=None  # EPON bulk page doesn't have ONU self-reported RX
                     )
 
                 except (ValueError, IndexError) as e:
@@ -260,17 +262,21 @@ class OLTWebScraper:
                     html = opt_resp.text
 
                     # Parse optical values from table
-                    # RxOpticalLevelOlt (OLT RX power from ONU) - this is the one we need
-                    rx_match = re.search(r"RxOpticalLevelOlt.*?<td>(-?[\d.]+)", html, re.DOTALL)
+                    # RxOpticalLevelOlt = What OLT measures from ONU's signal (upstream, ~-27dBm)
+                    # RxOpticalLevelOnu = What ONU measures from OLT's signal (downstream, ~-19dBm)
+                    olt_rx_match = re.search(r"RxOpticalLevelOlt.*?<td>(-?[\d.]+)", html, re.DOTALL)
+                    onu_rx_match = re.search(r"RxOpticalLevelOnu.*?<td>(-?[\d.]+)", html, re.DOTALL)
                     tx_match = re.search(r"TxOpticalLevel.*?<td>(-?[\d.]+)", html, re.DOTALL)
                     temp_match = re.search(r"Temperature.*?<td>([\d.]+)", html, re.DOTALL)
                     voltage_match = re.search(r"powerFeedVoltage.*?<td>([\d.]+)", html, re.DOTALL)
                     bias_match = re.search(r"laserBiasCurrent.*?<td>([\d.]+)", html, re.DOTALL)
                     dist_match = re.search(r"Distance.*?<td>(\d+)", html, re.DOTALL)
 
-                    rx_power = float(rx_match.group(1)) if rx_match else None
+                    olt_rx_power = float(olt_rx_match.group(1)) if olt_rx_match else None
+                    onu_rx_power = float(onu_rx_match.group(1)) if onu_rx_match else None
 
-                    if rx_power is not None:
+                    # Need at least one RX power value
+                    if olt_rx_power is not None or onu_rx_power is not None:
                         result[mac] = ONUOpticalData(
                             pon_port=pon_port,
                             onu_id=onu_id,
@@ -280,7 +286,8 @@ class OLTWebScraper:
                             voltage=float(voltage_match.group(1)) if voltage_match else None,
                             tx_bias=float(bias_match.group(1)) if bias_match else None,
                             tx_power=float(tx_match.group(1)) if tx_match else None,
-                            rx_power=rx_power
+                            rx_power=olt_rx_power,  # OLT RX from ONU
+                            onu_rx_power=onu_rx_power  # ONU RX from OLT (what customer sees)
                         )
 
                 except Exception as e:
@@ -918,7 +925,8 @@ def get_onu_opm_data_web(ip: str, username: str = "admin", password: str = "admi
         result: Dict[str, Dict[str, float]] = {}
         for mac, data in opm_data.items():
             result[mac] = {
-                'rx_power': data.rx_power,
+                'rx_power': data.rx_power,  # OLT RX from ONU (~-27dBm)
+                'onu_rx_power': data.onu_rx_power,  # ONU RX from OLT (~-19dBm, what customer sees)
                 'tx_power': data.tx_power,
                 'temperature': data.temperature,
                 'voltage': data.voltage,
