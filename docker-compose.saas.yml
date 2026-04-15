@@ -1,0 +1,79 @@
+# Local development stack for the multi-tenant SaaS build (Phase 5).
+# Brings up Postgres + the FastAPI backend + (optional) WireGuard hub
+# so a developer can poke at the full system without touching prod.
+#
+# This is intentionally separate from the legacy `docker-compose.yml`
+# (single-tenant SQLite) which is still used by self-hosted customers
+# until the Phase 5 cutover.
+#
+# Usage:
+#   docker compose -f docker-compose.saas.yml up --build
+#   curl http://localhost:8000/health
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: oltmgr-pg
+    environment:
+      POSTGRES_DB: oltmanager_dev
+      POSTGRES_USER: oltmanager
+      POSTGRES_PASSWORD: dev-only-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - oltmgr-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oltmanager -d oltmanager_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.saas
+    container_name: oltmgr-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://oltmanager:dev-only-password@postgres:5432/oltmanager_dev
+      JWT_SECRET_KEY: dev-only-jwt-secret-change-me
+      MASTER_ENCRYPTION_KEY: dev-only-master-key-change-me
+      ENVIRONMENT: development
+      EMAIL_PROVIDER: console
+      STRIPE_SECRET_KEY: sk_test_placeholder
+      STRIPE_WEBHOOK_SECRET: whsec_placeholder
+      WG_INTERFACE: wg0
+      WG_HUB_ENDPOINT: hub.example.com:51820
+      WG_HUB_PUBKEY: dev-placeholder-pubkey
+      WG_SUPERNET: 10.99.0.0/16
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # WireGuard hub — only useful when the backend is reachable on a public
+  # IP. Disabled by default. Enable with `--profile wg`.
+  wireguard:
+    image: linuxserver/wireguard:latest
+    container_name: oltmgr-wg
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    ports:
+      - "51820:51820/udp"
+    volumes:
+      - oltmgr-wg-config:/config
+    profiles: ["wg"]
+    restart: unless-stopped
+
+volumes:
+  oltmgr-pg-data:
+    name: oltmgr-pg-data
+  oltmgr-wg-config:
+    name: oltmgr-wg-config

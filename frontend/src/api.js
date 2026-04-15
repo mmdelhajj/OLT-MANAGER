@@ -33,6 +33,25 @@ api.interceptors.response.use(
 export const login = (username, password) =>
   api.post('/api/auth/login', { username, password });
 
+// Phase 2 SaaS signup — single-call signup that also provisions a
+// WireGuard peer for the new workspace and returns a Mikrotik script.
+export const register = (payload) =>
+  api.post('/auth/register', payload);
+
+// Phase 3 — WireGuard provisioning + status for a workspace.
+export const wgProvision = (workspaceId) =>
+  api.post(`/api/workspaces/${workspaceId}/wireguard/provision`);
+export const wgConfig = (workspaceId) =>
+  api.get(`/api/workspaces/${workspaceId}/wireguard/config`);
+export const wgStatus = (workspaceId) =>
+  api.get(`/api/workspaces/${workspaceId}/wireguard/status`);
+// Phase 3.5 — declare the customer's on-prem LAN so the cloud can route
+// packets back through this workspace's tunnel without manual `wg set`.
+export const wgSetLanSubnet = (workspaceId, lanSubnet) =>
+  api.put(`/api/workspaces/${workspaceId}/wireguard/lan-subnet`, { lan_subnet: lanSubnet });
+
+export const authMe = () => api.get('/auth/me');
+
 // Dashboard
 export const getDashboardStats = () => api.get('/api/dashboard');
 

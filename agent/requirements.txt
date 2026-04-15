@@ -1,0 +1,5 @@
+requests>=2.28
+pyyaml>=6.0
+pydantic>=1.10
+pysnmp>=4.4
+routeros_api>=0.17

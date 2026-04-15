@@ -1061,7 +1061,7 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
 
         if descr_result.returncode == 0:
             for line in descr_result.stdout.split('\n'):
-                if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()) and 'ONU' in line.upper():
+                if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()):
                     # Format 1: "EPON01ONU1 soloo12233" or "GPON01ONU1" (V1600D8/V1600G2-B style)
                     match = re.search(r'\.2\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0?/?(\d+)ONU(\d+)', line, re.IGNORECASE)
                     if match:
@@ -1087,14 +1087,22 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
 
             if name_result.returncode == 0:
                 for line in name_result.stdout.split('\n'):
-                    if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()) and 'ONU' in line.upper():
-                        # Format: "GPON01ONU1 description" - ifName uses .1.x index
+                    if 'STRING:' in line and ('EPON' in line.upper() or 'GPON' in line.upper()):
+                        # Format 1: "GPON01ONU1 description" - ifName uses .1.x index
                         match = re.search(r'\.1\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0?/?(\d+)ONU(\d+)', line, re.IGNORECASE)
                         if match:
                             if_index = match.group(1)
                             pon_port = int(match.group(2))
                             onu_id = int(match.group(3))
                             onu_interfaces[if_index] = (pon_port, onu_id)
+                        else:
+                            # Format 2: "EPON0/3:1" (colon separator)
+                            match = re.search(r'\.1\.(\d+)\s*=\s*STRING:\s*"?[EG]PON0/(\d+):(\d+)', line, re.IGNORECASE)
+                            if match:
+                                if_index = match.group(1)
+                                pon_port = int(match.group(2))
+                                onu_id = int(match.group(3))
+                                onu_interfaces[if_index] = (pon_port, onu_id)
 
         if not onu_interfaces:
             logger.info(f"No ONU interfaces found for {ip}")
@@ -1191,13 +1199,13 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
 
         # Combine: ifIndex -> (pon, onu) -> MAC -> traffic data
         # Handle duplicate MACs: prefer entry with actual traffic over zero traffic
-        # IMPORTANT: Swap RX/TX to show from CUSTOMER perspective
-        # - OLT ifHCInOctets (rx_by_index) = data received BY OLT = Customer UPLOAD
-        # - OLT ifHCOutOctets (tx_by_index) = data sent BY OLT = Customer DOWNLOAD
+        # NO SWAP — verified against Mikrotik ether2-LAN (TALL-NET360):
+        #   SNMP InOctets rate 218M ≈ Mikrotik tx(download) 206M
+        #   SNMP OutOctets rate 142M ≈ Mikrotik rx(upload) 97M
+        # So: ifHCInOctets = Customer DOWNLOAD, ifHCOutOctets = Customer UPLOAD
         for if_index, (pon_port, onu_id) in onu_interfaces.items():
-            # Swap: OLT's IN becomes customer's TX (upload), OLT's OUT becomes customer's RX (download)
-            customer_tx_bytes = rx_by_index.get(if_index, 0)  # OLT IN = Customer Upload
-            customer_rx_bytes = tx_by_index.get(if_index, 0)  # OLT OUT = Customer Download
+            customer_rx_bytes = rx_by_index.get(if_index, 0)  # InOctets = Customer Download
+            customer_tx_bytes = tx_by_index.get(if_index, 0)  # OutOctets = Customer Upload
 
             if use_pon_onu_key:
                 # V1600G2-B: Use "pon:onu" as key (caller will map to MAC)

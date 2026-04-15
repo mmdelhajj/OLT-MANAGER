@@ -133,12 +133,45 @@ def require_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Bind this request's session to the user's tenant so that:
+    #   1. PostgreSQL RLS scopes every query to this tenant (via GUC).
+    #   2. The before_flush hook auto-fills tenant_id / workspace_id on
+    #      legacy main.py routes that don't know about tenants yet
+    #      (Phase 1 transition).
+    if user.tenant_id:
+        from models import (
+            set_session_tenant,
+            set_session_workspace,
+            Workspace,
+            is_postgres,
+        )
+        from sqlalchemy import text as _sql_text
+
+        set_session_tenant(db, user.tenant_id)
+        # Pick the user's first workspace as the default insert target.
+        ws = db.query(Workspace).filter(Workspace.tenant_id == user.tenant_id).first()
+        if ws is not None:
+            set_session_workspace(db, ws.id)
+
+        # The session has likely already begun a transaction (the query
+        # above), so the after_begin GUC hook won't fire again this
+        # request. Set it directly on the live transaction. SET LOCAL is
+        # transaction-scoped and will be cleaned up at commit/rollback.
+        if is_postgres():
+            safe_tid = str(user.tenant_id).replace("'", "")
+            db.execute(_sql_text(f"SET LOCAL app.current_tenant_id = '{safe_tid}'"))
+
     return user
 
 
 def require_admin(user: User = Depends(require_auth)) -> User:
-    """Require admin role"""
-    if user.role != "admin":
+    """Require admin or owner role.
+
+    `owner` is the SaaS top-level role granted at signup (auth_routes.register).
+    Functionally it's a superset of `admin`, so every admin-gated route also
+    accepts owners.
+    """
+    if user.role not in ("admin", "owner"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
@@ -174,8 +207,12 @@ def check_account_lockout(user: User) -> tuple[bool, Optional[str]]:
 
 
 def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
-    """Authenticate a user by username and password with rate limiting"""
-    user = db.query(User).filter(User.username == username).first()
+    """Authenticate a user by username/email and password with rate limiting.
+
+    Phase 1 renamed `users.username` -> `users.email`. Old call sites still
+    pass the value through as `username`, so we treat it as an email lookup.
+    """
+    user = db.query(User).filter(User.email == username).first()
     if not user:
         return None
 

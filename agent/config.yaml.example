@@ -1,0 +1,32 @@
+# OLT Manager Local Agent Configuration
+# Copy to /etc/olt-agent/config.yaml and edit
+
+# SaaS API endpoint
+saas_url: "https://api.oltmanager.io"
+
+# Agent API key (generated at signup or via dashboard)
+api_key: "agk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Polling interval in seconds
+poll_interval: 30
+
+# Fetch optical data every N cycles (saves time on large OLTs)
+optical_every: 5
+
+# OLT devices to monitor
+olts:
+  - name: "Main OLT"
+    ip_address: "192.168.1.100"
+    model: "V1600D8"           # V1600D4, V1600D8, V1600G2-B, etc.
+    snmp_community: "public"
+    web_username: "admin"
+    web_password: "admin"
+
+    # Mikrotik integration for accurate per-ONU traffic (EPON)
+    # Uses PPPoE session rates instead of SNMP counters
+    mikrotik:
+      enabled: true
+      ip: "192.168.1.1"
+      username: "admin"
+      password: "password"
+      port: 8728

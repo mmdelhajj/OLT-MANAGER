@@ -216,6 +216,26 @@ class LicenseManager:
         Validate license key
         Returns license data if valid, raises LicenseError if not
         """
+        # Bypass mode for self-hosted SaaS deployments (no external license
+        # server). Set OLT_LICENSE_BYPASS=1 in the environment.
+        if os.getenv('OLT_LICENSE_BYPASS') == '1':
+            self.license_key = 'BYPASS'
+            self.license_data = {
+                'customer_name': 'Self-Hosted',
+                'package_type': 'unlimited',
+                'max_olts': 9999,
+                'max_onus': 999999,
+                'max_users': 9999,
+                'is_lifetime': True,
+                'expires_at': None,
+                'features': ['all'],
+                'status': 'active',
+            }
+            self.is_valid = True
+            self.error_message = None
+            self.last_check = datetime.now()
+            return self.license_data
+
         # Try to load from environment or parameter
         key = license_key or os.getenv('OLT_LICENSE_KEY')
 

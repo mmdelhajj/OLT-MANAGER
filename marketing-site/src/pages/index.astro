@@ -1,0 +1,49 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout title="OLT Manager — manage your GPON/EPON OLTs from anywhere">
+  <section class="max-w-6xl mx-auto px-6 pt-24 pb-16 text-center">
+    <h1 class="text-5xl font-bold mb-6">Run your fiber network from anywhere.</h1>
+    <p class="text-xl text-slate-600 max-w-2xl mx-auto mb-10">
+      The cloud dashboard for ISPs running VSOL, Huawei, ZTE and Fiberhome OLTs.
+      WireGuard-secured, multi-region, and ready in 5 minutes.
+    </p>
+    <div class="flex justify-center gap-4">
+      <a
+        href="https://app.oltmanager.io/signup"
+        class="bg-brand-600 text-white px-6 py-3 rounded text-lg font-medium hover:bg-brand-700"
+      >
+        Start your 14-day free trial
+      </a>
+      <a
+        href="/features"
+        class="border border-slate-300 px-6 py-3 rounded text-lg font-medium hover:bg-slate-50"
+      >
+        See features
+      </a>
+    </div>
+    <p class="text-sm text-slate-500 mt-6">No credit card required. Cancel anytime.</p>
+  </section>
+
+  <section class="max-w-6xl mx-auto px-6 py-16 grid md:grid-cols-3 gap-8">
+    <div>
+      <h3 class="font-semibold text-lg mb-2">Multi-vendor</h3>
+      <p class="text-slate-600">
+        VSOL today, Huawei MA5800 + ZTE C320 next, and you're never locked in.
+      </p>
+    </div>
+    <div>
+      <h3 class="font-semibold text-lg mb-2">WireGuard tunnels</h3>
+      <p class="text-slate-600">
+        One-line install on your gateway. We never see your LAN.
+      </p>
+    </div>
+    <div>
+      <h3 class="font-semibold text-lg mb-2">Real-time alarms</h3>
+      <p class="text-slate-600">
+        Dying-gasp, fiber cut, signal degradation — all on a single dashboard.
+      </p>
+    </div>
+  </section>
+</Layout>

@@ -1,0 +1,21 @@
+Alembic migrations for OLT Manager (Phase 1+).
+
+Usage:
+
+    export DATABASE_URL=postgresql://user:pass@host/oltmanager_dev
+    cd backend
+    alembic upgrade head     # apply all pending migrations
+    alembic downgrade -1     # roll back one
+    alembic revision -m "..." --autogenerate  # generate next migration
+
+Migration tree:
+
+    0001_baseline                — full pre-Phase-1 schema (19 tables)
+    0002_tenants_and_workspaces  — Tenant + Workspace + user_workspaces
+    0003_add_tenant_id           — denormalize tenant_id onto every table
+                                   + bootstrap-tenant backfill, then NOT NULL,
+                                   plus unique-constraint reshuffles
+    0004_rls                     — Postgres Row-Level Security policies
+
+Each migration's `downgrade()` is the inverse, so any phase can be rolled
+back without losing data.

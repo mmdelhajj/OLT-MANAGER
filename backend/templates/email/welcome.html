@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <body style="font-family: -apple-system, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #111;">
+    <h1 style="font-size: 22px;">You're in, {{ name }}.</h1>
+    <p>Your <strong>{{ tenant_name }}</strong> workspace is ready. Here's how to get started:</p>
+    <ol>
+      <li>Add your first OLT under <em>Workspaces → OLTs</em></li>
+      <li>Connect your network with the WireGuard installer</li>
+      <li>Invite teammates from <em>Settings → Team</em></li>
+    </ol>
+    <p>You're on the <strong>{{ plan }}</strong> plan with a {{ trial_days }}-day free trial.</p>
+    <p><a href="{{ app_url }}">Open the dashboard →</a></p>
+  </body>
+</html>

@@ -1,0 +1,71 @@
+---
+import Layout from "../layouts/Layout.astro";
+
+// IMPORTANT: keep this aligned with backend/plans.py — never let the
+// marketing page advertise a plan/limit the backend doesn't enforce.
+const plans = [
+  {
+    name: "Starter",
+    price: "$49",
+    cadence: "/month",
+    olts: 5,
+    onus: 500,
+    workspaces: 2,
+    cta: "Start trial",
+  },
+  {
+    name: "Pro",
+    price: "$199",
+    cadence: "/month",
+    olts: 25,
+    onus: 5000,
+    workspaces: 10,
+    highlight: true,
+    cta: "Start trial",
+  },
+  {
+    name: "Scale",
+    price: "$799",
+    cadence: "/month",
+    olts: 200,
+    onus: 100000,
+    workspaces: 50,
+    cta: "Talk to sales",
+  },
+];
+---
+
+<Layout title="Pricing — OLT Manager">
+  <section class="max-w-6xl mx-auto px-6 py-24">
+    <h1 class="text-4xl font-bold text-center mb-4">Simple, transparent pricing</h1>
+    <p class="text-center text-slate-600 mb-12">
+      14-day free trial on every plan. No credit card to start.
+    </p>
+
+    <div class="grid md:grid-cols-3 gap-6">
+      {plans.map((p) => (
+        <div
+          class={`border rounded-lg p-6 ${p.highlight ? "border-brand-600 shadow-lg" : "border-slate-200"}`}
+        >
+          <h3 class="text-xl font-semibold">{p.name}</h3>
+          <p class="text-4xl font-bold mt-4">
+            {p.price}
+            <span class="text-base font-normal text-slate-500">{p.cadence}</span>
+          </p>
+          <ul class="mt-6 space-y-2 text-sm text-slate-700">
+            <li>{p.olts} OLTs</li>
+            <li>{p.onus.toLocaleString()} ONUs</li>
+            <li>{p.workspaces} workspaces</li>
+            <li>Email support</li>
+          </ul>
+          <a
+            href="https://app.oltmanager.io/signup"
+            class="block text-center mt-6 bg-brand-600 text-white py-2 rounded hover:bg-brand-700"
+          >
+            {p.cta}
+          </a>
+        </div>
+      ))}
+    </div>
+  </section>
+</Layout>

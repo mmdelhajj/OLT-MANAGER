@@ -806,6 +806,194 @@ class OLTWebScraper:
         """Close session"""
         self.session.close()
 
+    def get_onu_status_info(self) -> Dict[str, Dict]:
+        """
+        Get ONU status info including real Alive Time from onustatusinfo.html page.
+
+        This page contains:
+        - Alive Time (real uptime from OLT, e.g., "09:41:45" or "6 22:49:22")
+        - Last Register Time
+        - Last Deregister Time
+        - Last Deregister Reason (Power Off, Onu Los, etc.)
+
+        Returns dict of "pon:onu" -> {alive_time_seconds, deregister_reason, ...}
+        """
+        result: Dict[str, Dict] = {}
+
+        if not self._logged_in:
+            if not self.login():
+                return result
+
+        try:
+            # Iterate all 16 PON ports
+            for pon in range(1, 17):
+                status_url = f"{self.base_url}/action/onustatusinfo.html"
+                response = self.session.post(status_url, data={"select": str(pon)}, timeout=15)
+
+                if response.status_code != 200:
+                    continue
+
+                html = response.text
+
+                # Parse table rows
+                # Format: <tr><td>GPON0/X:Y</td><td>AdminState</td><td>OMCCState</td><td>PhaseState</td>
+                #         <td>Description</td><td>LastRegTime</td><td>LastDeregTime</td>
+                #         <td>DeregReason</td><td>AliveTime</td><td>Detail</td></tr>
+                # Alive time format: "09:41:45" (HH:MM:SS) or "6 22:49:22" (D HH:MM:SS)
+                pattern = r"<tr>\s*<td>GPON0?/?(\d+):(\d+)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>"
+
+                matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+
+                for m in matches:
+                    try:
+                        pon_port = int(m[0])
+                        onu_id = int(m[1])
+                        admin_state = m[2].strip()
+                        omcc_state = m[3].strip()
+                        phase_state = m[4].strip()
+                        description = m[5].strip()
+                        last_register = m[6].strip()
+                        last_deregister = m[7].strip()
+                        dereg_reason = m[8].strip()
+                        alive_time_str = m[9].strip()
+
+                        # Parse alive time to seconds
+                        # Format: "09:41:45" (HH:MM:SS) or "6 22:49:22" (D HH:MM:SS)
+                        alive_seconds = self._parse_alive_time(alive_time_str)
+
+                        key = f"{pon_port}:{onu_id}"
+                        result[key] = {
+                            'alive_time_seconds': alive_seconds,
+                            'alive_time_str': alive_time_str,
+                            'deregister_reason': dereg_reason if dereg_reason else None,
+                            'last_register_time': last_register if last_register else None,
+                            'last_deregister_time': last_deregister if last_deregister else None,
+                            'phase_state': phase_state,
+                            'is_working': phase_state.lower() == 'working'
+                        }
+                    except (ValueError, IndexError) as e:
+                        logger.debug(f"Error parsing ONU status row: {e}")
+                        continue
+
+            if result:
+                logger.info(f"Web ONU status scrape for {self.ip}: found status for {len(result)} ONUs")
+            return result
+
+        except Exception as e:
+            logger.error(f"ONU status scrape failed for {self.ip}: {e}")
+            return result
+
+    def _parse_alive_time(self, time_str: str) -> Optional[int]:
+        """
+        Parse alive time string to seconds.
+
+        Formats:
+        - "09:41:45" -> 9*3600 + 41*60 + 45 = 34905 seconds
+        - "6 22:49:22" -> 6*86400 + 22*3600 + 49*60 + 22 = 600562 seconds
+        - Empty/None -> None
+        """
+        if not time_str or time_str.lower() in ('n/a', 'unknown', '-', ''):
+            return None
+
+        try:
+            # Check if format has days (space separator)
+            if ' ' in time_str:
+                parts = time_str.split(' ', 1)
+                days = int(parts[0])
+                time_part = parts[1]
+            else:
+                days = 0
+                time_part = time_str
+
+            # Parse HH:MM:SS
+            time_parts = time_part.split(':')
+            if len(time_parts) == 3:
+                hours = int(time_parts[0])
+                minutes = int(time_parts[1])
+                seconds = int(time_parts[2])
+                return days * 86400 + hours * 3600 + minutes * 60 + seconds
+            elif len(time_parts) == 2:
+                # MM:SS format
+                minutes = int(time_parts[0])
+                seconds = int(time_parts[1])
+                return days * 86400 + minutes * 60 + seconds
+
+        except (ValueError, IndexError):
+            pass
+
+        return None
+
+    def get_onu_offline_reason(self, pon_port: int, onu_id: int, serial: str = None) -> str:
+        """
+        Get the offline reason for an ONU from alarm log.
+
+        Checks recent alarms to determine why ONU went offline:
+        - ONU Dying Gasp (29) = Power Off
+        - ONU Link LOST (23) = Fiber Cut / LOS
+        - ONU Offline (30) = General offline (unknown reason)
+
+        Args:
+            pon_port: PON port number
+            onu_id: ONU ID
+            serial: ONU serial number (optional, for better matching)
+
+        Returns:
+            "Power Off", "Fiber Cut", or "Unknown"
+        """
+        if not self._logged_in:
+            if not self.login():
+                return "Unknown"
+
+        try:
+            # Check Dying Gasp alarms first (Power Off)
+            alarm_url = f"{self.base_url}/action/alarminfo.html"
+
+            # Check type 29 (Dying Gasp = Power Off)
+            response = self.session.post(alarm_url, data={"alarmtype": "29", "couter": "100"}, timeout=15)
+            if response.status_code == 200:
+                # Look for this ONU in the alarm table
+                # Format: PON 0/X ONU Y sn SERIAL
+                pattern = rf"PON\s+0/{pon_port}\s+ONU\s+{onu_id}\s+sn\s+(\w+)"
+                if re.search(pattern, response.text, re.IGNORECASE):
+                    return "Power Off"
+                # Also try matching by serial if provided
+                if serial:
+                    serial_clean = serial.replace(":", "").upper()
+                    if serial_clean in response.text.upper():
+                        return "Power Off"
+
+            # Check type 23 (Link LOST = Fiber Cut)
+            response = self.session.post(alarm_url, data={"alarmtype": "23", "couter": "100"}, timeout=15)
+            if response.status_code == 200:
+                pattern = rf"PON\s+0/{pon_port}\s+ONU\s+{onu_id}\s+sn\s+(\w+)"
+                if re.search(pattern, response.text, re.IGNORECASE):
+                    return "Fiber Cut"
+                if serial:
+                    serial_clean = serial.replace(":", "").upper()
+                    if serial_clean in response.text.upper():
+                        return "Fiber Cut"
+
+            # Default to Unknown
+            return "Unknown"
+
+        except Exception as e:
+            logger.debug(f"Error getting offline reason for PON {pon_port} ONU {onu_id}: {e}")
+            return "Unknown"
+
+
+def get_onu_offline_reason_web(ip: str, pon_port: int, onu_id: int, serial: str = None,
+                                username: str = "admin", password: str = "admin") -> str:
+    """
+    Convenience function to get ONU offline reason via web scraping.
+
+    Returns: "Power Off", "Fiber Cut", or "Unknown"
+    """
+    scraper = OLTWebScraper(ip, username, password)
+    try:
+        return scraper.get_onu_offline_reason(pon_port, onu_id, serial)
+    finally:
+        scraper.close()
+
 
 def delete_onu_web(ip: str, pon_port: int, onu_id: int,
                    username: str = "admin", password: str = "admin") -> bool:
@@ -963,6 +1151,27 @@ def get_onu_list_web(ip: str, username: str, password: str) -> List[Dict]:
     scraper = OLTWebScraper(ip, username, password)
     try:
         return scraper.get_onu_list_gpon()
+    finally:
+        scraper.close()
+
+
+def get_onu_status_info_web(ip: str, username: str = "admin", password: str = "admin") -> Dict[str, Dict]:
+    """
+    Get ONU status info including real Alive Time from onustatusinfo.html page.
+
+    Returns dict of "pon:onu" -> {
+        'alive_time_seconds': int,  # Alive time in seconds
+        'alive_time_str': str,      # Original alive time string (e.g., "6 22:49:22")
+        'deregister_reason': str,   # Last deregister reason (Power Off, Onu Los, etc.)
+        'last_register_time': str,
+        'last_deregister_time': str,
+        'phase_state': str,         # working, etc.
+        'is_working': bool
+    }
+    """
+    scraper = OLTWebScraper(ip, username, password)
+    try:
+        return scraper.get_onu_status_info()
     finally:
         scraper.close()
 

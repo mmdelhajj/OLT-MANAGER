@@ -1,0 +1,42 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout title="Features — OLT Manager">
+  <section class="max-w-4xl mx-auto px-6 py-24 prose">
+    <h1>Everything you need to run a fiber network</h1>
+
+    <h2>Multi-vendor support</h2>
+    <p>
+      VSOL V1600D4, V1600D8 and V1600G2-B today. Huawei MA5800 / MA5683T / EA5800
+      and ZTE C320 / C300 / C600 in active development. Fiberhome AN5516 on the
+      roadmap. Adding a new model is one Python file in our open driver SDK.
+    </p>
+
+    <h2>Secure connectivity</h2>
+    <p>
+      Each workspace gets its own WireGuard tunnel into the cloud. The
+      install script is a single curl command — your OLTs never get
+      exposed to the internet, and we never see your LAN traffic.
+    </p>
+
+    <h2>Real-time monitoring</h2>
+    <p>
+      ONU status, optical power, RX dBm, traffic counters and alarm log
+      polled continuously. Dying-gasp and fiber-cut alarms surfaced in
+      seconds via SNMP traps.
+    </p>
+
+    <h2>Multi-tenant by design</h2>
+    <p>
+      Built for ISPs running multiple POPs or regions. Workspaces are
+      strictly isolated; users can be scoped to one or many.
+    </p>
+
+    <h2>Built for operators</h2>
+    <p>
+      Reboot ONUs, configure ports, set descriptions — all from the
+      browser. No CLI gymnastics required.
+    </p>
+  </section>
+</Layout>

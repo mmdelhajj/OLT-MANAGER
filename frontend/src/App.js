@@ -230,6 +230,268 @@ const SpeedometerGauge = ({ value, max, label, unit, icon, colorStops }) => {
   );
 };
 
+// Connect Router page — shows the WireGuard / Mikrotik script for the
+// current user's first workspace plus a live status indicator.
+function ConnectRouterPage({ darkMode }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [workspaceId, setWorkspaceId] = useState(null);
+  const [config, setConfig] = useState(null); // { cidr, config, status, lan_subnet }
+  const [status, setStatus] = useState(null); // { wg_status, last_handshake_at, ... }
+  const [copied, setCopied] = useState(false);
+  const [provisioning, setProvisioning] = useState(false);
+  // Phase 3.5 — LAN subnet onboarding state
+  const [lanInput, setLanInput] = useState('');
+  const [lanSaving, setLanSaving] = useState(false);
+  const [lanError, setLanError] = useState('');
+  const [lanSavedAt, setLanSavedAt] = useState(0);
+
+  const buildScript = (cfg) => {
+    if (!cfg?.config) return '';
+    // Parse the wg-quick blob to extract the customer-side private key
+    // and the workspace's /24, then render a single-paste Mikrotik script.
+    const lines = cfg.config.split('\n');
+    const get = (key) => {
+      const m = lines.find((l) => l.trim().startsWith(key + ' '));
+      if (!m) return '';
+      const idx = m.indexOf('=');
+      return idx >= 0 ? m.substring(idx + 1).trim() : '';
+    };
+    const privKey = get('PrivateKey');
+    const hubKey = get('PublicKey');
+    const endpointFull = get('Endpoint');
+    const cidr = get('AllowedIPs') || cfg.cidr || '';
+    const [endpointHost, endpointPort = '51820'] = (endpointFull || '').split(':');
+    const gw = (cidr || '').replace(/0\/\d+$/, '2');
+    // Derive /16 supernet from workspace /24
+    const cidrParts = cidr.split('.');
+    const supernet = `${cidrParts[0]}.${cidrParts[1]}.0.0/16`;
+    // Server's real WG IP — first host in the supernet
+    const serverIp = `${cidrParts[0]}.${cidrParts[1]}.0.1`;
+    // Single-block script — self-cleaning, safe to re-paste
+    return `{put "\\n\\n\\r================================\\r\\n   OLT Manager Connection Script\\r\\n================================\\n"; /interface wireguard peers remove [find where interface="oltmanager"]; /interface wireguard remove [find where name="oltmanager"]; /ip firewall filter remove [find where comment~"OLT Manager"]; /ip firewall nat remove [find where comment~"OLT Manager"]; /ip route remove [find where comment~"OLT Manager"]; /ip address remove [find where interface="oltmanager"]; put "Cleaning old config... Done!"; /interface wireguard add name=oltmanager mtu=1420 listen-port=0 private-key="${privKey}"; put "Creating VPN interface... Done!"; /interface/wireguard/peers/add interface=oltmanager public-key="${hubKey}" endpoint-address=${endpointHost} endpoint-port=${endpointPort} allowed-address=${supernet} persistent-keepalive=25; put "Adding server peer... Done!"; /ip address add address=${gw}/24 interface=oltmanager; /ip route add dst-address=${supernet} gateway=oltmanager comment="OLT Manager - route"; put "Assigning VPN IP... Done!"; /ip firewall filter add chain=input in-interface=oltmanager action=accept place-before=*0 comment="OLT Manager - input"; /ip firewall filter add chain=forward in-interface=oltmanager action=accept place-before=*0 comment="OLT Manager - forward"; put "Adding firewall rules... Done!"; /ip firewall nat add chain=srcnat src-address=${supernet} action=masquerade comment="OLT Manager - NAT"; put "Adding NAT masquerade... Done!"; put "\\r\\nSUCCESS!! Your router is connected to OLT Manager!\\r\\nVPN IP: ${gw}\\r\\nVerify: /ping ${serverIp}\\r\\n"; }`;
+  };
+
+  const loadAll = useCallback(async () => {
+    setError('');
+    try {
+      const me = await api.authMe();
+      const ws = me.data.workspaces?.[0];
+      if (!ws) {
+        setError('Your account has no workspace. Contact support.');
+        setLoading(false);
+        return;
+      }
+      setWorkspaceId(ws);
+      try {
+        const cfgResp = await api.wgConfig(ws);
+        setConfig(cfgResp.data);
+        // Pre-fill the LAN subnet input with whatever's already saved
+        // so the customer can edit it instead of re-typing.
+        if (cfgResp.data?.lan_subnet) setLanInput(cfgResp.data.lan_subnet);
+      } catch (e) {
+        // 404 = not provisioned yet — leave config null and let the user click "Provision".
+        if (e.response?.status !== 404) throw e;
+      }
+      try {
+        const stResp = await api.wgStatus(ws);
+        setStatus(stResp.data);
+      } catch (_e) {
+        // status endpoint may not exist for unprovisioned workspaces — ignore.
+      }
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to load workspace');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Poll status every 10s once provisioned so the indicator goes green
+  // automatically when the customer's tunnel comes up.
+  useEffect(() => {
+    if (!workspaceId || !config) return;
+    const t = setInterval(async () => {
+      try {
+        const stResp = await api.wgStatus(workspaceId);
+        setStatus(stResp.data);
+      } catch (_e) { /* ignore */ }
+    }, 10000);
+    return () => clearInterval(t);
+  }, [workspaceId, config]);
+
+  const handleProvision = async () => {
+    if (!workspaceId) return;
+    setProvisioning(true);
+    setError('');
+    try {
+      const r = await api.wgProvision(workspaceId);
+      setConfig({ cidr: r.data.cidr, config: r.data.config, status: r.data.status });
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Provisioning failed');
+    } finally {
+      setProvisioning(false);
+    }
+  };
+
+  const handleSaveLanSubnet = async () => {
+    if (!workspaceId || !lanInput.trim()) return;
+    setLanSaving(true);
+    setLanError('');
+    try {
+      const r = await api.wgSetLanSubnet(workspaceId, lanInput.trim());
+      // Reflect the saved value in the config so the indicator updates.
+      setConfig((c) => ({ ...(c || {}), lan_subnet: r.data.lan_subnet }));
+      setLanInput(r.data.lan_subnet);
+      setLanSavedAt(Date.now());
+    } catch (e) {
+      setLanError(e.response?.data?.detail || 'Failed to save LAN subnet');
+    } finally {
+      setLanSaving(false);
+    }
+  };
+
+  const script = buildScript(config);
+  // Formatted version for display — break after each '; ' for readability
+  const displayScript = script ? script.replace(/; /g, ';\n') : '';
+
+  const copyScript = () => {
+    if (!script) return;
+    navigator.clipboard.writeText(script).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const wgState = status?.status || config?.status || 'pending';
+  const dotColor = wgState === 'connected' ? 'bg-green-500' : (wgState === 'stale' ? 'bg-yellow-500' : 'bg-gray-400');
+  const stateLabel = wgState === 'connected' ? 'Connected' : wgState === 'stale' ? 'Stale (no recent handshake)' : 'Waiting for handshake';
+
+  if (loading) {
+    return <div className={`p-6 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>Loading…</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className={`text-2xl font-bold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Connect Router</h2>
+        <p className={`text-sm mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+          Bring your Mikrotik (or other WireGuard-capable router) online so OLT Manager can reach your OLTs.
+        </p>
+      </div>
+
+      {error && (
+        <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r text-red-700 text-sm">{error}</div>
+      )}
+
+      <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <span className={`inline-block w-3 h-3 rounded-full ${dotColor} ${wgState === 'connected' ? 'animate-pulse' : ''}`}></span>
+            <span className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>{stateLabel}</span>
+            {config?.cidr && (
+              <span className={`text-sm font-mono ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>· {config.cidr}</span>
+            )}
+          </div>
+          <button
+            onClick={loadAll}
+            className={`text-sm px-3 py-1.5 rounded-lg border ${darkMode ? 'border-slate-600 text-slate-300 hover:bg-slate-700' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {!config && (
+        <div className={`rounded-xl border p-6 text-center ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+          <p className={`mb-4 ${darkMode ? 'text-slate-300' : 'text-gray-600'}`}>
+            This workspace doesn't have a WireGuard tunnel yet.
+          </p>
+          <button
+            onClick={handleProvision}
+            disabled={provisioning}
+            className="px-6 py-3 bg-gradient-to-r from-blue-600 to-cyan-500 text-white rounded-xl hover:from-blue-700 hover:to-cyan-600 disabled:opacity-50 font-semibold shadow-lg shadow-blue-500/30"
+          >
+            {provisioning ? 'Provisioning…' : 'Provision tunnel'}
+          </button>
+        </div>
+      )}
+
+      {config && (
+        <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>Mikrotik RouterOS 7 script</h3>
+            <button
+              onClick={copyScript}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow"
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <pre className="bg-slate-900 text-slate-100 text-xs font-mono p-4 rounded-xl overflow-x-auto leading-relaxed max-h-[28rem] whitespace-pre-wrap break-all">{displayScript}</pre>
+          <p className={`text-xs mt-3 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+            Paste this into a Mikrotik terminal. Once the WireGuard handshake completes (usually within 10 seconds),
+            the indicator above will turn green automatically.
+          </p>
+        </div>
+      )}
+
+      {config && (
+        <div className={`rounded-xl border p-5 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div>
+              <h3 className={`font-semibold ${darkMode ? 'text-white' : 'text-gray-800'}`}>OLT LAN subnet</h3>
+              <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-gray-500'}`}>
+                Tell us which subnet your OLTs live on (e.g. <span className="font-mono">192.168.1.0/24</span>).
+                Once saved, the cloud will route packets to that subnet through your WireGuard tunnel and your OLTs will appear online.
+              </p>
+            </div>
+            {config.lan_subnet && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-green-600 bg-green-50 border border-green-200 rounded-full px-3 py-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                Routed: {config.lan_subnet}
+              </span>
+            )}
+          </div>
+          <div className="flex items-stretch gap-2 flex-wrap">
+            <input
+              type="text"
+              value={lanInput}
+              onChange={(e) => setLanInput(e.target.value)}
+              placeholder="192.168.1.0/24"
+              className={`flex-1 min-w-[220px] px-3 py-2 rounded-lg border font-mono text-sm ${
+                darkMode
+                  ? 'bg-slate-900 border-slate-700 text-slate-100 placeholder-slate-500'
+                  : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'
+              }`}
+            />
+            <button
+              onClick={handleSaveLanSubnet}
+              disabled={lanSaving || !lanInput.trim()}
+              className="px-5 py-2 bg-gradient-to-r from-blue-600 to-cyan-500 text-white rounded-lg hover:from-blue-700 hover:to-cyan-600 disabled:opacity-50 font-semibold text-sm shadow shadow-blue-500/30"
+            >
+              {lanSaving ? 'Saving…' : (config.lan_subnet ? 'Update' : 'Save')}
+            </button>
+          </div>
+          {lanError && (
+            <div className="mt-3 p-2 bg-red-50 border-l-4 border-red-500 rounded-r text-red-700 text-xs">{lanError}</div>
+          )}
+          {!lanError && lanSavedAt > 0 && Date.now() - lanSavedAt < 5000 && (
+            <div className="mt-3 p-2 bg-green-50 border-l-4 border-green-500 rounded-r text-green-700 text-xs">
+              Saved. Add an OLT and it should come online within a polling cycle.
+            </div>
+          )}
+          <p className={`text-xs mt-3 ${darkMode ? 'text-slate-500' : 'text-gray-400'}`}>
+            Tip: this must be the actual LAN your Mikrotik sits on. If two OLT Manager customers ever pick the same subnet,
+            you'll need to NAT one of them through your gateway.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Build v4 - Professional Material Design UI
 // Login Page Component - Premium Enterprise Design
 function LoginPage({ onLogin, pageName }) {
@@ -244,6 +506,74 @@ function LoginPage({ onLogin, pageName }) {
   const [pendingUser, setPendingUser] = useState(null);
   const [changePasswordError, setChangePasswordError] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
+
+  // SaaS signup wizard state. mode = 'login' | 'signup' | 'success'
+  const initialMode = (typeof window !== 'undefined' && window.location.hash === '#signup') ? 'signup' : 'login';
+  const [mode, setMode] = useState(initialMode);
+  const [signupForm, setSignupForm] = useState({
+    company_name: '',
+    full_name: '',
+    email: '',
+    password: '',
+  });
+  const [signupError, setSignupError] = useState('');
+  const [signupLoading, setSignupLoading] = useState(false);
+  const [signupResult, setSignupResult] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleSignup = async (e) => {
+    e.preventDefault();
+    setSignupError('');
+    setSignupLoading(true);
+    try {
+      const response = await api.register(signupForm);
+      const data = response.data;
+      localStorage.setItem('token', data.access_token);
+      try {
+        const me = await api.authMe();
+        const u = me.data.user || {};
+        const userObj = {
+          id: u.id || data.user_id,
+          username: u.email || signupForm.email,
+          email: u.email || signupForm.email,
+          role: u.role || 'owner',
+          full_name: u.full_name || signupForm.full_name,
+          tenant_id: data.tenant_id,
+        };
+        localStorage.setItem('user', JSON.stringify(userObj));
+        setSignupResult({ ...data, _user: userObj });
+      } catch (_e) {
+        const userObj = {
+          id: data.user_id,
+          username: signupForm.email,
+          email: signupForm.email,
+          role: 'owner',
+          tenant_id: data.tenant_id,
+        };
+        localStorage.setItem('user', JSON.stringify(userObj));
+        setSignupResult({ ...data, _user: userObj });
+      }
+      setMode('success');
+    } catch (err) {
+      setSignupError(err.response?.data?.detail || 'Signup failed');
+    } finally {
+      setSignupLoading(false);
+    }
+  };
+
+  const copyScript = () => {
+    if (!signupResult?.mikrotik_script) return;
+    navigator.clipboard.writeText(signupResult.mikrotik_script).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const goToDashboard = () => {
+    if (signupResult?._user) {
+      onLogin(signupResult._user);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -294,6 +624,138 @@ function LoginPage({ onLogin, pageName }) {
       setChangingPassword(false);
     }
   };
+
+  // SaaS signup wizard — alternate render path for mode='signup'/'success'.
+  if (mode === 'signup' || mode === 'success') {
+    return (
+      <div className="min-h-screen relative overflow-hidden flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+          <div className="absolute inset-0 opacity-30">
+            <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+            <div className="absolute top-0 -right-4 w-72 h-72 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl animate-pulse" style={{animationDelay: '2s'}}></div>
+          </div>
+        </div>
+        <div className={`relative w-full ${mode === 'success' ? 'max-w-3xl' : 'max-w-md'}`}>
+          <div className="absolute -inset-1 bg-gradient-to-r from-cyan-500 via-blue-500 to-purple-500 rounded-2xl blur-lg opacity-40"></div>
+          <div className="relative bg-white/95 backdrop-blur-xl p-8 rounded-2xl shadow-2xl border border-white/20">
+            {mode === 'signup' && (
+              <>
+                <div className="text-center mb-6">
+                  <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-cyan-400 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-500/30">
+                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" /></svg>
+                  </div>
+                  <h1 className="text-2xl font-bold text-gray-800">Start your free trial</h1>
+                  <p className="text-gray-500 mt-1 text-sm">14 days. No credit card. Manage 2 OLTs free.</p>
+                </div>
+                {signupError && (
+                  <div className="mb-4 p-3 bg-red-50 border-l-4 border-red-500 rounded-r text-red-700 text-sm">{signupError}</div>
+                )}
+                <form onSubmit={handleSignup} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Company name</label>
+                    <input
+                      type="text"
+                      required
+                      minLength={2}
+                      className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                      value={signupForm.company_name}
+                      onChange={(e) => setSignupForm({ ...signupForm, company_name: e.target.value })}
+                      placeholder="Acme Telecom"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Your name</label>
+                    <input
+                      type="text"
+                      className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                      value={signupForm.full_name}
+                      onChange={(e) => setSignupForm({ ...signupForm, full_name: e.target.value })}
+                      placeholder="Jane Operator"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Email</label>
+                    <input
+                      type="email"
+                      required
+                      className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                      value={signupForm.email}
+                      onChange={(e) => setSignupForm({ ...signupForm, email: e.target.value })}
+                      placeholder="you@company.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Password</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 outline-none"
+                      value={signupForm.password}
+                      onChange={(e) => setSignupForm({ ...signupForm, password: e.target.value })}
+                      placeholder="At least 8 chars, mixed case + digit"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={signupLoading}
+                    className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-cyan-500 text-white rounded-xl hover:from-blue-700 hover:to-cyan-600 disabled:opacity-50 font-semibold shadow-lg shadow-blue-500/30 transition-all"
+                  >
+                    {signupLoading ? 'Creating your workspace…' : 'Create account'}
+                  </button>
+                </form>
+                <div className="mt-6 pt-4 border-t border-gray-100 text-center text-sm text-gray-500">
+                  Already have an account?{' '}
+                  <button type="button" className="text-blue-600 font-semibold hover:underline" onClick={() => { setMode('login'); window.location.hash = ''; }}>
+                    Sign in
+                  </button>
+                </div>
+              </>
+            )}
+            {mode === 'success' && signupResult && (
+              <>
+                <div className="text-center mb-6">
+                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                    <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                  </div>
+                  <h1 className="text-2xl font-bold text-gray-800">Workspace ready</h1>
+                  <p className="text-gray-500 mt-1 text-sm">
+                    Tenant <span className="font-semibold text-gray-700">{signupForm.company_name}</span> ·
+                    Subnet <span className="font-mono text-gray-700">{signupResult.wg_cidr}</span>
+                  </p>
+                </div>
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 text-sm text-blue-900">
+                  <strong>Next step:</strong> paste the script below into your Mikrotik RouterOS 7 terminal.
+                  Once the WireGuard handshake comes up, this dashboard will see your OLT.
+                </div>
+                <div className="relative">
+                  <pre className="bg-slate-900 text-slate-100 text-xs font-mono p-4 rounded-xl overflow-x-auto max-h-96 leading-relaxed">{signupResult.mikrotik_script || '(no script returned — provisioning failed, retry from dashboard)'}</pre>
+                  {signupResult.mikrotik_script && (
+                    <button
+                      type="button"
+                      onClick={copyScript}
+                      className="absolute top-3 right-3 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow"
+                    >
+                      {copied ? 'Copied!' : 'Copy'}
+                    </button>
+                  )}
+                </div>
+                <div className="mt-6 flex gap-3">
+                  <button
+                    type="button"
+                    onClick={goToDashboard}
+                    className="flex-1 py-3 bg-gradient-to-r from-blue-600 to-cyan-500 text-white rounded-xl hover:from-blue-700 hover:to-cyan-600 font-semibold shadow-lg shadow-blue-500/30"
+                  >
+                    Continue to dashboard →
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen relative overflow-hidden flex items-center justify-center p-4">
@@ -427,7 +889,17 @@ function LoginPage({ onLogin, pageName }) {
 
           {/* Footer */}
           <div className="mt-8 pt-6 border-t border-gray-100 text-center">
-            <p className="text-xs text-gray-400">
+            <p className="text-sm text-gray-600">
+              New here?{' '}
+              <button
+                type="button"
+                className="text-blue-600 font-semibold hover:underline"
+                onClick={() => { setMode('signup'); window.location.hash = '#signup'; }}
+              >
+                Start your free trial
+              </button>
+            </p>
+            <p className="text-xs text-gray-400 mt-2">
               GPON Fiber Network Management
             </p>
           </div>
@@ -2130,18 +2602,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         >
           Password
         </button>
-        <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'license' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
-          onClick={() => setActiveTab('license')}
-        >
-          License
-        </button>
-        <button
-          className={`px-4 py-2 font-medium whitespace-nowrap ${activeTab === 'tunnel' ? 'text-blue-600 border-b-2 border-blue-600' : darkMode ? 'text-slate-400' : 'text-gray-500'}`}
-          onClick={() => setActiveTab('tunnel')}
-        >
-          Remote Access
-        </button>
+        {/* License + Remote Access tabs hidden in SaaS mode */}
       </div>
 
       {activeTab === 'general' && (
@@ -2456,7 +2917,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         </form>
       )}
 
-      {activeTab === 'license' && (
+      {false && activeTab === 'license' && (
         <div className="space-y-4">
           {/* License Status Card */}
           <div className={`p-4 rounded-xl border ${
@@ -2858,7 +3319,7 @@ function SettingsModal({ isOpen, onClose, settings, onSubmit, onChangePassword, 
         </div>
       )}
 
-      {activeTab === 'tunnel' && (
+      {false && activeTab === 'tunnel' && (
         <div className="space-y-4">
           {/* Remote Access Header */}
           <div className="bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl p-5 text-white">
@@ -3302,15 +3763,14 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
       }
     };
 
-    // rx = Download (green), tx = Upload (cyan)
-    // API returns rx_kbps as customer download traffic (bigger value)
-    const downloadValues = rxValues;
-    const uploadValues = txValues;
+    // SNMP per-ONU from OLT: tx = OLT sends to ONU = customer download, rx = OLT receives = customer upload
+    const downloadValues = txValues;
+    const uploadValues = rxValues;
 
-    // Draw Download - Green (the BIG number - rx)
+    // Draw Download - Green (tx = OLT sent to ONU = customer download)
     drawSmoothLine(downloadValues, '#22c55e', ['rgba(34, 197, 94, 0.4)', 'rgba(34, 197, 94, 0.02)']);
 
-    // Draw Upload - Cyan/Blue (the small number - tx)
+    // Draw Upload - Cyan/Blue (rx = OLT received from ONU = customer upload)
     drawSmoothLine(uploadValues, '#06b6d4', ['rgba(6, 182, 212, 0.35)', 'rgba(6, 182, 212, 0.02)']);
 
     // Draw legend box
@@ -3397,22 +3857,19 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
 
   if (!isOpen) return null;
 
-  // Calculate stats - ALWAYS use rx as Download (the bigger value from API)
-  // API returns rx_kbps as the larger value for uplink ports (customer download)
+  // SNMP: rx = OLT received from ONU (customer upload), tx = OLT sent to ONU (customer download)
   const stats = data && data.data && data.data.length > 0 ? (() => {
-    // rx_kbps = Download (from internet to customers - bigger)
-    // tx_kbps = Upload (from customers to internet - smaller)
     const rxMax = Math.max(...data.data.map(d => d.rx_kbps));
     const txMax = Math.max(...data.data.map(d => d.tx_kbps));
     const rxSum = data.data.reduce((sum, d) => sum + d.rx_kbps, 0);
     const txSum = data.data.reduce((sum, d) => sum + d.tx_kbps, 0);
     return {
-      maxDownload: rxMax,
-      maxUpload: txMax,
-      avgDownload: rxSum / data.data.length,
-      avgUpload: txSum / data.data.length,
-      totalDownload: rxSum * 60 / 8 / 1024,
-      totalUpload: txSum * 60 / 8 / 1024
+      maxDownload: txMax,
+      maxUpload: rxMax,
+      avgDownload: txSum / data.data.length,
+      avgUpload: rxSum / data.data.length,
+      totalDownload: txSum * 60 / 8 / 1024,
+      totalUpload: rxSum * 60 / 8 / 1024
     };
   })() : null;
 
@@ -3515,12 +3972,12 @@ function TrafficGraphModal({ isOpen, onClose, entityType, entityId, entityName, 
                   <div className="flex items-center gap-2 mb-1">
                     <span className="w-2 h-2 rounded-full bg-green-500"></span>
                     <span className="text-slate-300">Download:</span>
-                    <span className="text-green-400 font-bold">{formatBandwidth(tooltip.data.rx_kbps)}</span>
+                    <span className="text-green-400 font-bold">{formatBandwidth(tooltip.data.tx_kbps)}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-cyan-500"></span>
                     <span className="text-slate-300">Upload:</span>
-                    <span className="text-cyan-400 font-bold">{formatBandwidth(tooltip.data.tx_kbps)}</span>
+                    <span className="text-cyan-400 font-bold">{formatBandwidth(tooltip.data.rx_kbps)}</span>
                   </div>
                 </div>
               )}
@@ -4303,13 +4760,21 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
                     <td className="px-3 py-2 whitespace-nowrap">
                       <span className={`text-base font-medium ${darkMode ? 'text-white' : 'text-gray-800'}`}>{onu.olt_name}</span>
                     </td>
-                    {/* PON/ONU with MAC on hover, status dot */}
+                    {/* PON/ONU with MAC on hover, status dot, uptime/offline reason */}
                     <td className="px-3 py-2 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <span className={`w-3 h-3 rounded-full ${onu.is_online ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                        <span className={`text-base font-mono ${darkMode ? 'text-slate-300' : 'text-gray-700'}`} title={`MAC: ${onu.mac_address}${onu.model ? ` | Model: ${onu.model}` : ''}`}>
-                          {onu.pon_port}:{onu.onu_id}
-                        </span>
+                        <div className="flex flex-col">
+                          <span className={`text-base font-mono ${darkMode ? 'text-slate-300' : 'text-gray-700'}`} title={`MAC: ${onu.mac_address}${onu.model ? ` | Model: ${onu.model}` : ''}`}>
+                            {onu.pon_port}:{onu.onu_id}
+                          </span>
+                          {onu.is_online && onu.uptime && (
+                            <span className="text-xs text-green-600" title="Uptime">{onu.uptime}</span>
+                          )}
+                          {!onu.is_online && onu.offline_reason && (
+                            <span className={`text-xs ${onu.offline_reason === 'Power Off' ? 'text-orange-500' : onu.offline_reason === 'Fiber Cut' ? 'text-red-600' : 'text-gray-500'}`} title="Offline Reason">{onu.offline_reason}</span>
+                          )}
+                        </div>
                       </div>
                     </td>
                     {/* Customer with region, location, photo icons */}
@@ -4354,7 +4819,7 @@ function ONUTable({ onus, onEdit, onDelete, onReboot, isAdmin, trafficData, onGr
                       {(() => {
                         const traffic = trafficMap[onu.mac_address];
                         if (!traffic) return <span className="text-gray-300 text-sm">-</span>;
-                        return <AnimatedTraffic rx={traffic.rx_kbps || 0} tx={traffic.tx_kbps || 0} />;
+                        return <AnimatedTraffic rx={traffic.tx_kbps || 0} tx={traffic.rx_kbps || 0} />;
                       })()}
                     </td>
                     {/* Distance */}
@@ -4483,6 +4948,17 @@ function ONUCard({ onu, onEdit, onDelete, onReboot, isAdmin, onImagePreview }) {
           <span className="text-cyan-500 text-xs">Distance</span>
           <p className="font-semibold text-cyan-700">{onu.distance ? `${onu.distance}m` : '-'}</p>
         </div>
+        {onu.is_online ? (
+          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-2.5 border border-green-200/50">
+            <span className="text-green-500 text-xs">Uptime</span>
+            <p className="font-semibold text-green-700">{onu.uptime || '-'}</p>
+          </div>
+        ) : (
+          <div className={`rounded-xl p-2.5 border ${onu.offline_reason === 'Power Off' ? 'bg-gradient-to-br from-orange-50 to-orange-100 border-orange-200/50' : onu.offline_reason === 'Fiber Cut' ? 'bg-gradient-to-br from-red-50 to-red-100 border-red-200/50' : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50'}`}>
+            <span className={`text-xs ${onu.offline_reason === 'Power Off' ? 'text-orange-500' : onu.offline_reason === 'Fiber Cut' ? 'text-red-500' : 'text-gray-500'}`}>Offline Reason</span>
+            <p className={`font-semibold ${onu.offline_reason === 'Power Off' ? 'text-orange-700' : onu.offline_reason === 'Fiber Cut' ? 'text-red-700' : 'text-gray-600'}`}>{onu.offline_reason || 'Unknown'}</p>
+          </div>
+        )}
         <div className={`rounded-xl p-2.5 border ${onu.rx_power ? (!onu.is_online ? 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50' : onu.rx_power < -25 ? 'bg-gradient-to-br from-red-50 to-red-100 border-red-200/50' : onu.rx_power < -20 ? 'bg-gradient-to-br from-amber-50 to-amber-100 border-amber-200/50' : 'bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200/50') : 'bg-gradient-to-br from-gray-50 to-gray-100 border-gray-200/50'}`}>
           <span className={`text-xs ${onu.rx_power ? (!onu.is_online ? 'text-gray-400' : onu.rx_power < -25 ? 'text-red-500' : onu.rx_power < -20 ? 'text-amber-500' : 'text-emerald-500') : 'text-gray-400'}`}>OLT RX</span>
           <p className={`font-semibold ${onu.rx_power ? (!onu.is_online ? 'text-gray-400 italic' : onu.rx_power < -25 ? 'text-red-700' : onu.rx_power < -20 ? 'text-amber-700' : 'text-emerald-700') : 'text-gray-400'}`} title={onu.rx_power && !onu.is_online ? 'Last known value (ONU offline)' : 'OLT-measured RX power'}>
@@ -8478,7 +8954,7 @@ function BackupsPage({ darkMode, token, olts }) {
 }
 
 function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pageName, darkMode, onToggleDarkMode }) {
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = user?.role === 'admin' || user?.role === 'owner';
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
@@ -8489,11 +8965,12 @@ function Sidebar({ currentPage, onNavigate, user, onLogout, isOpen, onClose, pag
     { id: 'reports', label: 'Reports', icon: 'M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
     { id: 'events', label: 'Events', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
     { id: 'splitter', label: 'Splitter Simulator', icon: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1' },
+    { id: 'connect', label: 'Connect Router', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
   ];
 
   if (isAdmin) {
     menuItems.push({ id: 'backups', label: 'Backups', icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4' });
-    menuItems.push({ id: 'services', label: 'Services', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' });
+    // Services tab hidden in SaaS mode (CPU/RAM/Disk + restart/reboot are infra concerns)
     menuItems.push({ id: 'users', label: 'Users', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' });
   }
 
@@ -8837,7 +9314,7 @@ function Dashboard({ user, onLogout, pageName }) {
   const wsMapRef = useRef({});  // Map of OLT ID -> WebSocket for "All" mode
   const trafficBufferRef = useRef({});  // Buffer to keep traffic values between updates
 
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = user?.role === 'admin' || user?.role === 'owner';
 
   const handleMobileImagePreview = (onu) => {
     const images = onu.image_urls || (onu.image_url ? [onu.image_url] : []);
@@ -9362,10 +9839,7 @@ function Dashboard({ user, onLogout, pageName }) {
   return (
     <DarkModeContext.Provider value={darkMode}>
     <div className={`min-h-screen flex transition-colors duration-300 ${darkMode ? 'bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900' : 'bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50'}`}>
-      {/* License Status Overlay */}
-      {!isLicenseValid && (
-        <LicenseOverlay status={licenseStatus.status} message={licenseStatus.message} />
-      )}
+      {/* License Status Overlay disabled in SaaS mode */}
 
       <Sidebar
         currentPage={currentPage}
@@ -10418,6 +10892,11 @@ function Dashboard({ user, onLogout, pageName }) {
             <SplitterSimulator olts={olts} onus={onus} />
           )}
 
+          {/* Connect Router Page (SaaS - all roles) */}
+          {currentPage === 'connect' && (
+            <ConnectRouterPage darkMode={darkMode} />
+          )}
+
           {/* Users Page (Admin only) */}
           {currentPage === 'users' && isAdmin && (
             <>
@@ -10524,10 +11003,7 @@ function Dashboard({ user, onLogout, pageName }) {
             />
           )}
 
-          {/* Services Page (Admin only) */}
-          {currentPage === 'services' && isAdmin && (
-            <ServicesTab darkMode={darkMode} />
-          )}
+          {/* Services page disabled in SaaS mode */}
         </main>
 
         {/* Footer - Material Design */}

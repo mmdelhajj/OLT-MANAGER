@@ -3,10 +3,15 @@ import os
 import hashlib
 import base64
 import secrets
+from typing import Optional, Union
 
 # Security: Salt file for encryption key derivation
 ENCRYPTION_SALT_FILE = "/etc/olt-manager/encryption.salt"
 PBKDF2_ITERATIONS = 100000  # High iteration count for security
+
+# Phase 1 (multi-tenant) — master KEK is the existing hardware-derived key.
+# Per-tenant Data Encryption Keys (DEKs) are wrapped with this master KEK
+# and stored in `tenants.dek_encrypted`.
 
 
 def _get_or_create_salt() -> bytes:
@@ -129,12 +134,107 @@ def decrypt_sensitive(ciphertext: str) -> str:
         _config_logger.error(f"[SECURITY] Decryption failed with both keys: {e}")
         raise ValueError("Decryption failed - data may be corrupted or key changed")
 
+# ---------------------------------------------------------------------------
+# Per-tenant encryption (Phase 1.8)
+# ---------------------------------------------------------------------------
+#
+# Each tenant has a Data Encryption Key (DEK), generated when the tenant is
+# created. The DEK is wrapped with the system master KEK above, then stored
+# in `tenants.dek_encrypted`. To encrypt or decrypt a tenant's data, callers
+# pass either the encrypted DEK or the tenant ORM object — never raw key
+# material.
+#
+# This isolates a single-tenant compromise: leaking one tenant's DEK does NOT
+# leak any other tenant's data, and rotating the master KEK only requires
+# re-wrapping each tenant's DEK (not re-encrypting every row).
+# ---------------------------------------------------------------------------
+
+
+def _fernet_from_raw(raw_key: bytes):
+    """Build a Fernet from a 32-byte raw key."""
+    from cryptography.fernet import Fernet
+    return Fernet(base64.urlsafe_b64encode(raw_key))
+
+
+def generate_tenant_dek() -> bytes:
+    """Generate a fresh 32-byte tenant Data Encryption Key."""
+    return secrets.token_bytes(32)
+
+
+def wrap_tenant_dek(dek: bytes) -> str:
+    """Wrap (encrypt) a tenant DEK using the master KEK. Returns 'KEK:<b64>'."""
+    f = _fernet_from_raw(ENCRYPTION_KEY)
+    return "KEK:" + f.encrypt(dek).decode()
+
+
+def unwrap_tenant_dek(wrapped: str) -> bytes:
+    """Unwrap (decrypt) a tenant DEK that was wrapped with the master KEK."""
+    if not wrapped or not wrapped.startswith("KEK:"):
+        raise ValueError("Invalid wrapped tenant DEK")
+    f = _fernet_from_raw(ENCRYPTION_KEY)
+    return f.decrypt(wrapped[4:].encode())
+
+
+def encrypt_for_tenant(dek_or_wrapped: Union[bytes, str], plaintext: str) -> str:
+    """Encrypt plaintext under a tenant's DEK.
+
+    `dek_or_wrapped` may be either the raw 32-byte DEK or the KEK-wrapped form
+    stored in the database. The output uses the same 'ENC:' prefix the legacy
+    `encrypt_sensitive` does, so callers can store ciphertext in the same
+    columns interchangeably.
+    """
+    if not plaintext:
+        return plaintext
+    dek = dek_or_wrapped if isinstance(dek_or_wrapped, (bytes, bytearray)) else unwrap_tenant_dek(dek_or_wrapped)
+    f = _fernet_from_raw(bytes(dek))
+    return "ENC:" + f.encrypt(plaintext.encode()).decode()
+
+
+def decrypt_for_tenant(dek_or_wrapped: Union[bytes, str], ciphertext: str) -> str:
+    """Decrypt ciphertext under a tenant's DEK.
+
+    Falls back to the legacy hardware-only key for ciphertext that predates
+    per-tenant DEKs (so the bootstrap-tenant migration is non-destructive).
+    """
+    if not ciphertext:
+        return ciphertext
+    if not ciphertext.startswith("ENC:"):
+        return ciphertext
+
+    dek = dek_or_wrapped if isinstance(dek_or_wrapped, (bytes, bytearray)) else unwrap_tenant_dek(dek_or_wrapped)
+    encrypted = ciphertext[4:].encode()
+
+    # Try the tenant DEK first
+    try:
+        f = _fernet_from_raw(bytes(dek))
+        return f.decrypt(encrypted).decode()
+    except Exception:
+        pass
+
+    # Fall back to the system-wide key for legacy single-tenant ciphertext
+    try:
+        f = _fernet_from_raw(ENCRYPTION_KEY)
+        return f.decrypt(encrypted).decode()
+    except Exception as e:
+        _config_logger.error(f"[SECURITY] Tenant decrypt failed: {e}")
+        raise ValueError("Decryption failed - data may be corrupted or wrong tenant key")
+
+
 # Database - Use absolute path to prevent path confusion issues
-# The data folder is the canonical location for the database
+# The data folder is the canonical location for the database.
+#
+# Phase 1 (multi-tenant): DATABASE_URL may point at managed Postgres in
+# production. The default still falls back to SQLite so the existing
+# single-tenant binary keeps working until Phase 5 cutover.
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////opt/olt-manager/data/olt_manager.db")
 
-# Polling interval in seconds (1 minute)
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 60))
+
+def is_postgres() -> bool:
+    """Return True if DATABASE_URL points at a Postgres backend."""
+    return DATABASE_URL.startswith(("postgres://", "postgresql://", "postgresql+psycopg"))
+
+# Polling interval in seconds (30s matches OLT counter refresh rate)
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 30))
 
 # SSH connection settings
 SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", 30))

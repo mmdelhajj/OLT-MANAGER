@@ -1,0 +1,1 @@
+Your OLT Manager trial ends in {{ days_left }} days

@@ -1,0 +1,53 @@
+---
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "Manage your GPON/EPON OLTs from anywhere. WireGuard secured. SaaS pricing." } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+  </head>
+  <body class="bg-white text-slate-900 antialiased">
+    <header class="border-b">
+      <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <a href="/" class="font-bold text-lg">OLT Manager</a>
+        <nav class="flex items-center gap-6 text-sm">
+          <a href="/features">Features</a>
+          <a href="/pricing">Pricing</a>
+          <a href="https://docs.oltmanager.io">Docs</a>
+          <a href="https://app.oltmanager.io/login">Sign in</a>
+          <a
+            href="https://app.oltmanager.io/signup"
+            class="bg-brand-600 text-white px-4 py-2 rounded hover:bg-brand-700"
+          >
+            Start free trial
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="border-t mt-24">
+      <div class="max-w-6xl mx-auto px-6 py-8 text-sm text-slate-500 flex justify-between">
+        <span>© {new Date().getFullYear()} OLT Manager</span>
+        <div class="flex gap-6">
+          <a href="/terms">Terms</a>
+          <a href="/privacy">Privacy</a>
+          <a href="https://status.oltmanager.io">Status</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

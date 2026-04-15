@@ -1,6 +1,6 @@
 """Pydantic schemas for API request/response"""
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Union
 from pydantic import BaseModel, Field
 
 
@@ -132,6 +132,8 @@ class ONUResponse(BaseModel):
     model: Optional[str] = None  # ONU model e.g. "V2801S", "V2801RD", "HG325AX15"
     image_url: Optional[str] = None  # Building/location image (legacy - single)
     image_urls: Optional[List[str]] = None  # Multiple building/location images (up to 3)
+    uptime: Optional[str] = None  # Uptime string e.g. "2d 5h 30m"
+    offline_reason: Optional[str] = None  # "Power Off", "Fiber Cut", "Unknown"
     last_seen: datetime
     created_at: datetime
 
@@ -186,14 +188,18 @@ class UserUpdate(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: int
-    username: str
+    # Phase 1: ids became UUID strings, username became email.
+    # Support both int (SQLite legacy) and str (Postgres UUID) ids.
+    id: Union[str, int]
+    username: str  # legacy alias; populated from User.email in SaaS mode
     role: str
     full_name: Optional[str]
     is_active: bool
     created_at: datetime
     last_login: Optional[datetime]
-    assigned_olt_ids: List[int] = []
+    assigned_olt_ids: List[Union[str, int]] = []
+    tenant_id: Optional[Union[str, int]] = None
+    email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -228,8 +234,10 @@ class DiagramUpdate(BaseModel):
 
 
 class DiagramResponse(BaseModel):
+    # Phase 1: Diagram.id stays an integer PK; only owner_id (FK to User)
+    # is now a UUID string.
     id: int
-    owner_id: int
+    owner_id: str
     owner_name: Optional[str] = None
     name: str
     nodes: str  # JSON string

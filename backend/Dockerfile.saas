@@ -1,0 +1,72 @@
+# Phase 5 SaaS image. Multi-stage so the final layer is small and contains
+# only the runtime deps. This is the image deployed to Fly.io / Hetzner —
+# the legacy `Dockerfile` next to it still builds the single-tenant
+# Nuitka-style image and is untouched on purpose (Phase 5 cutover plan).
+
+############################
+# Stage 1 — builder
+############################
+FROM python:3.11-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+# Install build deps for psycopg2-binary, cryptography, etc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        libffi-dev \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --prefix=/install -r requirements.txt
+
+############################
+# Stage 2 — runtime
+############################
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_HOME=/app \
+    PORT=8000
+
+# Runtime libs only — no compilers in the final image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libpq5 \
+        wireguard-tools \
+        iproute2 \
+        curl \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir ${APP_HOME} app
+
+WORKDIR ${APP_HOME}
+
+# Copy installed Python deps from builder.
+COPY --from=builder /install /usr/local
+
+# Copy application source. .dockerignore (next to this file) keeps
+# venv/__pycache__/tests out of the image.
+COPY --chown=app:app . ${APP_HOME}
+
+USER app
+
+EXPOSE 8000
+
+# Tini = PID 1 so SIGTERM from the orchestrator actually shuts uvicorn down.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# alembic upgrade head runs on container start so a fresh deploy migrates
+# the DB before serving traffic. If the migration is destructive, run it
+# from CI instead and remove the &&.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
