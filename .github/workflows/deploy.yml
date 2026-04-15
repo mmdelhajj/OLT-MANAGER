@@ -1,103 +1,13 @@
 name: Deploy
 
+# Manual deployment only — SaaS is deployed via SCP to the server.
+# This workflow is kept as a placeholder for future CI/CD automation.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: false
+  workflow_dispatch:
 
 jobs:
-  staging:
-    name: Deploy to staging
-    if: github.ref == 'refs/heads/main'
+  placeholder:
+    name: Manual deploy (not automated yet)
     runs-on: ubuntu-latest
-    environment:
-      name: staging
-      url: https://staging.oltmanager.io
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Deploy backend to Fly.io (staging)
-        run: |
-          flyctl deploy \
-            --config fly.toml \
-            --dockerfile backend/Dockerfile.saas \
-            --app olt-manager-staging \
-            --strategy rolling \
-            --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Smoke test
-        run: |
-          for i in {1..30}; do
-            if curl -fsS https://staging.oltmanager.io/health; then
-              echo "staging healthy"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "staging failed health check"
-          exit 1
-
-      - name: Deploy frontend to Vercel (staging)
-        working-directory: frontend-v2
-        run: |
-          npm install -g vercel
-          vercel deploy --prod=false --token=$VERCEL_TOKEN --yes
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-
-  production:
-    name: Deploy to production
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: https://app.oltmanager.io
-    steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Deploy backend to Fly.io (prod)
-        run: |
-          flyctl deploy \
-            --config fly.toml \
-            --dockerfile backend/Dockerfile.saas \
-            --app olt-manager \
-            --strategy rolling \
-            --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Smoke test
-        run: |
-          for i in {1..30}; do
-            if curl -fsS https://app.oltmanager.io/health; then
-              echo "prod healthy"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "prod failed health check"
-          exit 1
-
-      - name: Deploy frontend to Vercel (prod)
-        working-directory: frontend-v2
-        run: |
-          npm install -g vercel
-          vercel deploy --prod=true --token=$VERCEL_TOKEN --yes
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-
-      - name: Notify Sentry of release
-        uses: getsentry/action-release@v1
-        with:
-          environment: production
-        env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: olt-manager
+      - run: echo "Deploy is done manually via SCP. See MEMORY.md for instructions."
