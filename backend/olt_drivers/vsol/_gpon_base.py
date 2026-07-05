@@ -30,7 +30,7 @@ class VSOLGPONDriverBase(VSOLDriverBase):
 
         onus = []
         status_map: Dict[str, bool] = {}
-        web_onu_list = get_onu_list_web(self.ip, self.web_username, self.web_password) or []
+        web_onu_list = get_onu_list_web(self.ip, self.web_username, self.web_password, pon_count=self.PON_COUNT) or []
         for onu in web_onu_list:
             onus.append(ONUData(
                 pon_port=onu["pon_port"],
@@ -44,11 +44,11 @@ class VSOLGPONDriverBase(VSOLDriverBase):
 
     def _poll_onu_models(self):
         from olt_web_scraper import get_onu_models_web
-        return get_onu_models_web(self.ip, self.web_username, self.web_password) or {}
+        return get_onu_models_web(self.ip, self.web_username, self.web_password, pon_count=self.PON_COUNT) or {}
 
     def _poll_status_info(self):
         from olt_web_scraper import get_onu_status_info_web
-        return get_onu_status_info_web(self.ip, self.web_username, self.web_password) or {}
+        return get_onu_status_info_web(self.ip, self.web_username, self.web_password, pon_count=self.PON_COUNT) or {}
 
     # ---- Polling (parallel) -------------------------------------------------
     def poll(self, skip_optical: bool = False) -> DriverPollResult:

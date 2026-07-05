@@ -149,4 +149,23 @@ def test_v1600g2b_reboot_onu_calls_web_scraper_with_model():
         username="admin",
         password="admin",
         model="V1600G2-B",
+        is_gpon=True,
     )
+
+
+def test_non_g2_gpon_models_use_gpon_web_path():
+    """Regression: V1600G1/G08/G16 model strings contain no 'G2', so the old
+    "'G2' in model" heuristic mis-routed their reboot/rename to the EPON URL.
+    They must now pass is_gpon=True (GPON path) because PON_TECH == 'GPON'."""
+    from olt_drivers.vsol.v1600g1 import V1600G1Driver
+    from olt_drivers.vsol.v1601g08 import V1601G08Driver
+    from olt_drivers.vsol.v1601g16 import V1601G16Driver
+
+    for cls in (V1600G1Driver, V1601G08Driver, V1601G16Driver):
+        drv = cls("10.0.0.9", "public", "admin", "admin")
+        with patch("olt_web_scraper.reboot_onu_web", return_value=True) as mock_reboot:
+            drv.reboot_onu(1, 1)
+        assert mock_reboot.call_args.kwargs["is_gpon"] is True, cls.MODEL
+        with patch("olt_web_scraper.set_onu_description_web", return_value=True) as mock_desc:
+            drv.set_onu_description(1, 1, "x")
+        assert mock_desc.call_args.kwargs["is_gpon"] is True, cls.MODEL

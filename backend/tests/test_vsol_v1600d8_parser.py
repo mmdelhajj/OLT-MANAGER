@@ -110,6 +110,7 @@ def test_v1600d8_reboot_onu_calls_web_scraper():
         username="admin",
         password="admin",
         model="V1600D8",
+        is_gpon=False,
     )
 
 

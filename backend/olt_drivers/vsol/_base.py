@@ -39,6 +39,7 @@ class VSOLDriverBase(OLTDriver):
             username=self.web_username,
             password=self.web_password,
             model=self.MODEL,
+            is_gpon=(self.PON_TECH == "GPON"),
         )
 
     def delete_onu(
@@ -67,6 +68,7 @@ class VSOLDriverBase(OLTDriver):
             username=self.web_username,
             password=self.web_password,
             model=self.MODEL,
+            is_gpon=(self.PON_TECH == "GPON"),
         )
 
     def set_port_description(self, port_number: int, description: str) -> bool:
@@ -192,7 +194,8 @@ class VSOLDriverBase(OLTDriver):
         try:
             return (
                 get_onu_opm_data_web(
-                    self.ip, self.web_username, self.web_password
+                    self.ip, self.web_username, self.web_password,
+                    pon_count=self.PON_COUNT,
                 )
                 or {}
             )

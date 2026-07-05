@@ -20,19 +20,20 @@ class V1600G2BDriver(VSOLGPONDriverBase):
     MODEL = "V1600G2-B"
     DISPLAY_NAME = "VSOL V1600G2-B (16 PON GPON)"
     PON_COUNT = 16
-    ALIASES = ["V1600G2-B", "V1600G2", "V1600G"]
+    ALIASES = ["V1600G2-B", "V1600G2"]
 
     @classmethod
     def matches(cls, model_string: str) -> bool:
         if not model_string:
             return False
         m = model_string.upper()
-        # Must not match V1600G1 or V1601G08/G16
-        if "V1600G1" in m and "G2" not in m:
-            return False
+        # Only V1600G2* is this 16-PON model. Do NOT grab the whole "V1600G"
+        # family — V1600GS/GT/G0 are different (and driverless) models, and
+        # matching them here mis-drove them as 16-PON GPON. V1601G08/G16 have
+        # their own drivers.
         if "V1601G" in m:
             return False
-        return "G2" in m or "V1600G" in m
+        return "G2" in m
 
     # poll() inherited from VSOLGPONDriverBase
 

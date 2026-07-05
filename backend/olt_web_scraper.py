@@ -200,7 +200,7 @@ class OLTWebScraper:
             logger.error(f"OPM data scrape failed for {self.ip}: {e}")
             return result
 
-    def get_onu_opm_data_gpon(self) -> Dict[str, ONUOpticalData]:
+    def get_onu_opm_data_gpon(self, pon_count: int = 16) -> Dict[str, ONUOpticalData]:
         """
         Get ONU optical data for GPON OLTs (V1600G2-B) via per-ONU pages.
 
@@ -220,7 +220,7 @@ class OLTWebScraper:
             # We need to iterate all 16 PON ports
             onu_list = []  # (pon_port, onu_id, mac, is_online)
 
-            for pon in range(1, 17):  # V1600G2-B has 16 PON ports
+            for pon in range(1, pon_count + 1):
                 list_url = f"{self.base_url}/action/onuauthinfo.html"
                 response = self.session.post(list_url, data={"select": str(pon)}, timeout=10)
 
@@ -301,7 +301,7 @@ class OLTWebScraper:
             logger.error(f"GPON optical scrape failed for {self.ip}: {e}")
             return result
 
-    def get_onu_models_gpon(self) -> Dict[str, str]:
+    def get_onu_models_gpon(self, pon_count: int = 16) -> Dict[str, str]:
         """
         Get ONU models for GPON OLTs (V1600G2-B) from web interface.
 
@@ -317,7 +317,7 @@ class OLTWebScraper:
 
         try:
             # Iterate all 16 PON ports
-            for pon in range(1, 17):
+            for pon in range(1, pon_count + 1):
                 list_url = f"{self.base_url}/action/onuauthinfo.html"
                 response = self.session.post(list_url, data={"select": str(pon)}, timeout=10)
 
@@ -349,7 +349,7 @@ class OLTWebScraper:
             logger.error(f"GPON model scrape failed for {self.ip}: {e}")
             return result
 
-    def get_onu_list_gpon(self) -> List[Dict]:
+    def get_onu_list_gpon(self, pon_count: int = 16) -> List[Dict]:
         """
         Get full ONU list for GPON OLTs (V1600G2-B) from web interface.
         Returns list of dicts with: pon_port, onu_id, mac_address, description, model, is_online
@@ -364,7 +364,7 @@ class OLTWebScraper:
 
         try:
             # Iterate all 16 PON ports
-            for pon in range(1, 17):
+            for pon in range(1, pon_count + 1):
                 list_url = f"{self.base_url}/action/onuauthinfo.html"
                 response = self.session.post(list_url, data={"select": str(pon)}, timeout=15)
 
@@ -523,7 +523,8 @@ class OLTWebScraper:
             logger.error(f"ONU delete error for {self.ip}: {e}")
             return False
 
-    def reboot_onu(self, pon_port: int, onu_id: int, model: str = None) -> bool:
+    def reboot_onu(self, pon_port: int, onu_id: int, model: str = None,
+                   is_gpon: bool = None) -> bool:
         """
         Reboot an ONU via web interface.
 
@@ -531,6 +532,9 @@ class OLTWebScraper:
             pon_port: PON port number (1-16)
             onu_id: ONU ID on the PON port
             model: OLT model (V1600D8, V1600G2-B, etc.) for correct URL format
+            is_gpon: True for GPON OLTs (who=1/ponid), False for EPON (who=5/select).
+                When None, falls back to a legacy 'G2'-in-model heuristic, which
+                mis-routed non-G2 GPON models (V1600G1/G08/G16) to the EPON path.
 
         Returns:
             True if reboot command sent successfully
@@ -551,9 +555,10 @@ class OLTWebScraper:
 
             # Different OLT models use different URL parameters for reboot:
             # V1600D8 (EPON): who=5, select={pon}, select2={pon}, onuid={id}, SessionKey={key}
-            # V1600G2-B (GPON 16-port): who=1, ponid={pon}, onuid={id}
+            # GPON (all V1600G*): who=1, ponid={pon}, onuid={id}
+            use_gpon = is_gpon if is_gpon is not None else bool(model and 'G2' in model.upper())
 
-            if model and 'G2' in model.upper():
+            if use_gpon:
                 # V1600G2-B and similar GPON models use who=1 with ponid
                 params = {
                     "who": "1",  # 1 = reboot action on V1600G2-B
@@ -585,7 +590,8 @@ class OLTWebScraper:
             logger.error(f"ONU reboot error for {self.ip}: {e}")
             return False
 
-    def set_onu_description(self, pon_port: int, onu_id: int, description: str, model: str = None) -> bool:
+    def set_onu_description(self, pon_port: int, onu_id: int, description: str, model: str = None,
+                            is_gpon: bool = None) -> bool:
         """
         Set ONU description/customer name via web interface.
 
@@ -594,6 +600,9 @@ class OLTWebScraper:
             onu_id: ONU ID on the PON port
             description: New description/customer name
             model: OLT model for correct URL format (V1600D8, V1600G2-B, etc.)
+            is_gpon: True for GPON OLTs (onudetail.html), False for EPON
+                (onuBasic.html). When None, falls back to a legacy 'G2'-in-model
+                heuristic that mis-routed non-G2 GPON models to the EPON path.
 
         Returns:
             True if description was set successfully
@@ -612,9 +621,10 @@ class OLTWebScraper:
 
             # Different OLT models use different URLs and parameters:
             # V1600D8 (EPON): POST to onuBasic.html with gponid, gonuid, onu_description
-            # V1600G2-B (GPON 16-port): POST to onudetail.html with ponid, onuid, onu_description
+            # GPON (all V1600G*): POST to onudetail.html with ponid, onuid, onu_description
+            use_gpon = is_gpon if is_gpon is not None else bool(model and 'G2' in model.upper())
 
-            if model and 'G2' in model.upper():
+            if use_gpon:
                 # V1600G2-B uses onudetail.html
                 desc_url = f"{self.base_url}/action/onudetail.html"
                 form_data = {
@@ -806,7 +816,7 @@ class OLTWebScraper:
         """Close session"""
         self.session.close()
 
-    def get_onu_status_info(self) -> Dict[str, Dict]:
+    def get_onu_status_info(self, pon_count: int = 16) -> Dict[str, Dict]:
         """
         Get ONU status info including real Alive Time from onustatusinfo.html page.
 
@@ -826,7 +836,7 @@ class OLTWebScraper:
 
         try:
             # Iterate all 16 PON ports
-            for pon in range(1, 17):
+            for pon in range(1, pon_count + 1):
                 status_url = f"{self.base_url}/action/onustatusinfo.html"
                 response = self.session.post(status_url, data={"select": str(pon)}, timeout=15)
 
@@ -1019,7 +1029,7 @@ def delete_onu_web(ip: str, pon_port: int, onu_id: int,
 
 def reboot_onu_web(ip: str, pon_port: int, onu_id: int,
                    username: str = "admin", password: str = "admin",
-                   model: str = None) -> bool:
+                   model: str = None, is_gpon: bool = None) -> bool:
     """
     Convenience function to reboot an ONU via web interface.
 
@@ -1036,14 +1046,14 @@ def reboot_onu_web(ip: str, pon_port: int, onu_id: int,
     """
     scraper = OLTWebScraper(ip, username, password)
     try:
-        return scraper.reboot_onu(pon_port, onu_id, model=model)
+        return scraper.reboot_onu(pon_port, onu_id, model=model, is_gpon=is_gpon)
     finally:
         scraper.close()
 
 
 def set_onu_description_web(ip: str, pon_port: int, onu_id: int, description: str,
                             username: str = "admin", password: str = "admin",
-                            model: str = None) -> bool:
+                            model: str = None, is_gpon: bool = None) -> bool:
     """
     Convenience function to set ONU description via web interface.
 
@@ -1061,7 +1071,7 @@ def set_onu_description_web(ip: str, pon_port: int, onu_id: int, description: st
     """
     scraper = OLTWebScraper(ip, username, password)
     try:
-        return scraper.set_onu_description(pon_port, onu_id, description, model=model)
+        return scraper.set_onu_description(pon_port, onu_id, description, model=model, is_gpon=is_gpon)
     finally:
         scraper.close()
 
@@ -1090,7 +1100,7 @@ def set_port_description_web(ip: str, port_number: int, description: str,
         scraper.close()
 
 
-def get_onu_opm_data_web(ip: str, username: str = "admin", password: str = "admin") -> Dict[str, Dict[str, float]]:
+def get_onu_opm_data_web(ip: str, username: str = "admin", password: str = "admin", pon_count: int = 16) -> Dict[str, Dict[str, float]]:
     """
     Convenience function to get ONU OPM data via web scraping.
 
@@ -1107,7 +1117,7 @@ def get_onu_opm_data_web(ip: str, username: str = "admin", password: str = "admi
         # If no data found (e.g., GPON OLT without bulk OPM page), try per-ONU method
         if not opm_data:
             logger.info(f"No EPON OPM data for {ip}, trying GPON per-ONU method...")
-            opm_data = scraper.get_onu_opm_data_gpon()
+            opm_data = scraper.get_onu_opm_data_gpon(pon_count)
 
         # Convert to simple dict format
         result: Dict[str, Dict[str, float]] = {}
@@ -1128,7 +1138,7 @@ def get_onu_opm_data_web(ip: str, username: str = "admin", password: str = "admi
         scraper.close()
 
 
-def get_onu_models_web(ip: str, username: str, password: str) -> Dict[str, str]:
+def get_onu_models_web(ip: str, username: str, password: str, pon_count: int = 16) -> Dict[str, str]:
     """
     Get ONU models via web scraping for GPON OLTs.
 
@@ -1136,12 +1146,12 @@ def get_onu_models_web(ip: str, username: str, password: str) -> Dict[str, str]:
     """
     scraper = OLTWebScraper(ip, username, password)
     try:
-        return scraper.get_onu_models_gpon()
+        return scraper.get_onu_models_gpon(pon_count)
     finally:
         scraper.close()
 
 
-def get_onu_list_web(ip: str, username: str, password: str) -> List[Dict]:
+def get_onu_list_web(ip: str, username: str, password: str, pon_count: int = 16) -> List[Dict]:
     """
     Get full ONU list via web scraping for GPON OLTs (fallback when SNMP fails).
 
@@ -1150,12 +1160,12 @@ def get_onu_list_web(ip: str, username: str, password: str) -> List[Dict]:
     """
     scraper = OLTWebScraper(ip, username, password)
     try:
-        return scraper.get_onu_list_gpon()
+        return scraper.get_onu_list_gpon(pon_count)
     finally:
         scraper.close()
 
 
-def get_onu_status_info_web(ip: str, username: str = "admin", password: str = "admin") -> Dict[str, Dict]:
+def get_onu_status_info_web(ip: str, username: str = "admin", password: str = "admin", pon_count: int = 16) -> Dict[str, Dict]:
     """
     Get ONU status info including real Alive Time from onustatusinfo.html page.
 
@@ -1171,7 +1181,7 @@ def get_onu_status_info_web(ip: str, username: str = "admin", password: str = "a
     """
     scraper = OLTWebScraper(ip, username, password)
     try:
-        return scraper.get_onu_status_info()
+        return scraper.get_onu_status_info(pon_count)
     finally:
         scraper.close()
 
