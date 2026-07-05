@@ -47,6 +47,7 @@ from olt_drivers import (
     DriverPollResult,
 )
 from trap_receiver import SimpleTrapReceiver, TrapEvent
+from traffic_rate import compute_traffic_rate, RateInput
 from config import POLL_INTERVAL, encrypt_sensitive, decrypt_sensitive
 from auth import (
     authenticate_user, create_access_token, get_password_hash,
@@ -976,60 +977,25 @@ async def collect_traffic_history(olt, db):
             rx_kbps = 0
             tx_kbps = 0
 
+            # Look up the ONU first — the rate helper needs its online state.
+            onu = db.query(ONU).filter(
+                ONU.olt_id == olt.id,
+                ONU.mac_address == mac
+            ).first()
+            onu_online = bool(onu and onu.is_online)
+
             if mac in prev_snapshots:
                 prev = prev_snapshots[mac]
-
-                # Use the pre-calculated rates from the snapshot
-                rx_kbps = getattr(prev, 'last_rx_kbps', 0) or 0
-                tx_kbps = getattr(prev, 'last_tx_kbps', 0) or 0
-
-                time_diff = (current_time - prev.timestamp).total_seconds()
-                if time_diff > 0:
-                    rx_diff = rx_bytes - prev.rx_bytes
-                    tx_diff = tx_bytes - prev.tx_bytes
-
-                    # Counter reset (OLT reboot) — discard this sample
-                    if rx_diff < 0 or tx_diff < 0:
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
-                        rx_diff = 0
-                        tx_diff = 0
-
-                    if time_diff > 300:
-                        # Stale snapshot — update bytes+timestamp to re-sync
-                        # but don't trust the rate (gap too large)
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
-                    elif rx_diff == 0 and tx_diff == 0:
-                        pass
-                    else:
-                        instant_rx = round((rx_diff * 8) / time_diff / 1000, 2)
-                        instant_tx = round((tx_diff * 8) / time_diff / 1000, 2)
-
-                        # Per-ONU cap: 1.5 Gbps (above any real ONU capacity)
-                        MAX_VALID_KBPS = 1_500_000
-                        if instant_rx > MAX_VALID_KBPS or instant_tx > MAX_VALID_KBPS:
-                            instant_rx = 0
-                            instant_tx = 0
-
-                        # No EMA — use exact instant rate for max accuracy
-                        rx_kbps = round(instant_rx, 2)
-                        tx_kbps = round(instant_tx, 2)
-
-                        if 'B4:64:15' in mac.upper() or 'b4:64:15' in mac:
-                            logger.info(f"[TALL-DEBUG] rate: instant_rx={instant_rx:.0f} instant_tx={instant_tx:.0f} -> rx_kbps={rx_kbps:.0f} tx_kbps={tx_kbps:.0f}")
-
-                        prev.last_rx_kbps = rx_kbps
-                        prev.last_tx_kbps = tx_kbps
-
-                        # Only update bytes+timestamp when counters changed
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
+                res = compute_traffic_rate(
+                    RateInput(prev.rx_bytes, prev.tx_bytes, prev.timestamp,
+                              getattr(prev, 'last_rx_kbps', 0) or 0,
+                              getattr(prev, 'last_tx_kbps', 0) or 0),
+                    rx_bytes, tx_bytes, current_time, onu_online,
+                )
+                rx_kbps, tx_kbps = res.rx_kbps, res.tx_kbps
+                res.apply_to(prev)
             else:
-                snapshot = TrafficSnapshot(
+                db.add(TrafficSnapshot(
                     olt_id=olt.id,
                     mac_address=mac,
                     rx_bytes=rx_bytes,
@@ -1037,17 +1003,11 @@ async def collect_traffic_history(olt, db):
                     timestamp=current_time,
                     last_rx_kbps=0,
                     last_tx_kbps=0
-                )
-                db.add(snapshot)
+                ))
 
-            # Get ONU from database
-            onu = db.query(ONU).filter(
-                ONU.olt_id == olt.id,
-                ONU.mac_address == mac
-            ).first()
-
-            # Override with Mikrotik rates if available (more accurate)
-            if mac in mk_rates:
+            # Override with Mikrotik rates if available (more accurate) — but
+            # never for an offline ONU (would resurrect stale/other traffic).
+            if onu_online and mac in mk_rates:
                 rx_kbps = mk_rates[mac]['rx_kbps']
                 tx_kbps = mk_rates[mac]['tx_kbps']
 
@@ -1058,8 +1018,10 @@ async def collect_traffic_history(olt, db):
                 'tx_kbps': tx_kbps
             })
 
-            # Save ONU traffic history
-            if onu and (rx_kbps > 0 or tx_kbps > 0 or onu.is_online):
+            # Save ONU traffic history — write for every online ONU (including a
+            # genuine 0) so idle periods render as a continuous zero line;
+            # offline ONUs are skipped so their graph stops instead of plateauing.
+            if onu and onu.is_online:
                 onu_history = TrafficHistory(
                     entity_type='onu',
                     entity_id=str(onu.id),
@@ -1164,6 +1126,33 @@ async def collect_traffic_history(olt, db):
 
             if uplink_count > 0:
                 logger.info(f"Uplink traffic saved for {olt.name}: {uplink_count} ports")
+
+        # Zero live-rate snapshots for offline ONUs so no read path (incl. the
+        # WebSocket cache) can serve their last-known rate. Deregistered offline
+        # ONUs don't appear in the SNMP counter table above, so they'd otherwise
+        # keep a stale snapshot forever — handle them here.
+        # NOTE: the same MAC can have duplicate ONU rows at stale positions
+        # (one online + several stale offline). Only zero MACs that are offline
+        # in ALL rows, else we'd wipe a currently-online ONU's live rate.
+        online_macs = {
+            m[0] for m in db.query(ONU.mac_address).filter(
+                ONU.olt_id == olt.id, ONU.is_online == True
+            ).all()
+        }
+        offline_macs = [
+            m[0] for m in db.query(ONU.mac_address).filter(
+                ONU.olt_id == olt.id, ONU.is_online == False
+            ).all()
+            if m[0] not in online_macs
+        ]
+        if offline_macs:
+            db.query(TrafficSnapshot).filter(
+                TrafficSnapshot.olt_id == olt.id,
+                TrafficSnapshot.mac_address.in_(offline_macs),
+            ).update(
+                {TrafficSnapshot.last_rx_kbps: 0, TrafficSnapshot.last_tx_kbps: 0},
+                synchronize_session=False,
+            )
 
         logger.info(f"Traffic history saved for {olt.name}: {len(traffic_data)} ONUs, total {total_rx:.0f}/{total_tx:.0f} kbps")
 
@@ -1603,7 +1592,7 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
     logger.info("Completed OLT polling cycle")
 
 
-async def cleanup_old_data(db_session_factory, retention_days: int = 7):
+async def cleanup_old_data(db_session_factory, retention_days: int = 30):
     """Clean up old data from traffic_history, poll_logs, and port_traffic tables.
 
     This runs periodically to prevent database bloat.
@@ -1774,7 +1763,8 @@ async def polling_loop(db_session_factory):
             if cleanup_counter >= CLEANUP_INTERVAL_CYCLES:
                 cleanup_counter = 0
                 logger.info("Running scheduled database cleanup...")
-                await cleanup_old_data(db_session_factory, retention_days=7)
+                # Keep 30 days so the 1-month (1M) traffic graph isn't clipped.
+                await cleanup_old_data(db_session_factory, retention_days=30)
 
         except asyncio.CancelledError:
             logger.info("Polling loop cancelled")
@@ -6439,7 +6429,7 @@ def get_port_traffic_history(
                     "range": range,
                     "data": [
                         {
-                            "timestamp": t.timestamp.isoformat(),
+                            "timestamp": t.timestamp.isoformat() + "Z",
                             "rx_kbps": t.rx_kbps,
                             "tx_kbps": t.tx_kbps
                         }
@@ -6454,7 +6444,7 @@ def get_port_traffic_history(
         "range": range,
         "data": [
             {
-                "timestamp": t.timestamp.isoformat(),
+                "timestamp": t.timestamp.isoformat() + "Z",
                 "rx_kbps": t.rx_kbps,
                 "tx_kbps": t.tx_kbps
             }
@@ -6609,10 +6599,18 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
                 ONU.mac_address == mac
             ).first()
 
-            # Override with Mikrotik rates if available (more accurate)
-            if mac in mk_rates:
+            onu_online = bool(onu and onu.is_online)
+
+            # Override with Mikrotik rates if available (more accurate) — but
+            # never for an offline ONU.
+            if onu_online and mac in mk_rates:
                 rx_kbps = mk_rates[mac]['rx_kbps']
                 tx_kbps = mk_rates[mac]['tx_kbps']
+
+            # Offline ONUs must never show live traffic.
+            if not onu_online:
+                rx_kbps = 0
+                tx_kbps = 0
 
             traffic_data.append({
                 "mac_address": mac,
@@ -6620,15 +6618,16 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
                 "onu_id": onu_id,
                 "onu_db_id": onu.id if onu else None,
                 "description": onu.description if onu else None,
-                "is_online": onu.is_online if onu else False,
+                "is_online": onu_online,
                 "rx_kbps": rx_kbps,
                 "tx_kbps": tx_kbps,
                 "rx_mbps": round(rx_kbps / 1000, 2),
                 "tx_mbps": round(tx_kbps / 1000, 2)
             })
 
-            # Store traffic history for ONU (only if we have actual traffic data)
-            if rx_kbps > 0 or tx_kbps > 0 or (onu and onu.is_online):
+            # Store traffic history for ONU — write for every online ONU
+            # (including a genuine 0); skip offline so its graph stops.
+            if onu and onu.is_online:
                 onu_history = TrafficHistory(
                     entity_type='onu',
                     entity_id=str(onu.id) if onu else f"{olt_id}:{mac}",
@@ -6785,10 +6784,14 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
 
                             MAX_VALID_KBPS = 1_500_000  # 1.5 Gbps per ONU
                             if rx_kbps > MAX_VALID_KBPS or tx_kbps > MAX_VALID_KBPS:
-                                rx_kbps = 0
-                                tx_kbps = 0
+                                # Implausible spike -> hold previous, don't dip to 0
+                                rx_kbps = getattr(prev, 'last_rx_kbps', 0) or 0
+                                tx_kbps = getattr(prev, 'last_tx_kbps', 0) or 0
 
-                            # Only update bytes+timestamp on actual counter change
+                            # Persist computed rate; only advance bytes+timestamp
+                            # on actual counter change (keeps the rate window intact)
+                            prev.last_rx_kbps = rx_kbps
+                            prev.last_tx_kbps = tx_kbps
                             prev.rx_bytes = rx_bytes
                             prev.tx_bytes = tx_bytes
                             prev.timestamp = current_time
@@ -6806,6 +6809,11 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
                     ONU.olt_id == olt.id,
                     ONU.mac_address == mac
                 ).first()
+
+                # Offline ONUs must never show live traffic (stale snapshot / MAC reuse).
+                if not (onu and onu.is_online):
+                    rx_kbps = 0
+                    tx_kbps = 0
 
                 all_traffic.append({
                     "olt_id": olt.id,
@@ -6859,7 +6867,8 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
         cached_traffic = []
         for s in snapshots:
             onu = db.query(ONU).filter(ONU.olt_id == olt_id, ONU.mac_address == s.mac_address).first()
-            if onu and (s.last_rx_kbps > 0 or s.last_tx_kbps > 0 or onu.is_online):
+            # Only online ONUs — offline ones with a stale snapshot must not appear active.
+            if onu and onu.is_online:
                 cached_traffic.append({
                     "mac_address": s.mac_address,
                     "pon_port": onu.pon_port if onu else 0,
@@ -7081,17 +7090,25 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                         ONU.mac_address == mac
                     ).first()
 
-                    # Override with Mikrotik rates if available (more accurate)
-                    if mac in mk_rates:
+                    onu_online = bool(onu and onu.is_online)
+
+                    # Override with Mikrotik rates if available (more accurate) —
+                    # but never for an offline ONU.
+                    if onu_online and mac in mk_rates:
                         rx_kbps = mk_rates[mac]['rx_kbps']
                         tx_kbps = mk_rates[mac]['tx_kbps']
+
+                    # Offline ONUs must never show live traffic.
+                    if not onu_online:
+                        rx_kbps = 0
+                        tx_kbps = 0
 
                     traffic_data.append({
                         "mac_address": mac,
                         "pon_port": pon_port,
                         "onu_id": onu_id,
                         "description": onu.description if onu else None,
-                        "is_online": onu.is_online if onu else False,
+                        "is_online": onu_online,
                         "rx_kbps": rx_kbps,
                         "tx_kbps": tx_kbps,
                         "rx_mbps": round(rx_kbps / 1000, 2),
@@ -7358,7 +7375,7 @@ async def get_onu_traffic_history(
         "data_points": len(history),
         "data": [
             {
-                "timestamp": h.timestamp.isoformat(),
+                "timestamp": h.timestamp.isoformat() + "Z",  # mark UTC so the browser doesn't shift it
                 "rx_kbps": h.rx_kbps,
                 "tx_kbps": h.tx_kbps,
                 "rx_mbps": round(h.rx_kbps / 1000, 2),
@@ -7414,7 +7431,7 @@ async def get_pon_traffic_history(
         "data_points": len(history),
         "data": [
             {
-                "timestamp": h.timestamp.isoformat(),
+                "timestamp": h.timestamp.isoformat() + "Z",  # mark UTC so the browser doesn't shift it
                 "rx_kbps": h.rx_kbps,
                 "tx_kbps": h.tx_kbps,
                 "rx_mbps": round(h.rx_kbps / 1000, 2),
@@ -7467,7 +7484,7 @@ async def get_olt_traffic_history(
         "data_points": len(history),
         "data": [
             {
-                "timestamp": h.timestamp.isoformat(),
+                "timestamp": h.timestamp.isoformat() + "Z",  # mark UTC so the browser doesn't shift it
                 "rx_kbps": h.rx_kbps,
                 "tx_kbps": h.tx_kbps,
                 "rx_mbps": round(h.rx_kbps / 1000, 2),
