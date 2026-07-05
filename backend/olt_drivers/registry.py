@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Type
 from .base import OLTDriver
 from .vsol.v1600g2b import V1600G2BDriver
 from .vsol.v1600g1 import V1600G1Driver
+from .vsol.v1600g0 import V1600G0Driver
+from .vsol.v1600gs import V1600GSDriver
+from .vsol.v1600gt import V1600GTDriver
 from .vsol.v1601g08 import V1601G08Driver
 from .vsol.v1601g16 import V1601G16Driver
 from .vsol.v1600dmini import V1600DMINIDriver
@@ -38,6 +41,9 @@ _REGISTRY: List[Type[OLTDriver]] = [
     V1601G08Driver,
     V1600G2BDriver,
     V1600G1Driver,
+    V1600G0Driver,
+    V1600GSDriver,
+    V1600GTDriver,
     # VSOL EPON — most specific first
     V1600DMINIDriver,
     V1600D16Driver,

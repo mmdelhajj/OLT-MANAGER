@@ -65,9 +65,11 @@ def test_list_supported_models_includes_vsol_drivers():
     models = list_supported_models()
     codes = {m["model"] for m in models}
     assert {"V1600D4", "V1600D8", "V1600G2-B"}.issubset(codes)
+    # Added GPON pizza-box drivers (1/2/4-PON)
+    assert {"V1600GS", "V1600GT", "V1600G0"}.issubset(codes)
 
     vsol = [m for m in models if m["vendor"] == "VSOL"]
-    assert len(vsol) == 10
+    assert len(vsol) == 13
     for entry in vsol:
         assert entry["pon_count"] > 0
         assert entry["pon_tech"] in ("EPON", "GPON", "XGS-PON", "XG-PON")
