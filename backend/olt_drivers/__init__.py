@@ -16,6 +16,7 @@ from .registry import (
     get_driver,
     get_driver_class,
     list_supported_models,
+    check_model_support,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "get_driver",
     "get_driver_class",
     "list_supported_models",
+    "check_model_support",
 ]

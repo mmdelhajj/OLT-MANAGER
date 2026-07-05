@@ -26,6 +26,7 @@ class HuaweiDriverBase(OLTDriver):
     """Common SmartAX behaviour shared by every Huawei model."""
 
     VENDOR = "Huawei"
+    IMPLEMENTED = False  # stub: poll()/actions raise NotImplementedError (pending Phase 7.5)
     PORT_NAME_OID = "1.3.6.1.2.1.31.1.1.1.1"  # Huawei does populate ifName
 
     # SSH credentials default to "root/admin123" which Huawei ships with;

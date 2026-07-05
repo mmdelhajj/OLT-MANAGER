@@ -12,6 +12,7 @@ class OLTBase(BaseModel):
     password: str = Field(..., min_length=1, max_length=255)
     model: Optional[str] = Field(None, max_length=50)
     pon_ports: int = Field(default=8, ge=1, le=16)
+    snmp_community: Optional[str] = Field(default="public", max_length=100)
 
 
 class OLTCreate(OLTBase):
@@ -24,6 +25,7 @@ class OLTUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=1, max_length=255)
     model: Optional[str] = Field(None, max_length=50)
     pon_ports: Optional[int] = Field(None, ge=1, le=16)
+    snmp_community: Optional[str] = Field(None, max_length=100)
 
 
 class OLTResponse(BaseModel):
@@ -32,9 +34,12 @@ class OLTResponse(BaseModel):
     ip_address: str
     model: Optional[str]
     pon_ports: int
+    snmp_community: Optional[str] = None
     is_online: bool
     last_poll: Optional[datetime]
     last_error: Optional[str]
+    # Non-blocking diagnostic set on create when the OLT does not answer SNMP
+    warning: Optional[str] = None
     onu_count: int = 0
     online_onu_count: int = 0
     # Health metrics

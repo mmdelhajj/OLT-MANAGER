@@ -43,6 +43,7 @@ from olt_drivers import (
     get_driver,
     get_driver_class,
     list_supported_models,
+    check_model_support,
     DriverPollResult,
 )
 from trap_receiver import SimpleTrapReceiver, TrapEvent
@@ -935,7 +936,7 @@ async def collect_traffic_history(olt, db):
                     mk_pass=olt.mk_password or '',
                     mk_port=olt.mk_port or 8728,
                     olt_ip=olt.ip_address,
-                    snmp_community='public',
+                    snmp_community=olt.snmp_community or 'public',
                     onu_db_map=onu_db_map,
                 )
                 if mk_rates:
@@ -2590,9 +2591,10 @@ def list_olts(user: User = Depends(require_auth), db: Session = Depends(get_db))
             ip_address=olt.ip_address,
             model=olt.model,
             pon_ports=olt.pon_ports,
+            snmp_community=olt.snmp_community,
             is_online=olt.is_online,
             last_poll=olt.last_poll,
-            last_error=None if olt.last_error in ("agent:unreachable", "pending:first_poll") else olt.last_error,
+            last_error=_display_olt_error(olt.last_error),
             onu_count=counts['total'],
             online_onu_count=counts['online'],
             cpu_usage=olt.cpu_usage,
@@ -2625,9 +2627,10 @@ def get_olt(olt_id: int, db: Session = Depends(get_db)):
         ip_address=olt.ip_address,
         model=olt.model,
         pon_ports=olt.pon_ports,
+        snmp_community=olt.snmp_community,
         is_online=olt.is_online,
         last_poll=olt.last_poll,
-        last_error=olt.last_error,
+        last_error=_display_olt_error(olt.last_error),
         onu_count=onu_count,
         online_onu_count=online_onu_count,
         cpu_usage=olt.cpu_usage,
@@ -2637,6 +2640,53 @@ def get_olt(olt_id: int, db: Session = Depends(get_db)):
         created_at=olt.created_at,
         updated_at=olt.updated_at
     )
+
+
+@app.get("/api/supported-olt-models")
+def get_supported_olt_models(user: User = Depends(require_auth)):
+    """Return the OLT models the backend actually has drivers for.
+
+    Single source of truth for the 'Add OLT' dropdown — replaces the hardcoded
+    frontend list so the UI can't offer models with no driver. Each entry has an
+    ``implemented`` flag (False = registered stub, e.g. Huawei/ZTE).
+    """
+    return {"models": list_supported_models()}
+
+
+def _display_olt_error(last_error):
+    """Translate internal status sentinels into human-readable text for the UI.
+
+    Previously these sentinels were blanked to None, hiding the reason an OLT
+    showed no data from first-time users. Now we surface a friendly message.
+    """
+    if last_error == "agent:unreachable":
+        return "Local agent can't reach this OLT (check agent/network)"
+    if last_error == "pending:first_poll":
+        return "Awaiting first poll…"
+    return last_error
+
+
+def _probe_olt_snmp(ip: str, community: str, timeout: int = 4) -> bool:
+    """Quick reachability check: SNMP GET of sysUpTime.
+
+    Returns True if the OLT answers SNMP with the given community. Used to give
+    an immediate, non-blocking warning at add-time instead of a silent failure
+    on the first poll cycle. Never raises.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["snmpget", "-v2c", "-c", community, "-t", "2", "-r", "1",
+             f"{ip}:161", "1.3.6.1.2.1.1.3.0"],
+            capture_output=True, text=True, timeout=timeout
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except FileNotFoundError:
+        # snmpget not installed — can't probe; don't warn misleadingly
+        logger.warning("snmpget not found; skipping add-OLT SNMP probe")
+        return True
+    except Exception:
+        return False
 
 
 @app.post("/api/olts", response_model=OLTResponse, status_code=201)
@@ -2666,7 +2716,8 @@ def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Ses
         username=olt_data.username,
         password=encrypt_sensitive(olt_data.password),  # Encrypt password
         model=olt_data.model,
-        pon_ports=olt_data.pon_ports
+        pon_ports=olt_data.pon_ports,
+        snmp_community=(olt_data.snmp_community or "public")
     )
     db.add(olt)
     db.commit()
@@ -2690,15 +2741,48 @@ def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Ses
         except Exception as e:
             logger.warning("Auto-route after OLT create failed: %s", e)
 
+    # Non-blocking diagnostics so users learn about problems at add-time instead
+    # of via a silent never-populating poll.
+    warnings = []
+
+    # (a) Model support: an unknown or stub (unimplemented) model will never poll.
+    support = check_model_support(olt.model)
+    if olt.model and support["status"] == "unknown":
+        warnings.append(
+            f"Model '{olt.model}' has no backend driver — this OLT will not poll. "
+            f"Pick a supported model (see /api/supported-olt-models)."
+        )
+    elif support["status"] == "unimplemented":
+        warnings.append(
+            f"Model '{olt.model}' is registered but not yet implemented — polling "
+            f"and actions are not available for it yet."
+        )
+
+    # (b) Connectivity probe (direct-poll deployments only). In SaaS mode the
+    # backend can't reach the OLT directly — the agent does — so skip.
+    if not os.getenv("SAAS_MODE"):
+        if not _probe_olt_snmp(olt.ip_address, olt.snmp_community or "public"):
+            warnings.append(
+                f"OLT did not answer SNMP at {olt.ip_address} with community "
+                f"'{olt.snmp_community or 'public'}'. Check reachability, that SNMP "
+                f"v2c is enabled on the OLT, and the community string."
+            )
+
+    warning = " ".join(warnings) if warnings else None
+    if warning:
+        logger.warning("Add-OLT diagnostics for %s: %s", olt.ip_address, warning)
+
     return OLTResponse(
         id=olt.id,
         name=olt.name,
         ip_address=olt.ip_address,
         model=olt.model,
         pon_ports=olt.pon_ports,
+        snmp_community=olt.snmp_community,
         is_online=olt.is_online,
         last_poll=olt.last_poll,
-        last_error=None if olt.last_error in ("agent:unreachable", "pending:first_poll") else olt.last_error,
+        last_error=_display_olt_error(olt.last_error),
+        warning=warning,
         onu_count=0,
         online_onu_count=0,
         created_at=olt.created_at,
@@ -2723,6 +2807,8 @@ def update_olt(olt_id: int, olt_data: OLTUpdate, user: User = Depends(require_ad
         olt.model = olt_data.model
     if olt_data.pon_ports is not None:
         olt.pon_ports = olt_data.pon_ports
+    if olt_data.snmp_community is not None:
+        olt.snmp_community = olt_data.snmp_community
 
     db.commit()
     db.refresh(olt)
@@ -2739,9 +2825,10 @@ def update_olt(olt_id: int, olt_data: OLTUpdate, user: User = Depends(require_ad
         ip_address=olt.ip_address,
         model=olt.model,
         pon_ports=olt.pon_ports,
+        snmp_community=olt.snmp_community,
         is_online=olt.is_online,
         last_poll=olt.last_poll,
-        last_error=olt.last_error,
+        last_error=_display_olt_error(olt.last_error),
         onu_count=onu_count,
         online_onu_count=online_onu_count,
         created_at=olt.created_at,
@@ -2794,12 +2881,29 @@ async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
     try:
         # Use SNMP for fast polling
         loop = asyncio.get_event_loop()
+        olt_community = olt.snmp_community or "public"
         onus_data, status_map = await loop.run_in_executor(
             thread_executor,
             poll_olt_snmp,
             olt.ip_address,
-            "public"  # SNMP community string
+            olt_community
         )
+
+        # Silent-failure guard: an empty SNMP result may mean the OLT is
+        # unreachable / wrong community, NOT "0 ONUs". Probe before declaring it
+        # online, so first-time users get an actionable error instead of a
+        # green "online, 0 ONUs". (Direct-poll deployments only.)
+        if not onus_data and not status_map and not os.getenv("SAAS_MODE"):
+            if not _probe_olt_snmp(olt.ip_address, olt_community):
+                olt.is_online = False
+                olt.last_poll = get_current_time_in_timezone(db)
+                olt.last_error = (
+                    f"No SNMP response from {olt.ip_address} (community "
+                    f"'{olt_community}'). Check reachability, SNMP v2c enabled, "
+                    f"and the community string."
+                )
+                db.commit()
+                return {"success": False, "message": olt.last_error, "onu_count": 0}
 
         # Update database (same logic as polling loop)
         olt.is_online = True
@@ -6405,7 +6509,7 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
                         mk_pass=olt.mk_password or '',
                         mk_port=olt.mk_port or 8728,
                         olt_ip=olt.ip_address,
-                        snmp_community='public',
+                        snmp_community=olt.snmp_community or 'public',
                         onu_db_map=onu_db_map,
                     )
                 )
@@ -6853,7 +6957,7 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                                 mk_pass=olt.mk_password or '',
                                 mk_port=olt.mk_port or 8728,
                                 olt_ip=olt.ip_address,
-                                snmp_community='public',
+                                snmp_community=olt.snmp_community or 'public',
                                 onu_db_map=onu_db_map,
                             )
                         )

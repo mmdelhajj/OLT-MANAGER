@@ -585,7 +585,7 @@ def agent_config(
             "name": olt.name,
             "ip_address": olt.ip_address,
             "model": olt.model or "",
-            "snmp_community": "public",
+            "snmp_community": getattr(olt, "snmp_community", None) or "public",
             "web_username": olt.web_username or olt.username or "admin",
             "web_password": web_password,
             "mikrotik": {

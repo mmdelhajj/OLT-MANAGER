@@ -86,6 +86,10 @@ class OLTDriver(ABC):
     PON_TECH: str = ""             # "EPON" | "GPON" | "XGS-PON" | "XG-PON"
     PON_COUNT: int = 0
     ALIASES: List[str] = []        # alternative model strings
+    # False for registered-but-not-yet-working drivers (e.g. Huawei/ZTE stubs
+    # whose poll()/actions raise NotImplementedError). Used to warn users at
+    # add-time and to grey them out in the model dropdown.
+    IMPLEMENTED: bool = True
 
     # SNMP OID used to read interface names for the uplink port-status poll.
     # Some VSOL models expose readable names through ifName (subtree

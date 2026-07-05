@@ -15,6 +15,7 @@ class ZTEDriverBase(OLTDriver):
     """Common ZXAN behaviour shared by every ZTE model."""
 
     VENDOR = "ZTE"
+    IMPLEMENTED = False  # stub: poll()/actions raise NotImplementedError (pending Phase 7.5)
     PORT_NAME_OID = "1.3.6.1.2.1.2.2.1.2"  # ifDescr — ZXAN doesn't populate ifName fully
 
     DEFAULT_SSH_USER = "zte"

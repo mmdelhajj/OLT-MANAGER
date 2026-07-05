@@ -143,7 +143,7 @@ install_dependencies() {
     {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq nginx wget curl sshpass net-tools
+        apt-get install -y -qq nginx wget curl sshpass net-tools snmp
     } >> "$LOG_FILE" 2>&1 || error_exit "Dependencies failed"
 }
 

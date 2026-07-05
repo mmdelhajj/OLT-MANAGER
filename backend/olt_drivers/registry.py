@@ -119,6 +119,25 @@ def list_supported_models() -> List[Dict[str, Any]]:
             "display_name": d.DISPLAY_NAME,
             "pon_tech": d.PON_TECH,
             "pon_count": d.PON_COUNT,
+            "implemented": getattr(d, "IMPLEMENTED", True),
         }
         for d in _REGISTRY
     ]
+
+
+def check_model_support(model_string: str) -> Dict[str, Any]:
+    """Classify a user-entered model string against the driver registry.
+
+    Returns a dict: ``{"status": "supported"|"unimplemented"|"unknown",
+    "model": <canonical or None>, "pon_count": <int or None>}``. Used to warn at
+    add-time so an unsupported/stub model can't silently never poll.
+    """
+    if not model_string:
+        return {"status": "unknown", "model": None, "pon_count": None}
+    try:
+        cls = get_driver_class(model_string)
+    except ValueError:
+        return {"status": "unknown", "model": None, "pon_count": None}
+    if not getattr(cls, "IMPLEMENTED", True):
+        return {"status": "unimplemented", "model": cls.MODEL, "pon_count": cls.PON_COUNT}
+    return {"status": "supported", "model": cls.MODEL, "pon_count": cls.PON_COUNT}

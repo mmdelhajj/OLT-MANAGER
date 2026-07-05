@@ -261,6 +261,7 @@ class OLT(Base):
     password = Column(String(255), nullable=False)
     model = Column(String(50), nullable=True)
     pon_ports = Column(Integer, default=8)
+    snmp_community = Column(String(100), nullable=True)  # SNMP read community (falls back to "public")
     is_online = Column(Boolean, default=False)
     last_poll = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
@@ -785,6 +786,7 @@ def run_migrations():
         for col_name, col_type in [
             ("web_username", "VARCHAR(100)"),
             ("web_password", "VARCHAR(255)"),
+            ("snmp_community", "VARCHAR(100)"),
         ]:
             if col_name not in olt_columns:
                 cursor.execute(f"ALTER TABLE olts ADD COLUMN {col_name} {col_type}")
