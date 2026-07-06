@@ -787,9 +787,25 @@ def run_migrations():
             ("web_username", "VARCHAR(100)"),
             ("web_password", "VARCHAR(255)"),
             ("snmp_community", "VARCHAR(100)"),
+            ("mk_ip", "VARCHAR(45)"),
+            ("mk_username", "VARCHAR(100)"),
+            ("mk_password", "VARCHAR(255)"),
+            ("mk_port", "INTEGER DEFAULT 8728"),
+            ("mk_enabled", "BOOLEAN DEFAULT 0"),
         ]:
             if col_name not in olt_columns:
                 cursor.execute(f"ALTER TABLE olts ADD COLUMN {col_name} {col_type}")
+
+        # Indexes for hot poll-path lookups (idempotent).
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_onus_olt_mac ON onus (olt_id, mac_address)",
+            "CREATE INDEX IF NOT EXISTS ix_traffic_snapshots_olt_mac ON traffic_snapshots (olt_id, mac_address)",
+            "CREATE INDEX IF NOT EXISTS ix_poll_logs_olt_id ON poll_logs (olt_id)",
+        ]:
+            try:
+                cursor.execute(idx_sql)
+            except Exception:
+                pass
 
         cursor.execute("PRAGMA table_info(users)")
         user_columns = {col[1] for col in cursor.fetchall()}
