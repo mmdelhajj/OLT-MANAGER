@@ -6010,61 +6010,58 @@ def poll_port_traffic_snmp(ip: str, community: str = 'public') -> dict:
     """
     import subprocess
     import time
+    import re
 
     port_traffic = {}
 
-    try:
-        # Try 64-bit counters first (ifHCInOctets/ifHCOutOctets)
-        result = subprocess.run(
-            ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.6'],
-            capture_output=True, text=True, timeout=10
+    def _walk(oid: str) -> str:
+        # snmpbulkwalk is far faster than snmpwalk on an OLT with 100+ ifIndexes
+        # (the plain snmpwalk kept hitting the 10s timeout -> empty result ->
+        # broken rate baseline). -On keeps the numeric OID so we key by the REAL
+        # ifIndex instead of fragile line-order.
+        r = subprocess.run(
+            ['snmpbulkwalk', '-v2c', '-c', community, '-On', ip, oid, '-Cr50', '-t', '10'],
+            capture_output=True, text=True, timeout=60
         )
-        in_octets = result.stdout.strip().split('\n') if result.stdout else []
+        return r.stdout if r.returncode == 0 else ''
 
-        # Check if we got valid 64-bit data
-        use_64bit = len(in_octets) > 0 and in_octets[0] and not in_octets[0].startswith('No Such')
+    def _parse(raw: str, col: str) -> dict:
+        out = {}
+        for line in raw.split('\n'):
+            m = re.search(re.escape(col) + r'(\d+)\s*=\s*Counter\d+:\s*(\d+)', line)
+            if m:
+                out[int(m.group(1))] = int(m.group(2))
+        return out
 
-        if use_64bit:
-            result = subprocess.run(
-                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.31.1.1.1.10'],
-                capture_output=True, text=True, timeout=10
-            )
-            out_octets = result.stdout.strip().split('\n') if result.stdout else []
-            logger.debug(f"Using 64-bit counters for {ip}")
-        else:
-            # Fall back to 32-bit counters
-            logger.debug(f"Falling back to 32-bit counters for {ip}")
-            result = subprocess.run(
-                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.10'],
-                capture_output=True, text=True, timeout=10
-            )
-            in_octets = result.stdout.strip().split('\n') if result.stdout else []
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        # 64-bit first (ifHCInOctets/ifHCOutOctets), else 32-bit (ifIn/OutOctets).
+        # Run the in+out walks in parallel to roughly halve the poll time.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fin = ex.submit(_walk, '1.3.6.1.2.1.31.1.1.1.6')
+            fout = ex.submit(_walk, '1.3.6.1.2.1.31.1.1.1.10')
+            in_raw, out_raw = fin.result(), fout.result()
+        col_in, col_out = '.31.1.1.1.6.', '.31.1.1.1.10.'
+        if 'Counter64' not in in_raw:
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fin = ex.submit(_walk, '1.3.6.1.2.1.2.2.1.10')
+                fout = ex.submit(_walk, '1.3.6.1.2.1.2.2.1.16')
+                in_raw, out_raw = fin.result(), fout.result()
+            col_in, col_out = '.2.2.1.10.', '.2.2.1.16.'
 
-            result = subprocess.run(
-                ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, '1.3.6.1.2.1.2.2.1.16'],
-                capture_output=True, text=True, timeout=10
-            )
-            out_octets = result.stdout.strip().split('\n') if result.stdout else []
-
+        in_by_idx = _parse(in_raw, col_in)
+        out_by_idx = _parse(out_raw, col_out)
         timestamp = time.time()
 
-        # Parse results - ifIndex starts at 1
-        # For UPLINK ports (like GE7), data flows are from the INTERNET perspective:
-        # - ifInOctets = data FROM internet TO OLT = Customer DOWNLOAD (big number)
-        # - ifOutOctets = data FROM OLT TO internet = Customer UPLOAD (small number)
-        # So we use ifInOctets as rx_bytes (Download) and ifOutOctets as tx_bytes (Upload)
-        for i, (in_oct, out_oct) in enumerate(zip(in_octets, out_octets), start=1):
-            try:
-                in_bytes = int(in_oct.strip().split(':')[-1].strip())
-                out_bytes = int(out_oct.strip().split(':')[-1].strip())
-                port_traffic[i] = {
-                    'rx_bytes': in_bytes,   # Customer Download = ifInOctets (data from internet)
-                    'tx_bytes': out_bytes,  # Customer Upload = ifOutOctets (data to internet)
-                    'timestamp': timestamp
+        # rx_bytes = ifInOctets (customer download from the uplink's view),
+        # tx_bytes = ifOutOctets (upload). Keyed by the real ifIndex.
+        for idx, in_bytes in in_by_idx.items():
+            if idx in out_by_idx:
+                port_traffic[idx] = {
+                    'rx_bytes': in_bytes,
+                    'tx_bytes': out_by_idx[idx],
+                    'timestamp': timestamp,
                 }
-            except (ValueError, IndexError):
-                continue
-
     except Exception as e:
         logger.warning(f"Failed to poll port traffic from {ip}: {e}")
 
@@ -6112,9 +6109,16 @@ def calculate_port_rates(olt_id: int, ip: str, current_counters: dict) -> dict:
                         'tx_kbps': round(tx_kbps, 2)
                     }
 
-    # Store current counters for next calculation
-    _port_counters_cache[cache_key] = current_counters
-    _port_counters_cache[cache_key]['timestamp'] = current_counters.get(1, {}).get('timestamp', 0)
+    # Store current counters for next calculation — but NEVER overwrite a good
+    # baseline with an empty/failed poll (that would break the next cycle's rate).
+    if current_counters:
+        ts = 0
+        for _v in current_counters.values():
+            if isinstance(_v, dict) and _v.get('timestamp'):
+                ts = _v['timestamp']
+                break
+        _port_counters_cache[cache_key] = current_counters
+        _port_counters_cache[cache_key]['timestamp'] = ts
 
     return rates
 
