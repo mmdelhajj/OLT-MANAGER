@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Cache FDB for 120s — it changes slowly and the walk is expensive
 _fdb_cache: Dict[str, Tuple[float, Dict[str, int]]] = {}
-_FDB_TTL = 120
+_FDB_TTL = 30  # shorter than the old 120s so a MAC that moves to a different
+               # ONU isn't attributed to the stale port for up to two minutes
 
 # Reuse a small thread pool for parallel SNMP + Mikrotik work
 _mk_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="mk")
@@ -72,6 +73,20 @@ def _get_olt_fdb(olt_ip: str, community: str = "public") -> Dict[str, int]:
                 oid = line.split("=")[0].strip()
                 suffix = oid.split("1.3.6.1.2.1.17.4.3.1.2.")[-1]
                 port_entries[suffix] = int(line.split("INTEGER:")[-1].strip())
+
+        # dot1dTpFdbPort returns a dot1dBasePort, NOT an ifIndex. Translate via
+        # dot1dBasePortIfIndex so the result keys line up with the ifDescr/ifName
+        # ifIndex map used downstream (they only coincidentally matched before).
+        baseport_to_ifindex: Dict[int, int] = {}
+        bp_r = subprocess.run(
+            ["snmpwalk", "-v2c", "-c", community, "-On", olt_ip, "1.3.6.1.2.1.17.1.4.1.2"],
+            capture_output=True, text=True, timeout=30,
+        )
+        for line in bp_r.stdout.strip().split("\n"):
+            if "INTEGER" in line:
+                oid = line.split("=")[0].strip()
+                base_port = int(oid.split(".")[-1])
+                baseport_to_ifindex[base_port] = int(line.split("INTEGER:")[-1].strip())
     except Exception as exc:
         logger.warning("FDB poll failed for %s: %s", olt_ip, exc)
         return _fdb_cache.get(cache_key, (0, {}))[1]
@@ -79,33 +94,59 @@ def _get_olt_fdb(olt_ip: str, community: str = "public") -> Dict[str, int]:
     result: Dict[str, int] = {}
     for suffix, mac in mac_entries.items():
         if suffix in port_entries:
-            result[mac] = port_entries[suffix]
+            base_port = port_entries[suffix]
+            # Map base-port -> ifIndex; fall back to the raw value if the bridge
+            # doesn't expose the translation (some OLTs number them 1:1).
+            result[mac] = baseport_to_ifindex.get(base_port, base_port)
 
     _fdb_cache[cache_key] = (now, result)
     logger.info("OLT FDB for %s: %d MAC→port mappings", olt_ip, len(result))
     return result
 
 
-def _get_onu_ifindex_map(olt_ip: str, community: str = "public") -> Dict[int, Tuple[int, int]]:
-    """Return {ifindex: (pon_port, onu_id)} from ifDescr walk.
+def _parse_pon_onu_name(name: str) -> Optional[Tuple[int, int]]:
+    """Extract (pon, onu) from an interface name.
 
-    Parses names like 'EPON03ONU5' → (3, 5).
+    Handles both the EPON 'EPON03ONU5' form and the GPON 'GPON0/1:5' form.
     """
-    result: Dict[int, Tuple[int, int]] = {}
-    try:
-        r = subprocess.run(
-            ["snmpwalk", "-v2c", "-c", community, "-On", olt_ip, "1.3.6.1.2.1.2.2.1.2"],
-            capture_output=True, text=True, timeout=15,
-        )
-        for line in r.stdout.strip().split("\n"):
-            m = re.search(r"\.2\.2\.1\.2\.(\d+)\s*=\s*STRING:\s*\"EPON0?(\d+)ONU(\d+)", line)
-            if m:
-                idx = int(m.group(1))
-                pon = int(m.group(2))
-                onu = int(m.group(3))
-                result[idx] = (pon, onu)
-    except Exception as exc:
-        logger.warning("ifDescr walk failed for %s: %s", olt_ip, exc)
+    m = re.search(r"[EG]PON0?(\d+)ONU(\d+)", name)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"[EG]PON\d*/(\d+):(\d+)", name)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def _get_onu_ifindex_map(olt_ip: str, community: str = "public") -> Dict[int, Tuple[int, int]]:
+    """Return {ifindex: (pon_port, onu_id)}.
+
+    Tries ifDescr (EPON OLTs), then falls back to ifName (GPON OLTs expose the
+    readable name there). Was previously EPON-ifDescr-only, so the Mikrotik
+    overlay silently produced zero mappings on GPON OLTs.
+    """
+    def _walk(oid: str, col: str) -> Dict[int, Tuple[int, int]]:
+        out: Dict[int, Tuple[int, int]] = {}
+        try:
+            r = subprocess.run(
+                ["snmpwalk", "-v2c", "-c", community, "-On", olt_ip, oid],
+                capture_output=True, text=True, timeout=15,
+            )
+            for line in r.stdout.strip().split("\n"):
+                m = re.search(rf"{re.escape(col)}\.(\d+)\s*=\s*STRING:\s*\"?([^\"]+)", line)
+                if not m:
+                    continue
+                pon_onu = _parse_pon_onu_name(m.group(2))
+                if pon_onu:
+                    out[int(m.group(1))] = pon_onu
+        except Exception as exc:
+            logger.warning("iface walk (%s) failed for %s: %s", oid, olt_ip, exc)
+        return out
+
+    # ifDescr first (EPON), then ifName (GPON) as fallback.
+    result = _walk("1.3.6.1.2.1.2.2.1.2", ".2.2.1.2")
+    if not result:
+        result = _walk("1.3.6.1.2.1.31.1.1.1.1", ".31.1.1.1.1")
     return result
 
 
@@ -216,8 +257,18 @@ def get_mikrotik_traffic(
             pppoe_rates[router_mac]["up"] += up_kbps
 
     # --- Collect FDB + ifIndex results ---
-    fdb = fdb_future.result(timeout=90)   # router_mac → ifindex
-    ifmap = ifmap_future.result(timeout=20)  # ifindex → (pon, onu)
+    # Don't let a hung SNMP task raise TimeoutError out of here (it would also
+    # keep occupying the shared pool) — degrade to empty maps on timeout.
+    try:
+        fdb = fdb_future.result(timeout=90)   # router_mac → ifindex
+    except Exception as exc:
+        logger.warning("FDB task timed out/failed for %s: %s", olt_ip, exc)
+        fdb = {}
+    try:
+        ifmap = ifmap_future.result(timeout=20)  # ifindex → (pon, onu)
+    except Exception as exc:
+        logger.warning("ifIndex-map task timed out/failed for %s: %s", olt_ip, exc)
+        ifmap = {}
 
     # Build router_mac → onu_mac
     router_to_onu: Dict[str, str] = {}
