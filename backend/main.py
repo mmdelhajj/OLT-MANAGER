@@ -2794,18 +2794,24 @@ def _probe_olt_snmp(ip: str, community: str, timeout: int = 4) -> bool:
 @app.post("/api/olts", response_model=OLTResponse, status_code=201)
 def create_olt(olt_data: OLTCreate, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Create new OLT (admin only)"""
-    # Check license OLT limit
-    from license_manager import license_manager
-    license_info = license_manager.get_license_info()
-    max_olts = license_info.get('max_olts', 1)
-    current_olt_count = db.query(OLT).count()
-
-    if current_olt_count >= max_olts:
-        package = license_info.get('package_type', 'trial')
-        raise HTTPException(
-            status_code=403,
-            detail=f"OLT limit reached ({max_olts}). Upgrade your package to add more OLTs. Current package: {package}"
-        )
+    if os.getenv("SAAS_MODE"):
+        # SaaS: enforce the tenant's billing-plan OLT limit (402 if exceeded).
+        from plans import enforce_plan_limit
+        tenant = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+        if tenant:
+            enforce_plan_limit(db, tenant, "olts")
+    else:
+        # Local (single-instance license) OLT limit.
+        from license_manager import license_manager
+        license_info = license_manager.get_license_info()
+        max_olts = license_info.get('max_olts', 1)
+        current_olt_count = db.query(OLT).count()
+        if current_olt_count >= max_olts:
+            package = license_info.get('package_type', 'trial')
+            raise HTTPException(
+                status_code=403,
+                detail=f"OLT limit reached ({max_olts}). Upgrade your package to add more OLTs. Current package: {package}"
+            )
 
     # Check for duplicate IP
     existing = db.query(OLT).filter(OLT.ip_address == olt_data.ip_address).first()

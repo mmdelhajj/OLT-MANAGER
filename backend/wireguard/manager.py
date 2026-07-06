@@ -267,18 +267,21 @@ def render_mikrotik_script(
         f'public-key="{WG_HUB_PUBKEY}" '
         f"endpoint-address={endpoint_host} "
         f"endpoint-port={endpoint_port} "
-        f"allowed-address={WG_SUPERNET} "
+        # Scope to THIS workspace's own subnet + the hub only — never the whole
+        # supernet, or one tenant's router could cryptokey-route to another
+        # tenant's /24 (cross-tenant reachability).
+        f"allowed-address={cidr},{server_ip}/32 "
         "persistent-keepalive=25; "
         'put "Adding server peer... Done!"; '
         f"/ip address add address={gw_addr}/24 interface=oltmanager; "
-        f'/ip route add dst-address={WG_SUPERNET} gateway=oltmanager comment="OLT Manager - route"; '
+        f'/ip route add dst-address={server_ip}/32 gateway=oltmanager comment="OLT Manager - route"; '
         'put "Assigning VPN IP... Done!"; '
         '/ip firewall filter add chain=input in-interface=oltmanager '
         'action=accept place-before=*0 comment="OLT Manager - input"; '
         '/ip firewall filter add chain=forward in-interface=oltmanager '
         'action=accept place-before=*0 comment="OLT Manager - forward"; '
         'put "Adding firewall rules... Done!"; '
-        f'/ip firewall nat add chain=srcnat src-address={WG_SUPERNET} '
+        f'/ip firewall nat add chain=srcnat src-address={server_ip}/32 '
         'action=masquerade comment="OLT Manager - NAT"; '
         'put "Adding NAT masquerade... Done!"; '
         f'put "\\r\\nSUCCESS!! Your router is connected to OLT Manager!\\r\\n'

@@ -27,6 +27,7 @@ from models import (
     ONU,
     PortTraffic,
     SessionLocal,
+    Tenant,
     TrafficHistory,
     User,
     set_session_tenant,
@@ -317,6 +318,14 @@ def ingest(
     except Exception:
         pass
 
+    # Enforce the tenant's billing-plan limits on the agent path too (was
+    # unchecked). Resolve once; skip creating rows past the limit instead of
+    # 402-ing the whole batch (which would discard all the other data).
+    from plans import get_plan
+    _tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    _plan = get_plan(_tenant) if _tenant else None
+    _onu_count = db.query(ONU).count() if _plan else 0  # RLS-scoped to tenant
+
     for olt_data in payload.olts:
         logger.info(f"[ingest] OLT {olt_data.ip_address} model={olt_data.model} "
                      f"online={olt_data.is_online} onus={len(olt_data.onus)}")
@@ -327,6 +336,12 @@ def ingest(
         ).first()
 
         if not olt:
+            if _plan and db.query(OLT).count() >= _plan.max_olts:
+                logger.warning(
+                    f"[ingest] OLT plan limit ({_plan.max_olts}) reached for tenant "
+                    f"{tenant_id}; skipping new OLT {olt_data.ip_address}"
+                )
+                continue
             olt = OLT(
                 tenant_id=tenant_id,
                 workspace_id=workspace_id,
@@ -427,7 +442,9 @@ def ingest(
 
                 onu.updated_at = current_time
             else:
-                # Create new ONU
+                # Create new ONU — respect the tenant's ONU plan limit.
+                if _plan and _onu_count >= _plan.max_onus:
+                    continue
                 onu = ONU(
                     tenant_id=tenant_id,
                     workspace_id=workspace_id,
@@ -450,6 +467,7 @@ def ingest(
                 )
                 db.add(onu)
                 db.flush()
+                _onu_count += 1
 
             # Insert traffic history if there's traffic
             if onu_data.rx_kbps > 0 or onu_data.tx_kbps > 0:

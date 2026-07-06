@@ -185,10 +185,9 @@ async def stripe_webhook(
     event_type = event.get("type") if isinstance(event, dict) else event["type"]
     data = (event.get("data") if isinstance(event, dict) else event["data"])["object"]
 
-    # Idempotency: drop replays.
+    # Idempotency: drop replays we've already SUCCESSFULLY processed.
     if event_id in _processed_events:
         return {"status": "duplicate", "id": event_id}
-    _processed_events.add(event_id)
 
     handler = _HANDLERS.get(event_type)
     if not handler:
@@ -204,6 +203,10 @@ async def stripe_webhook(
         # Stripe will retry on non-2xx, which is what we want for transient errors.
         raise HTTPException(status_code=500, detail="Webhook handler failed")
 
+    # Mark processed only AFTER commit succeeds — otherwise a transient failure
+    # (marked-before-run) would make Stripe's retry short-circuit as a duplicate
+    # and the event would be lost forever.
+    _processed_events.add(event_id)
     return {"status": "ok", "type": event_type}
 
 
