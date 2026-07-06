@@ -5175,6 +5175,11 @@ async def publish_update(
     if not is_dev_server():
         raise HTTPException(status_code=403, detail="This feature is only available on development server")
 
+    # Validate version before it's interpolated into a generated shell script
+    # (avoids command injection via a crafted version string).
+    if not re.match(r'^\d+\.\d+\.\d+([.-][A-Za-z0-9]+)?$', str(version or "")):
+        raise HTTPException(status_code=400, detail="Invalid version format (expected semver)")
+
     try:
         result_steps = []
         backend_dir = Path("/root/olt-manager/backend")
@@ -5386,6 +5391,11 @@ async def build_and_publish(
 
     if not is_dev_server():
         raise HTTPException(status_code=403, detail="This feature is only available on development server")
+
+    # Validate version before it's interpolated into a generated shell script
+    # (avoids command injection via a crafted version string).
+    if not re.match(r'^\d+\.\d+\.\d+([.-][A-Za-z0-9]+)?$', str(version or "")):
+        raise HTTPException(status_code=400, detail="Invalid version format (expected semver)")
 
     # Check if already building
     ps_result = subprocess.run(["pgrep", "-f", "nuitka"], capture_output=True)

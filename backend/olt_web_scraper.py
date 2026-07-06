@@ -107,7 +107,10 @@ class OLTWebScraper:
                             continue
                     logger.warning(f"OLT web login failed for {self.ip}: access denied")
                     return False
-                if len(response.text) > 1000:
+                # Require a real session marker, not just page size — a re-served
+                # login page (wrong credentials) can also be >1KB.
+                text = response.text
+                if len(text) > 1000 and ("EPON" in text or "GPON" in text or "description" in text.lower()):
                     self._logged_in = True
                     logger.info(f"Logged into OLT web interface at {self.ip}")
                     return True

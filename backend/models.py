@@ -619,6 +619,7 @@ class User(Base):
     role = Column(String(20), nullable=False, default="operator")  # owner|admin|operator|viewer
     full_name = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True)
+    is_staff = Column(Boolean, default=False)  # internal cross-tenant support; set manually in DB
     must_change_password = Column(Boolean, default=False)
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
@@ -813,6 +814,7 @@ def run_migrations():
             ("must_change_password", "BOOLEAN DEFAULT 0"),
             ("failed_login_attempts", "INTEGER DEFAULT 0"),
             ("locked_until", "DATETIME"),
+            ("is_staff", "BOOLEAN DEFAULT 0"),
         ]:
             if col_name not in user_columns:
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
