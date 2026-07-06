@@ -6681,219 +6681,30 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
         raise HTTPException(status_code=404, detail="OLT not found")
 
     try:
-        # Get current traffic counters from SNMP
-        loop = asyncio.get_event_loop()
-        current_counters = await loop.run_in_executor(
-            thread_executor,
-            get_traffic_counters_snmp,
-            olt.ip_address,
-            "public"
-        )
-
-        if not current_counters:
-            return {"olt_id": olt_id, "traffic": [], "message": "No traffic data available"}
-
+        # Serve the CACHED per-ONU rates that the background poll cycle maintains
+        # (updated every ~30s), instead of doing a slow synchronous SNMP re-poll
+        # on every request (which hung 30s+). Same data the live WebSocket serves.
         current_time = datetime.utcnow()
-
-        # Get Mikrotik traffic rates if configured
-        mk_rates = {}
-        if getattr(olt, 'mk_enabled', False) and getattr(olt, 'mk_ip', None):
-            try:
-                from mikrotik_traffic import get_mikrotik_traffic
-                onu_db_map = {}
-                for onu in db.query(ONU).filter(ONU.olt_id == olt_id).all():
-                    onu_db_map[(onu.pon_port, onu.onu_id)] = onu.mac_address
-                mk_rates = await loop.run_in_executor(
-                    thread_executor,
-                    lambda: get_mikrotik_traffic(
-                        mk_ip=olt.mk_ip,
-                        mk_user=olt.mk_username or 'admin',
-                        mk_pass=olt.mk_password or '',
-                        mk_port=olt.mk_port or 8728,
-                        olt_ip=olt.ip_address,
-                        snmp_community=olt.snmp_community or 'public',
-                        onu_db_map=onu_db_map,
-                    )
-                )
-            except Exception as exc:
-                logger.warning(f"Mikrotik traffic failed: {exc}")
-
-        # Get previous snapshots for this OLT
-        prev_snapshots = {
-            s.mac_address: s
-            for s in db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt_id).all()
-        }
-
+        snapshots = db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt_id).all()
+        onus = {o.mac_address: o for o in db.query(ONU).filter(ONU.olt_id == olt_id).all()}
         traffic_data = []
-
-        for key, counters in current_counters.items():
-            rx_bytes = counters['rx_bytes']
-            tx_bytes = counters['tx_bytes']
-            pon_port = counters.get('pon_port', 0)
-            onu_id = counters.get('onu_id', 0)
-
-            # Handle both MAC and pon:onu key formats
-            if ':' in key and len(key) < 10:  # pon:onu format
-                onu_for_mac = db.query(ONU).filter(
-                    ONU.olt_id == olt_id,
-                    ONU.pon_port == pon_port,
-                    ONU.onu_id == onu_id
-                ).first()
-                mac = onu_for_mac.mac_address if onu_for_mac else None
-                if not mac:
-                    continue
-            else:
-                mac = key
-
-            # Calculate rate if we have previous data
-            rx_kbps = 0
-            tx_kbps = 0
-
-            if mac in prev_snapshots:
-                prev = prev_snapshots[mac]
-                time_diff = (current_time - prev.timestamp).total_seconds()
-
-                if time_diff > 0:
-                    rx_diff = rx_bytes - prev.rx_bytes
-                    tx_diff = tx_bytes - prev.tx_bytes
-
-                    # Counter reset — discard sample
-                    if rx_diff < 0 or tx_diff < 0:
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
-                        rx_diff = tx_diff = 0
-
-                    prev_rx = getattr(prev, 'last_rx_kbps', 0) or 0
-                    prev_tx = getattr(prev, 'last_tx_kbps', 0) or 0
-
-                    if time_diff > 300:
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
-                    elif rx_diff == 0 and tx_diff == 0:
-                        rx_kbps = prev_rx
-                        tx_kbps = prev_tx
-                    else:
-                        instant_rx = round((rx_diff * 8) / time_diff / 1000, 2)
-                        instant_tx = round((tx_diff * 8) / time_diff / 1000, 2)
-
-                        MAX_VALID_KBPS = 1_500_000  # 1.5 Gbps per ONU cap
-                        if instant_rx > MAX_VALID_KBPS or instant_tx > MAX_VALID_KBPS:
-                            instant_rx = 0
-                            instant_tx = 0
-
-                        # No EMA — use exact instant rate for max accuracy
-                        rx_kbps = round(instant_rx, 2)
-                        tx_kbps = round(instant_tx, 2)
-
-                        prev.last_rx_kbps = rx_kbps
-                        prev.last_tx_kbps = tx_kbps
-
-                        # Only update bytes+timestamp on actual counter change
-                        prev.rx_bytes = rx_bytes
-                        prev.tx_bytes = tx_bytes
-                        prev.timestamp = current_time
-            else:
-                # Create new snapshot
-                snapshot = TrafficSnapshot(
-                    olt_id=olt_id,
-                    mac_address=mac,
-                    rx_bytes=rx_bytes,
-                    tx_bytes=tx_bytes,
-                    timestamp=current_time
-                )
-                db.add(snapshot)
-
-            # Get ONU description from database
-            onu = db.query(ONU).filter(
-                ONU.olt_id == olt_id,
-                ONU.mac_address == mac
-            ).first()
-
+        for s in snapshots:
+            onu = onus.get(s.mac_address)
             onu_online = bool(onu and onu.is_online)
-
-            # Override with Mikrotik rates if available (more accurate) — but
-            # never for an offline ONU.
-            if onu_online and mac in mk_rates:
-                rx_kbps = mk_rates[mac]['rx_kbps']
-                tx_kbps = mk_rates[mac]['tx_kbps']
-
-            # Offline ONUs must never show live traffic.
-            if not onu_online:
-                rx_kbps = 0
-                tx_kbps = 0
-
+            rx = (s.last_rx_kbps or 0) if onu_online else 0   # offline ONUs read 0
+            tx = (s.last_tx_kbps or 0) if onu_online else 0
             traffic_data.append({
-                "mac_address": mac,
-                "pon_port": pon_port,
-                "onu_id": onu_id,
-                "onu_db_id": onu.id if onu else None,
+                "mac_address": s.mac_address,
+                "pon_port": onu.pon_port if onu else 0,
+                "onu_id": onu.onu_id if onu else 0,
                 "description": onu.description if onu else None,
                 "is_online": onu_online,
-                "rx_kbps": rx_kbps,
-                "tx_kbps": tx_kbps,
-                "rx_mbps": round(rx_kbps / 1000, 2),
-                "tx_mbps": round(tx_kbps / 1000, 2)
+                "rx_kbps": rx,
+                "tx_kbps": tx,
+                "rx_mbps": round(rx / 1000, 2),
+                "tx_mbps": round(tx / 1000, 2),
             })
-
-            # Store traffic history for ONU — write for every online ONU
-            # (including a genuine 0); skip offline so its graph stops.
-            if onu and onu.is_online:
-                onu_history = TrafficHistory(
-                    entity_type='onu',
-                    entity_id=str(onu.id) if onu else f"{olt_id}:{mac}",
-                    olt_id=olt_id,
-                    pon_port=pon_port,
-                    onu_db_id=onu.id if onu else None,
-                    rx_kbps=rx_kbps,
-                    tx_kbps=tx_kbps,
-                    timestamp=current_time
-                )
-                db.add(onu_history)
-
-        # Aggregate and store PON port traffic history
-        pon_traffic = {}
-        for t in traffic_data:
-            pon = t['pon_port']
-            if pon not in pon_traffic:
-                pon_traffic[pon] = {'rx_kbps': 0, 'tx_kbps': 0}
-            pon_traffic[pon]['rx_kbps'] += t['rx_kbps']
-            pon_traffic[pon]['tx_kbps'] += t['tx_kbps']
-
-        for pon, traffic in pon_traffic.items():
-            pon_history = TrafficHistory(
-                entity_type='pon',
-                entity_id=f"{olt_id}:{pon}",
-                olt_id=olt_id,
-                pon_port=pon,
-                onu_db_id=None,
-                rx_kbps=traffic['rx_kbps'],
-                tx_kbps=traffic['tx_kbps'],
-                timestamp=current_time
-            )
-            db.add(pon_history)
-
-        # Store OLT total traffic history
-        total_rx = sum(t['rx_kbps'] for t in traffic_data)
-        total_tx = sum(t['tx_kbps'] for t in traffic_data)
-        olt_history = TrafficHistory(
-            entity_type='olt',
-            entity_id=str(olt_id),
-            olt_id=olt_id,
-            pon_port=None,
-            onu_db_id=None,
-            rx_kbps=total_rx,
-            tx_kbps=total_tx,
-            timestamp=current_time
-        )
-        db.add(olt_history)
-
-        db.commit()
-
-        # Sort: online first (by traffic descending), then offline at bottom
         traffic_data.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
-
         return {
             "olt_id": olt_id,
             "olt_name": olt.name,
@@ -6901,10 +6712,9 @@ async def get_olt_traffic(olt_id: int, user: User = Depends(require_auth), db: S
             "onu_count": len(traffic_data),
             "traffic": traffic_data
         }
-
     except Exception as e:
-        logger.error(f"Traffic poll failed for OLT {olt_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Traffic poll failed: {str(e)}")
+        logger.error(f"Traffic read failed for OLT {olt_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Traffic read failed: {str(e)}")
 
 
 @app.get("/api/traffic/all")
@@ -6925,127 +6735,32 @@ async def get_all_traffic(user: User = Depends(require_auth), db: Session = Depe
     all_traffic = []
     current_time = datetime.utcnow()
 
-    for olt in olts:
-        try:
-            # Get current traffic counters from SNMP
-            loop = asyncio.get_event_loop()
-            current_counters = await loop.run_in_executor(
-                thread_executor,
-                get_traffic_counters_snmp,
-                olt.ip_address,
-                "public"
-            )
-
-            if not current_counters:
-                continue
-
-            # Get previous snapshots for this OLT
-            prev_snapshots = {
-                s.mac_address: s
-                for s in db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt.id).all()
-            }
-
-            for key, counters in current_counters.items():
-                rx_bytes = counters['rx_bytes']
-                tx_bytes = counters['tx_bytes']
-                pon_port = counters.get('pon_port', 0)
-                onu_id = counters.get('onu_id', 0)
-
-                # Handle both MAC and pon:onu key formats
-                if ':' in key and len(key) < 10:  # pon:onu format
-                    onu_for_mac = db.query(ONU).filter(
-                        ONU.olt_id == olt.id,
-                        ONU.pon_port == pon_port,
-                        ONU.onu_id == onu_id
-                    ).first()
-                    mac = onu_for_mac.mac_address if onu_for_mac else None
-                    if not mac:
-                        continue
-                else:
-                    mac = key
-
-                rx_kbps = 0
-                tx_kbps = 0
-
-                if mac in prev_snapshots:
-                    prev = prev_snapshots[mac]
-                    time_diff = (current_time - prev.timestamp).total_seconds()
-
-                    if time_diff > 0:
-                        rx_diff = rx_bytes - prev.rx_bytes
-                        tx_diff = tx_bytes - prev.tx_bytes
-
-                        # Counter reset (OLT reboot) — discard this sample
-                        if rx_diff < 0 or tx_diff < 0:
-                            prev.rx_bytes = rx_bytes
-                            prev.tx_bytes = tx_bytes
-                            prev.timestamp = current_time
-                            rx_diff = 0
-                            tx_diff = 0
-
-                        if time_diff > 300:
-                            prev.rx_bytes = rx_bytes
-                            prev.tx_bytes = tx_bytes
-                            prev.timestamp = current_time
-                        elif rx_diff == 0 and tx_diff == 0:
-                            rx_kbps = getattr(prev, 'last_rx_kbps', 0) or 0
-                            tx_kbps = getattr(prev, 'last_tx_kbps', 0) or 0
-                        else:
-                            rx_kbps = round((rx_diff * 8) / time_diff / 1000, 2)
-                            tx_kbps = round((tx_diff * 8) / time_diff / 1000, 2)
-
-                            MAX_VALID_KBPS = 1_500_000  # 1.5 Gbps per ONU
-                            if rx_kbps > MAX_VALID_KBPS or tx_kbps > MAX_VALID_KBPS:
-                                # Implausible spike -> hold previous, don't dip to 0
-                                rx_kbps = getattr(prev, 'last_rx_kbps', 0) or 0
-                                tx_kbps = getattr(prev, 'last_tx_kbps', 0) or 0
-
-                            # Persist computed rate; only advance bytes+timestamp
-                            # on actual counter change (keeps the rate window intact)
-                            prev.last_rx_kbps = rx_kbps
-                            prev.last_tx_kbps = tx_kbps
-                            prev.rx_bytes = rx_bytes
-                            prev.tx_bytes = tx_bytes
-                            prev.timestamp = current_time
-                else:
-                    snapshot = TrafficSnapshot(
-                        olt_id=olt.id,
-                        mac_address=mac,
-                        rx_bytes=rx_bytes,
-                        tx_bytes=tx_bytes,
-                        timestamp=current_time
-                    )
-                    db.add(snapshot)
-
-                onu = db.query(ONU).filter(
-                    ONU.olt_id == olt.id,
-                    ONU.mac_address == mac
-                ).first()
-
-                # Offline ONUs must never show live traffic (stale snapshot / MAC reuse).
-                if not (onu and onu.is_online):
-                    rx_kbps = 0
-                    tx_kbps = 0
-
-                all_traffic.append({
-                    "olt_id": olt.id,
-                    "olt_name": olt.name,
-                    "mac_address": mac,
-                    "pon_port": pon_port,
-                    "onu_id": onu_id,
-                    "description": onu.description if onu else None,
-                    "is_online": onu.is_online if onu else False,
-                    "rx_kbps": rx_kbps,
-                    "tx_kbps": tx_kbps,
-                    "rx_mbps": round(rx_kbps / 1000, 2),
-                    "tx_mbps": round(tx_kbps / 1000, 2)
-                })
-
-        except Exception as e:
-            logger.warning(f"Traffic poll failed for OLT {olt.name}: {e}")
-            continue
-
-    db.commit()
+    # Serve the CACHED per-ONU rates the background poll maintains (updated every
+    # ~30s) instead of live-polling every OLT synchronously (which hung 30s+).
+    olt_ids = [o.id for o in olts]
+    olt_names = {o.id: o.name for o in olts}
+    if olt_ids:
+        snaps = db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id.in_(olt_ids)).all()
+        onus = {(o.olt_id, o.mac_address): o
+                for o in db.query(ONU).filter(ONU.olt_id.in_(olt_ids)).all()}
+        for sn in snaps:
+            onu = onus.get((sn.olt_id, sn.mac_address))
+            onu_online = bool(onu and onu.is_online)
+            rx = (sn.last_rx_kbps or 0) if onu_online else 0   # offline ONUs read 0
+            tx = (sn.last_tx_kbps or 0) if onu_online else 0
+            all_traffic.append({
+                "olt_id": sn.olt_id,
+                "olt_name": olt_names.get(sn.olt_id, ""),
+                "mac_address": sn.mac_address,
+                "pon_port": onu.pon_port if onu else 0,
+                "onu_id": onu.onu_id if onu else 0,
+                "description": onu.description if onu else None,
+                "is_online": onu_online,
+                "rx_kbps": rx,
+                "tx_kbps": tx,
+                "rx_mbps": round(rx / 1000, 2),
+                "tx_mbps": round(tx / 1000, 2),
+            })
 
     # Sort: online first (by traffic descending), then offline at bottom
     all_traffic.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
