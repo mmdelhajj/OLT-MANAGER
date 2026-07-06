@@ -3769,8 +3769,11 @@ async def upload_onu_image(onu_id: int, file: UploadFile = File(...),
     if len(contents) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Maximum size is 5MB")
 
-    # Generate unique filename
-    ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+    # Generate unique filename. Whitelist the extension from the (untrusted)
+    # client filename so it can't smuggle path separators into filepath.
+    ext = (file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else 'jpg')
+    if ext not in ('jpg', 'jpeg', 'png', 'gif', 'webp'):
+        ext = 'jpg'
     filename = f"onu_{onu_id}_{uuid.uuid4().hex[:8]}.{ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
 
@@ -4662,7 +4665,7 @@ async def install_update(current_user: User = Depends(require_admin)):
 
         # Extract the tarball
         with tarfile.open(package_path, 'r:gz') as tar:
-            tar.extractall(extract_dir)
+            _safe_extract_tar(tar, extract_dir)
 
         update_status["stage"] = "backing_up"
         update_status["progress"] = 70
@@ -4823,7 +4826,7 @@ async def install_update(current_user: User = Depends(require_admin)):
                 frontend_extract.mkdir()
 
                 with tarfile.open(frontend_path, 'r:gz') as tar:
-                    tar.extractall(frontend_extract)
+                    _safe_extract_tar(tar, frontend_extract)
 
                 # Install to nginx folder
                 nginx_html = Path("/var/www/html")
@@ -8703,6 +8706,34 @@ def decrypt_backup(encrypted_data: bytes) -> bytes:
     return padded_data[:-pad_len]
 
 
+def _is_within_dir(base: Path, target: Path) -> bool:
+    """True if `target` resolves to a path inside `base` (zip/tar-slip guard)."""
+    try:
+        base_r = base.resolve()
+        target_r = target.resolve()
+        return base_r == target_r or base_r in target_r.parents
+    except Exception:
+        return False
+
+
+def _safe_extract_zip(zf, dest) -> None:
+    """extractall() but reject members that escape `dest` (zip-slip)."""
+    dest = Path(dest)
+    for name in zf.namelist():
+        if not _is_within_dir(dest, dest / name):
+            raise ValueError(f"Unsafe path in archive (zip-slip): {name!r}")
+    zf.extractall(dest)
+
+
+def _safe_extract_tar(tar, dest) -> None:
+    """extractall() but reject members that escape `dest` (tar-slip)."""
+    dest = Path(dest)
+    for member in tar.getmembers():
+        if not _is_within_dir(dest, dest / member.name):
+            raise ValueError(f"Unsafe path in archive (tar-slip): {member.name!r}")
+    tar.extractall(dest)
+
+
 def create_system_backup_file(db: Session, include_uploads: bool = False) -> tuple:
     """Create a full system backup file (encrypted)"""
     import zipfile
@@ -8997,14 +9028,14 @@ async def restore_system_backup(
 
             # Extract from decrypted zip
             with zipfile.ZipFile(temp_zip, 'r') as zipf:
-                zipf.extractall(temp_dir)
+                _safe_extract_zip(zipf, temp_dir)
 
             # Remove temp zip
             temp_zip.unlink()
         else:
             # Old unencrypted backup - extract directly
             with zipfile.ZipFile(backup_path, 'r') as zipf:
-                zipf.extractall(temp_dir)
+                _safe_extract_zip(zipf, temp_dir)
 
         # Restore database - find the actual database location
         db_backup = temp_dir / "database" / "olt_manager.db"
@@ -9307,12 +9338,19 @@ def calculate_next_backup_time(settings: BackupSettings) -> datetime:
             days_ahead += 7
         next_time += timedelta(days=days_ahead)
     elif settings.backup_frequency == 'monthly':
-        next_time = now.replace(day=settings.backup_day or 1, hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+        import calendar
+        day = settings.backup_day or 1
+        # Clamp the requested day to the month's last day (e.g. 31 -> 30/28),
+        # else datetime.replace(day=31) throws in short months and auto-backup
+        # silently stalls forever.
+        last_day = calendar.monthrange(now.year, now.month)[1]
+        next_time = now.replace(day=min(day, last_day), hour=backup_hour,
+                                minute=backup_minute, second=0, microsecond=0)
         if next_time <= now:
-            if now.month == 12:
-                next_time = next_time.replace(year=now.year + 1, month=1)
-            else:
-                next_time = next_time.replace(month=now.month + 1)
+            year = now.year + 1 if now.month == 12 else now.year
+            month = 1 if now.month == 12 else now.month + 1
+            last_day = calendar.monthrange(year, month)[1]
+            next_time = next_time.replace(year=year, month=month, day=min(day, last_day))
     else:
         next_time = now + timedelta(days=1)
 
@@ -9391,15 +9429,21 @@ async def upload_backup_file(
     backup_dir = Path("/opt/olt-manager/backups")
     backup_dir.mkdir(exist_ok=True)
 
+    # Never trust the client filename for the path — strip any directory
+    # components so "../../etc/x.zip" can't escape the backups dir.
+    safe_name = Path(file.filename).name
+    if not safe_name or not safe_name.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Invalid backup filename")
+
     # Save uploaded file
-    filepath = backup_dir / file.filename
+    filepath = backup_dir / safe_name
     with open(filepath, 'wb') as f:
         content = await file.read()
         f.write(content)
 
     # Create backup record
     backup = SystemBackup(
-        filename=file.filename,
+        filename=safe_name,
         file_size=len(content),
         backup_type='uploaded',
         storage_type='local',
@@ -10259,8 +10303,13 @@ async def serve_frontend(full_path: str):
     # Try to serve the exact file first (for assets like favicon, manifest, etc.)
     if full_path:
         file_path = os.path.join(STATIC_DIR, full_path)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
+        # Contain the resolved path inside STATIC_DIR so "../.." can't read
+        # arbitrary files (e.g. /etc/passwd) via the SPA catch-all route.
+        real_static = os.path.realpath(STATIC_DIR)
+        real_target = os.path.realpath(file_path)
+        if (real_target == real_static or real_target.startswith(real_static + os.sep)) \
+                and os.path.isfile(real_target):
+            return FileResponse(real_target)
 
     # Otherwise serve index.html for SPA routing
     if os.path.exists(index_file):
