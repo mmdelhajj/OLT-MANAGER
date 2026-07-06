@@ -1931,7 +1931,7 @@ async def saas_fallback_polling_loop(db_session_factory):
                                     for onu_data in poll_result.onus:
                                         key = (onu_data.pon_port, onu_data.onu_id)
                                         status_key = f"{onu_data.pon_port}:{onu_data.onu_id}"
-                                        is_online = poll_result.status_map.get(status_key, True)
+                                        is_online = poll_result.status_map.get(status_key, False)
 
                                         # Resolve optical data (same logic as main poll)
                                         rx_power = onu_data.rx_power
@@ -3070,13 +3070,17 @@ async def poll_single_olt(olt_id: int, user: User = Depends(require_auth), db: S
         # If SNMP returned 0 ONUs, it's likely a timeout/error, not all ONUs deleted.
         onus_to_delete = []
         if len(onus_data) > 0:
+            # SNMP over UDP is lossy: a PARTIAL response (some ONUs timed out)
+            # must not trigger deletion of the absent-but-live ONUs. Only trust
+            # "absence == removed" when the poll clearly saw most known ONUs.
+            poll_looks_complete = len(seen_keys) >= max(3, int(0.5 * len(existing_onus)))
             for key, onu in existing_onus.items():
                 if key not in seen_keys:
                     onu.missing_polls += 1
                     onu.updated_at = datetime.utcnow()
 
-                    if onu.missing_polls >= 3:
-                        # ONU not seen for 3 polls - delete it
+                    if onu.missing_polls >= 3 and poll_looks_complete:
+                        # ONU not seen for 3 polls of a complete-looking poll - delete it
                         onus_to_delete.append(onu)
                         print(f"Auto-deleting ONU {onu.mac_address} (PON {onu.pon_port}/{onu.onu_id}) - not found in {onu.missing_polls} consecutive polls")
                     elif onu.is_online:
