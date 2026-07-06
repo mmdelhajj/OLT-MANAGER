@@ -114,6 +114,7 @@ class OLTConnector:
         if not self.client:
             raise ConnectionError("Not connected to OLT")
 
+        channel = None
         try:
             # Use invoke_shell for interactive session (VSOL OLTs often need this)
             channel = self.client.invoke_shell(width=200, height=1000)
@@ -186,6 +187,14 @@ class OLTConnector:
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             raise RuntimeError(f"Command failed: {e}")
+        finally:
+            # Release the interactive channel even on error/pagination timeout,
+            # so we don't leak channels within a live SSH session.
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
 
     def get_running_config(self) -> str:
         """Get running config from OLT"""
@@ -239,8 +248,15 @@ class OLTConnector:
             channel.send(self.password + "\n")
             drain()
 
-            # Send all config commands rapidly
-            safe_desc = description.replace(" ", "-").replace("'", "").replace('"', '')[:32] if description else ""
+            # Send all config commands rapidly.
+            # Strip newlines/CR and other control chars FIRST — a description
+            # containing "\n" would otherwise inject arbitrary CLI commands into
+            # the OLT's config/enable session.
+            if description:
+                _cleaned = "".join(ch for ch in description if ch.isprintable())
+                safe_desc = _cleaned.replace(" ", "-").replace("'", "").replace('"', '')[:32]
+            else:
+                safe_desc = ""
 
             # Enter config mode and interface
             channel.send("configure terminal\n")
@@ -512,6 +528,7 @@ def get_opm_data_via_ssh(ip: str, username: str, password: str, port: int = 22) 
 
     opm_data: Dict[str, Dict[str, float]] = {}
 
+    client = None
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(OLTHostKeyPolicy())
@@ -653,6 +670,14 @@ def get_opm_data_via_ssh(ip: str, username: str, password: str, port: int = 22) 
     except Exception as e:
         logger.error(f"SSH OPM poll failed for {ip}: {e}")
         return {}
+    finally:
+        # Always release the SSH session — VSOL OLTs cap concurrent sessions
+        # very low, so leaking one per failed poll can lock out the OLT.
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def poll_olt_snmp(ip: str, community: str = "public") -> Tuple[List[ONUData], Dict[str, bool]]:

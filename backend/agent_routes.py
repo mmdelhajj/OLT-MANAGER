@@ -306,7 +306,16 @@ def ingest(
     tenant_id = agent_key.tenant_id
     workspace_id = agent_key.workspace_id
     onus_processed = 0
+    # Use the agent's measured timestamp so history points land at measurement
+    # time (not push-receipt time, which skews the graph x-axis on delays/retries).
+    # Clamp to a sane window vs the server clock to guard a badly-skewed agent.
     current_time = datetime.utcnow()
+    try:
+        agent_ts = getattr(payload, "timestamp", None)
+        if agent_ts is not None and abs((current_time - agent_ts).total_seconds()) <= 3600:
+            current_time = agent_ts
+    except Exception:
+        pass
 
     for olt_data in payload.olts:
         logger.info(f"[ingest] OLT {olt_data.ip_address} model={olt_data.model} "

@@ -15,10 +15,12 @@ import logging
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 import yaml
 
 # The agent reuses backend modules. Make sure they're importable.
@@ -338,11 +340,20 @@ def main():
     if not olts:
         logger.warning("No OLTs configured — waiting for OLTs to be added in dashboard...")
 
+    # Never push faster than the server's ingest rate limit (INGEST_MIN_INTERVAL
+    # = 10s) or every push 429s and is dropped. Keep a small margin.
+    MIN_PUSH_INTERVAL = 12
+    poll_interval = max(poll_interval, MIN_PUSH_INTERVAL)
+
     logger.info(f"Poll every {poll_interval}s, optical every {optical_every} cycles, "
                 f"{len(olts)} OLT(s)")
 
     cycle_count = 0
     CONFIG_REFRESH_CYCLES = 10  # re-fetch OLT list every N cycles
+    # Buffer failed pushes and retry them on later cycles (bounded so it can't
+    # grow without limit — oldest is dropped when full).
+    PENDING_MAX = 30
+    pending: deque = deque(maxlen=PENDING_MAX)
 
     while True:
         cycle_start = time.time()
@@ -356,7 +367,7 @@ def main():
                     if len(remote_olts) != len(olts):
                         logger.info(f"OLT list updated: {len(olts)} -> {len(remote_olts)} OLT(s)")
                     olts = remote_olts
-                    poll_interval = int(remote_cfg.get("poll_interval", poll_interval))
+                    poll_interval = max(int(remote_cfg.get("poll_interval", poll_interval)), MIN_PUSH_INTERVAL)
                     optical_every = int(remote_cfg.get("optical_every", optical_every))
             except Exception as e:
                 logger.warning(f"Config refresh failed: {e}")
@@ -385,12 +396,29 @@ def main():
                 agent_version=__version__,
                 olts=olt_payloads,
             )
+            if len(pending) == pending.maxlen:
+                logger.warning(f"Push buffer full ({pending.maxlen}); dropping oldest cycle")
+            pending.append(payload.dict())
+
+        # Flush the buffer oldest-first. A failed push stays queued and is
+        # retried next cycle instead of being lost (network blip / 5xx / 429).
+        while pending:
+            item = pending[0]
             try:
-                resp = push_payload(saas_url, api_key, payload.dict())
-                onus_processed = resp.get("onus_processed", 0)
-                logger.info(f"Push OK — {onus_processed} ONUs processed by SaaS")
+                resp = push_payload(saas_url, api_key, item)
+                pending.popleft()
+                logger.info(f"Push OK — {resp.get('onus_processed', 0)} ONUs processed "
+                            f"({len(pending)} cycle(s) still queued)")
+            except requests.HTTPError as e:
+                status = getattr(e.response, "status_code", None)
+                if status == 429:
+                    logger.warning("Rate limited (429) — retrying buffered payloads next cycle")
+                else:
+                    logger.error(f"Push failed (HTTP {status}) — buffered, {len(pending)} queued")
+                break
             except Exception as e:
-                logger.error(f"Push failed: {e}")
+                logger.error(f"Push failed: {e} — buffered, {len(pending)} queued")
+                break
 
         cycle_count += 1
         elapsed = time.time() - cycle_start
