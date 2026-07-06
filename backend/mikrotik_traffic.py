@@ -286,9 +286,13 @@ def get_mikrotik_traffic(
         if onu_mac:
             if onu_mac not in result:
                 result[onu_mac] = {"rx_kbps": 0, "tx_kbps": 0}
-            # rx = download, tx = upload (customer perspective)
-            result[onu_mac]["rx_kbps"] += rates["down"]
-            result[onu_mac]["tx_kbps"] += rates["up"]
+            # Match the SNMP path's convention so both traffic sources agree
+            # (the frontend compensates for it): rx_kbps carries customer UPLOAD
+            # and tx_kbps carries customer DOWNLOAD. Previously this overlay used
+            # the opposite mapping, so Mikrotik-enabled OLTs displayed download
+            # and upload swapped versus SNMP-only OLTs.
+            result[onu_mac]["rx_kbps"] += rates["up"]
+            result[onu_mac]["tx_kbps"] += rates["down"]
 
     logger.info(
         "Mikrotik traffic for %s: %d PPPoE sessions, %d with rates → %d ONUs mapped (FDB: %d)",
