@@ -943,7 +943,7 @@ async def collect_traffic_history(olt, db):
             thread_executor,
             get_traffic_counters_snmp,
             olt.ip_address,
-            "public"
+            olt.snmp_community or "public"
         )
 
         if not current_counters:
@@ -1105,7 +1105,7 @@ async def collect_traffic_history(olt, db):
             thread_executor,
             poll_port_traffic_snmp,
             olt.ip_address,
-            "public"
+            olt.snmp_community or "public"
         )
 
         if port_counters:
@@ -6830,11 +6830,12 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
             try:
                 # Get current traffic counters from SNMP with keep-alive pings
                 loop = asyncio.get_event_loop()
+                olt_community = db.query(OLT.snmp_community).filter(OLT.id == olt_id).scalar() or "public"
                 snmp_task = loop.run_in_executor(
                     thread_executor,
                     get_traffic_counters_snmp,
                     olt_ip,
-                    "public"
+                    olt_community
                 )
 
                 # Send keep-alive pings every 5 seconds while SNMP poll runs
