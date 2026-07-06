@@ -1851,6 +1851,9 @@ async def polling_loop(db_session_factory):
             # Check for auto backup
             await check_and_run_auto_backup(db_session_factory)
 
+            # Run any due scheduled tasks (backups, ONU reboots, …)
+            await run_due_scheduled_tasks(db_session_factory)
+
             # Run cleanup periodically (every CLEANUP_INTERVAL_CYCLES polls)
             cleanup_counter += 1
             if cleanup_counter >= CLEANUP_INTERVAL_CYCLES:
@@ -9492,6 +9495,104 @@ async def upload_backup_file(
 
 # ============ FEATURE 7: Scheduled Tasks ============
 
+def compute_task_next_run(schedule_type, schedule_time, schedule_day, from_time=None):
+    """Next fire time for a ScheduledTask (naive local, matches next_run column)."""
+    import calendar
+    now = from_time or datetime.now()
+    try:
+        hh, mm = (int(x) for x in (schedule_time or "00:00").split(":")[:2])
+    except Exception:
+        hh, mm = 0, 0
+    st = (schedule_type or "daily").lower()
+    if st == "hourly":
+        nt = now.replace(minute=mm, second=0, microsecond=0)
+        if nt <= now:
+            nt += timedelta(hours=1)
+    elif st == "weekly":
+        nt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        days_ahead = ((schedule_day or 0) - now.weekday()) % 7
+        if days_ahead == 0 and nt <= now:
+            days_ahead = 7
+        nt += timedelta(days=days_ahead)
+    elif st == "monthly":
+        day = schedule_day or 1
+        last = calendar.monthrange(now.year, now.month)[1]
+        nt = now.replace(day=min(day, last), hour=hh, minute=mm, second=0, microsecond=0)
+        if nt <= now:
+            y = now.year + 1 if now.month == 12 else now.year
+            m = 1 if now.month == 12 else now.month + 1
+            last = calendar.monthrange(y, m)[1]
+            nt = nt.replace(year=y, month=m, day=min(day, last))
+    else:  # daily
+        nt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if nt <= now:
+            nt += timedelta(days=1)
+    return nt
+
+
+def _execute_scheduled_task(task, db) -> str:
+    """Run a scheduled task's action. Returns a short status string."""
+    tt = (task.task_type or "").lower()
+    if tt in ("backup", "system_backup"):
+        create_system_backup_file(db)
+        return "system backup created"
+    if tt in ("reboot_onu",) and task.target_id:
+        onu = db.query(ONU).filter(ONU.id == task.target_id).first()
+        if not onu:
+            return f"ONU {task.target_id} not found"
+        olt = db.query(OLT).filter(OLT.id == onu.olt_id).first()
+        get_driver(olt).reboot_onu(onu.pon_port, onu.onu_id)
+        return f"rebooted ONU {onu.mac_address}"
+    if tt in ("reboot_olt",) and task.target_id:
+        olt = db.query(OLT).filter(OLT.id == task.target_id).first()
+        if not olt:
+            return f"OLT {task.target_id} not found"
+        # Reboot via the driver's OLT-reboot if available.
+        drv = get_driver(olt)
+        reboot = getattr(drv, "reboot_olt", None)
+        if callable(reboot):
+            reboot()
+            return f"rebooted OLT {olt.name}"
+        return "reboot_olt not supported by this driver"
+    return f"unsupported task_type '{task.task_type}' (skipped)"
+
+
+async def run_due_scheduled_tasks(db_session_factory):
+    """Dispatcher: run enabled tasks whose next_run has passed, then reschedule.
+
+    NOTE: uses an unscoped session (fine for the single-tenant/SQLite build); a
+    SaaS/Postgres deploy should iterate tenants like poll_all_tenants does.
+    """
+    db = db_session_factory()
+    try:
+        now = datetime.now()
+        tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).all()
+        changed = False
+        for t in tasks:
+            if t.next_run is None:
+                t.next_run = compute_task_next_run(t.schedule_type, t.schedule_time, t.schedule_day, now)
+                changed = True
+        if changed:
+            db.commit()
+
+        due = [t for t in tasks if t.next_run is not None and t.next_run <= now]
+        for t in due:
+            try:
+                result = _execute_scheduled_task(t, db)
+                logger.info(f"[scheduler] Ran '{t.name}' ({t.task_type}): {result}")
+            except Exception as e:
+                logger.error(f"[scheduler] Task '{t.name}' failed: {e}")
+                db.rollback()
+            t.last_run = now
+            t.next_run = compute_task_next_run(t.schedule_type, t.schedule_time, t.schedule_day, now)
+        if due:
+            db.commit()
+    except Exception as e:
+        logger.error(f"[scheduler] dispatcher error: {e}")
+    finally:
+        db.close()
+
+
 @app.get("/api/scheduled-tasks")
 def get_scheduled_tasks(
     db: Session = Depends(get_db),
@@ -9541,7 +9642,8 @@ def create_scheduled_task(
         schedule_type=schedule_type,
         schedule_time=schedule_time,
         schedule_day=schedule_day,
-        created_by=current_user.id
+        created_by=current_user.id,
+        next_run=compute_task_next_run(schedule_type, schedule_time, schedule_day),
     )
     db.add(task)
     db.commit()
