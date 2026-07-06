@@ -5759,12 +5759,10 @@ def get_settings(user: Optional[User] = Depends(get_current_user), db: Session =
 @app.put("/api/settings")
 def update_settings(
     data: dict,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Update settings (admin only)"""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
 
     allowed_keys = ["system_name", "page_name", "refresh_interval", "polling_interval", "whatsapp_enabled",
                     "whatsapp_api_url", "whatsapp_secret", "whatsapp_account", "whatsapp_recipients",
@@ -5869,12 +5867,10 @@ def get_alarm_settings(db: Session = Depends(get_db)):
 @app.put("/api/alarm-settings")
 def update_alarm_settings(
     data: dict,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Update alarm settings (admin only)"""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
 
     allowed_keys = ["new_onu_registration", "onu_offline", "onu_back_online",
                     "olt_offline", "olt_back_online", "weak_signal",
