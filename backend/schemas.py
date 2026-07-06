@@ -1,7 +1,7 @@
 """Pydantic schemas for API request/response"""
 from datetime import datetime
 from typing import Optional, List, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # OLT Schemas
@@ -251,6 +251,13 @@ class DiagramResponse(BaseModel):
     is_shared: bool
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("owner_id", mode="before")
+    @classmethod
+    def _coerce_owner_id(cls, v):
+        # Legacy single-tenant SQLite DBs may hold an integer owner_id (pre-UUID
+        # migration); coerce to str so the response doesn't 500.
+        return str(v) if v is not None else v
 
     class Config:
         from_attributes = True
