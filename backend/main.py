@@ -1382,23 +1382,30 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
 
                         existing = existing_by_key.get(key)
                         if existing is None:
-                            # Not at this (pon,onu) — but the same MAC may already
-                            # exist at another position (the ONU re-registered).
-                            # Move that row to the new position instead of creating
-                            # a duplicate.
+                            # Not at this (pon,onu) — the same MAC may already exist
+                            # at another position. Some OLTs list the SAME MAC at
+                            # several (pon,onu) at once (one real + stale "ghost"
+                            # entries), so ONLY move the row when this position is
+                            # genuinely ONLINE (a real re-registration). If the MAC
+                            # is already tracked and this position is offline, it's
+                            # a ghost — skip it entirely (don't move, don't dupe).
                             moved = existing_by_mac.get(onu_data.mac_address)
                             if moved is not None:
-                                old_key = (moved.pon_port, moved.onu_id)
-                                seen_keys.discard(old_key)
-                                existing_by_key.pop(old_key, None)
-                                moved.pon_port = onu_data.pon_port
-                                moved.onu_id = onu_data.onu_id
-                                existing_by_key[key] = moved
-                                existing = moved
-                                logger.info(
-                                    f"ONU {onu_data.mac_address} moved "
-                                    f"{old_key} -> {key} (re-registered) on {olt.name}"
-                                )
+                                if is_online:
+                                    old_key = (moved.pon_port, moved.onu_id)
+                                    seen_keys.discard(old_key)
+                                    existing_by_key.pop(old_key, None)
+                                    moved.pon_port = onu_data.pon_port
+                                    moved.onu_id = onu_data.onu_id
+                                    existing_by_key[key] = moved
+                                    existing = moved
+                                    logger.info(
+                                        f"ONU {onu_data.mac_address} moved "
+                                        f"{old_key} -> {key} (re-registered) on {olt.name}"
+                                    )
+                                else:
+                                    # Ghost/stale offline position for a known MAC.
+                                    continue
 
                         if existing is not None:
                             # Update existing ONU
