@@ -105,6 +105,9 @@ fallback_task: Optional[asyncio.Task] = None
 # Format: {onu_id: datetime_of_last_alert}
 # Alerts are suppressed for 1 hour after being sent
 weak_signal_alert_cache: Dict[int, datetime] = {}
+# Per-OLT cooldown for high-temperature alerts (else a hot OLT spams every poll).
+high_temp_alert_cache: Dict[int, datetime] = {}
+HIGH_TEMP_COOLDOWN_S = 3600  # 1 hour
 WEAK_SIGNAL_ALERT_COOLDOWN_HOURS = 1  # Don't re-alert for the same ONU within this time
 
 # WebSocket connection manager for live traffic
@@ -1274,7 +1277,15 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                                 alarm_settings = get_alarm_settings(db)
                                 temp_threshold = float(alarm_settings.get("high_temperature_threshold", 60))
                                 if olt.temperature > temp_threshold:
-                                    send_high_temperature_notification(db, olt, olt.temperature)
+                                    _now = get_current_time_in_timezone(db).replace(tzinfo=None)
+                                    _last = high_temp_alert_cache.get(olt.id)
+                                    if _last is None or (_now - _last).total_seconds() >= HIGH_TEMP_COOLDOWN_S:
+                                        send_high_temperature_notification(db, olt, olt.temperature)
+                                        high_temp_alert_cache[olt.id] = _now
+                                elif olt.id in high_temp_alert_cache:
+                                    # Recovered below threshold — reset so the next
+                                    # spike alerts immediately.
+                                    del high_temp_alert_cache[olt.id]
 
                             # Save PON port transceiver diagnostics to OLTPort table
                             pon_ports_data = health_data.get('pon_ports', [])
@@ -1327,6 +1338,10 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                     # Collect status changes for batched notification
                     onus_went_online = []
                     onus_went_offline = []
+                    new_onus = []
+                    # First-ever poll of this OLT: every ONU looks "new" but this
+                    # is just initial discovery — don't fire a per-ONU storm.
+                    is_first_discovery = len(existing_by_key) == 0
 
                     # Check license ONU limit
                     from license_manager import license_manager
@@ -1534,8 +1549,10 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                             existing_by_mac[onu_data.mac_address] = new_onu
                             current_onu_count += 1  # Track added ONUs
                             onu_limit_reached = current_onu_count >= max_onus
-                            # Send new ONU registration notification
-                            send_new_onu_notification(db, new_onu, olt.name)
+                            # Collect for a bounded, off-loop notification after
+                            # the ONU loop (was a blocking POST per ONU = storm).
+                            if not is_first_discovery:
+                                new_onus.append(new_onu)
 
                     # Mark ONUs not seen in SNMP as offline (they may be powered off)
                     for key, onu in existing_by_key.items():
@@ -1564,6 +1581,21 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
 
                     # Send batched notification for all status changes
                     send_whatsapp_notification_batch(db, onus_went_online, onus_went_offline, olt.name)
+
+                    # New-ONU notifications: send after the loop, and cap to avoid
+                    # a storm on a mass (re)registration. Beyond the cap, log only.
+                    if new_onus:
+                        NEW_ONU_NOTIFY_CAP = 10
+                        for _n in new_onus[:NEW_ONU_NOTIFY_CAP]:
+                            try:
+                                send_new_onu_notification(db, _n, olt.name)
+                            except Exception as _e:
+                                logger.warning(f"new-ONU notify failed: {_e}")
+                        if len(new_onus) > NEW_ONU_NOTIFY_CAP:
+                            logger.info(
+                                f"{len(new_onus)} new ONUs on {olt.name}; notified first "
+                                f"{NEW_ONU_NOTIFY_CAP}, suppressed the rest to avoid a storm"
+                            )
 
                     # Check for weak signal alarms (Danger Zone detection)
                     alarm_settings = get_alarm_settings(db)
