@@ -204,7 +204,7 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
         alarm_settings = get_alarm_settings(db)
 
         # Check quiet hours
-        if is_in_quiet_hours(alarm_settings):
+        if is_in_quiet_hours(alarm_settings, db):
             logger.info("Skipping ONU status notifications - quiet hours")
             return
 
@@ -339,7 +339,7 @@ def send_whatsapp_notification_batch(db: Session, online_onus: list, offline_onu
                     timeout=30
                 )
 
-                if response.status_code == 200:
+                if _wa_ok(response):
                     success_count += 1
                     logger.info(f"WhatsApp notification sent to {name} ({phone})")
                 else:
@@ -392,13 +392,38 @@ def is_alarm_enabled(alarm_settings: dict, alarm_type: str) -> bool:
     return str(value).lower() == "true"
 
 
-def is_in_quiet_hours(alarm_settings: dict) -> bool:
+def _wa_ok(response) -> bool:
+    """Best-effort delivery check for the WhatsApp gateway.
+
+    Many such gateways return HTTP 200 with a JSON error body, so a bare
+    status_code==200 counts failures as successes. Treat as failure only when
+    the body clearly signals an error (avoids false negatives on unknown shapes).
+    """
+    if response.status_code != 200:
+        return False
+    try:
+        j = response.json()
+        if isinstance(j, dict):
+            st = str(j.get("status", j.get("result", j.get("success", "")))).strip().lower()
+            if st in ("error", "failed", "failure", "false", "0"):
+                return False
+            if j.get("error") or j.get("errors"):
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def is_in_quiet_hours(alarm_settings: dict, db: Session = None) -> bool:
     """Check if current time is within quiet hours"""
     if not is_alarm_enabled(alarm_settings, "quiet_hours_enabled"):
         return False
 
     try:
-        now = datetime.now().time()
+        # Use the configured (tenant) timezone, not naive server-local time,
+        # so the quiet window lands on the right wall-clock hours.
+        now = (get_current_time_in_timezone(db).time() if db is not None
+               else datetime.now().time())
         start_str = alarm_settings.get("quiet_hours_start", "22:00")
         end_str = alarm_settings.get("quiet_hours_end", "07:00")
 
@@ -490,7 +515,7 @@ def send_new_onu_notification(db: Session, onu, olt_name: str):
             return
 
         # Check quiet hours
-        if is_in_quiet_hours(alarm_settings):
+        if is_in_quiet_hours(alarm_settings, db):
             logger.debug("Skipping new ONU notification - quiet hours")
             return
 
@@ -562,7 +587,7 @@ def send_new_onu_notification(db: Session, onu, olt_name: str):
                     },
                     timeout=10
                 )
-                if response.status_code == 200:
+                if _wa_ok(response):
                     logger.info(f"New ONU notification sent to {phone}")
                 else:
                     logger.warning(f"Failed to send new ONU notification to {phone}: {response.text}")
@@ -585,7 +610,7 @@ def send_olt_status_notification(db: Session, olt, is_online: bool):
             return
 
         # Check quiet hours
-        if is_in_quiet_hours(alarm_settings):
+        if is_in_quiet_hours(alarm_settings, db):
             logger.debug("Skipping OLT status notification - quiet hours")
             return
 
@@ -640,7 +665,7 @@ def send_olt_status_notification(db: Session, olt, is_online: bool):
                     },
                     timeout=10
                 )
-                if response.status_code == 200:
+                if _wa_ok(response):
                     logger.info(f"OLT status notification sent to {phone}")
                 else:
                     logger.warning(f"Failed to send OLT status notification to {phone}: {response.text}")
@@ -667,7 +692,7 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
             return
 
         # Check quiet hours
-        if is_in_quiet_hours(alarm_settings):
+        if is_in_quiet_hours(alarm_settings, db):
             logger.debug("Skipping weak signal notification - quiet hours")
             return
 
@@ -822,7 +847,7 @@ def send_weak_signal_notification(db: Session, onus_with_weak_signal: list, olt_
                         },
                         timeout=10
                     )
-                    if response.status_code == 200:
+                    if _wa_ok(response):
                         logger.info(f"Weak signal notification sent to {phone} for ONU {onu.mac_address}")
                     else:
                         logger.warning(f"Failed to send weak signal notification to {phone}: {response.text}")
@@ -847,7 +872,7 @@ def send_high_temperature_notification(db: Session, olt, temperature: float):
             return
 
         # Check quiet hours
-        if is_in_quiet_hours(alarm_settings):
+        if is_in_quiet_hours(alarm_settings, db):
             logger.debug("Skipping high temperature notification - quiet hours")
             return
 
@@ -899,7 +924,7 @@ def send_high_temperature_notification(db: Session, olt, temperature: float):
                     },
                     timeout=10
                 )
-                if response.status_code == 200:
+                if _wa_ok(response):
                     logger.info(f"High temperature notification sent to {phone}")
                 else:
                     logger.warning(f"Failed to send high temperature notification to {phone}: {response.text}")
