@@ -7163,88 +7163,40 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
                     rx_kbps = 0
                     tx_kbps = 0
 
+                    # READ-ONLY: the background poll cycle (collect_traffic_history)
+                    # is the sole writer of TrafficSnapshot rows. This WS loop only
+                    # COMPUTES a live display rate from the latest snapshot and never
+                    # writes it back — this removes the dual-writer race that caused
+                    # jittery/oscillating rates when a dashboard was open during a poll.
                     if mac in prev_snapshots:
                         prev = prev_snapshots[mac]
-                        time_diff = (current_time - prev.timestamp).total_seconds()
-
-                        # Get previous smoothed values
                         prev_rx = getattr(prev, 'last_rx_kbps', 0) or 0
                         prev_tx = getattr(prev, 'last_tx_kbps', 0) or 0
+                        time_diff = (current_time - prev.timestamp).total_seconds()
 
-                        if time_diff > 0:
+                        if time_diff <= 0 or time_diff > 300:
+                            # No usable window — show the poll's last known rate.
+                            rx_kbps = prev_rx
+                            tx_kbps = prev_tx
+                        else:
                             rx_diff = rx_bytes - prev.rx_bytes
                             tx_diff = tx_bytes - prev.tx_bytes
-
-                            # Counter reset (OLT reboot) — discard this sample
-                            if rx_diff < 0 or tx_diff < 0:
-                                prev.rx_bytes = rx_bytes
-                                prev.tx_bytes = tx_bytes
-                                prev.timestamp = current_time
-                                rx_diff = 0
-                                tx_diff = 0
-
-                            if time_diff > 300:
-                                # Stale snapshot — re-sync bytes+timestamp
-                                prev.rx_bytes = rx_bytes
-                                prev.tx_bytes = tx_bytes
-                                prev.timestamp = current_time
-                                rx_kbps = prev_rx
-                                tx_kbps = prev_tx
-                            elif rx_diff == 0 and tx_diff == 0:
-                                # OLT counter hasn't updated — keep previous rate.
-                                # Do NOT update timestamp to keep time_diff accurate.
+                            if rx_diff < 0 or tx_diff < 0 or (rx_diff == 0 and tx_diff == 0):
+                                # Counter reset or not yet refreshed — hold last rate.
                                 rx_kbps = prev_rx
                                 tx_kbps = prev_tx
                             else:
-                                # Real counter movement — compute instant
-                                # rate and blend with EMA.
-                                # time_diff now correctly reflects the period
-                                # since the LAST counter change (not last poll).
                                 instant_rx = (rx_diff * 8) / time_diff / 1000
                                 instant_tx = (tx_diff * 8) / time_diff / 1000
-
                                 MAX_VALID_KBPS = 1_500_000  # 1.5 Gbps per ONU
                                 if instant_rx > MAX_VALID_KBPS or instant_tx > MAX_VALID_KBPS:
-                                    instant_rx = 0
-                                    instant_tx = 0
-
-                                # No EMA — exact instant rate
-                                rx_kbps = round(instant_rx, 2)
-                                tx_kbps = round(instant_tx, 2)
-
-                                # DEBUG: Log rate for high-traffic ONUs
-                                if rx_kbps > 50000 or tx_kbps > 50000:
-                                    logger.info(f"[WS-TRAFFIC-DEBUG] {mac}: rx_diff={rx_diff:,} tx_diff={tx_diff:,} time={time_diff:.1f}s -> rx={rx_kbps:.0f} tx={tx_kbps:.0f} kbps")
-
-                                prev.last_rx_kbps = rx_kbps
-                                prev.last_tx_kbps = tx_kbps
-
-                                # Only update bytes+timestamp when counters
-                                # actually changed — keeps time_diff accurate.
-                                prev.rx_bytes = rx_bytes
-                                prev.tx_bytes = tx_bytes
-                                prev.timestamp = current_time
-                        else:
-                            # No recent data (>120s) — slow decay so display
-                            # gradually fades to 0 instead of jumping.
-                            rx_kbps = round(prev_rx * 0.95, 2)
-                            tx_kbps = round(prev_tx * 0.95, 2)
-                            prev.last_rx_kbps = rx_kbps
-                            prev.last_tx_kbps = tx_kbps
-                            prev.rx_bytes = rx_bytes
-                            prev.tx_bytes = tx_bytes
-                            prev.timestamp = current_time
-                    else:
-                        snapshot = TrafficSnapshot(
-                            olt_id=olt_id,
-                            mac_address=mac,
-                            rx_bytes=rx_bytes,
-                            tx_bytes=tx_bytes,
-                            timestamp=current_time,
-                            last_rx_kbps=0,
-                            last_tx_kbps=0
-                        )
-                        db.add(snapshot)
+                                    rx_kbps = prev_rx  # implausible spike — hold
+                                    tx_kbps = prev_tx
+                                else:
+                                    rx_kbps = round(instant_rx, 2)
+                                    tx_kbps = round(instant_tx, 2)
+                    # else: no baseline yet -> rx_kbps/tx_kbps stay 0; the poll
+                    # cycle will create the snapshot on its next run.
 
                     # Get ONU description from database
                     onu = db.query(ONU).filter(
