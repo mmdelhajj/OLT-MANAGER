@@ -1167,6 +1167,32 @@ def get_traffic_counters_snmp(ip: str, community: str = "public") -> Dict[str, D
                     tx_bytes = int(match.group(2))
                     tx_by_index[if_index] = tx_bytes
 
+        # 32-bit fallback: some OLTs/firmware expose only ifInOctets/ifOutOctets
+        # (Counter32) for ONU sub-interfaces, not the 64-bit HC counters — those
+        # ONUs would otherwise report zero traffic. Fill in any ONU interfaces
+        # missing from the 64-bit walk. (Counter32 wraps at 2^32; the per-direction
+        # reset guard in the rate helper drops the wrap sample rather than spiking.)
+        missing = [i for i in onu_interfaces if i not in rx_by_index or i not in tx_by_index]
+        if missing:
+            IF_IN_OCTETS_32 = "1.3.6.1.2.1.2.2.1.10"
+            IF_OUT_OCTETS_32 = "1.3.6.1.2.1.2.2.1.16"
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                rx32_future = executor.submit(run_snmp_bulk, IF_IN_OCTETS_32)
+                tx32_future = executor.submit(run_snmp_bulk, IF_OUT_OCTETS_32)
+                rx32_result = rx32_future.result()
+                tx32_result = tx32_future.result()
+            for line in rx32_result.stdout.split('\n'):
+                if 'Counter32:' in line:
+                    m = re.search(r'\.10\.(\d+)\s*=\s*Counter32:\s*(\d+)', line)
+                    if m and m.group(1) not in rx_by_index:
+                        rx_by_index[m.group(1)] = int(m.group(2))
+            for line in tx32_result.stdout.split('\n'):
+                if 'Counter32:' in line:
+                    m = re.search(r'\.16\.(\d+)\s*=\s*Counter32:\s*(\d+)', line)
+                    if m and m.group(1) not in tx_by_index:
+                        tx_by_index[m.group(1)] = int(m.group(2))
+            logger.info(f"32-bit counter fallback for {ip}: filled {len(missing)} ONU interface(s)")
+
         # Now we need to map PON.ONU to MAC address
         # Helper function for regular SNMP walk
         def run_snmp_walk(oid: str) -> subprocess.CompletedProcess:
