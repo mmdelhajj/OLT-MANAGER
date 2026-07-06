@@ -22,7 +22,7 @@ venv/bin/python -m alembic upgrade head
 ```
 Adds: `0008` olts.snmp_community · `0009` **agent_keys table** (agent endpoints
 were 500ing without it) · `0010` **olts.mk_*** columns (OLT queries errored
-without them) · `0011` poll-path indexes.
+without them) · `0011` poll-path indexes · `0012` users.is_staff.
 
 ## 4. One-time: dedupe duplicate ONU rows (Postgres)
 The startup `dedupe_onus()` only runs on the local SQLite build — RLS blocks the
