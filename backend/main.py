@@ -6823,208 +6823,50 @@ async def traffic_polling_loop(olt_id: int, olt_ip: str, db_session_factory):
     finally:
         db.close()
 
+    # Stream the CACHED snapshot rates (refreshed every ~30s by the background
+    # poll cycle) every couple of seconds. This replaces the old per-client live
+    # SNMP poll, which took 60s+ and left the live tiles stuck on "polling...".
     while olt_id in traffic_manager.active_connections and traffic_manager.active_connections[olt_id]:
         try:
-            poll_start = datetime.now()
             db = db_session_factory()
             try:
-                # Get current traffic counters from SNMP with keep-alive pings
-                loop = asyncio.get_event_loop()
-                olt_community = db.query(OLT.snmp_community).filter(OLT.id == olt_id).scalar() or "public"
-                snmp_task = loop.run_in_executor(
-                    thread_executor,
-                    get_traffic_counters_snmp,
-                    olt_ip,
-                    olt_community
-                )
-
-                # Send keep-alive pings every 5 seconds while SNMP poll runs
-                while not snmp_task.done():
-                    try:
-                        current_counters = await asyncio.wait_for(asyncio.shield(snmp_task), timeout=5.0)
-                        break  # Poll completed
-                    except asyncio.TimeoutError:
-                        # Still polling - send keep-alive to prevent WebSocket timeout
-                        elapsed = int((datetime.now() - poll_start).total_seconds())
-                        await traffic_manager.broadcast(olt_id, {
-                            "olt_id": olt_id,
-                            "timestamp": datetime.now().isoformat(),
-                            "polling": True,
-                            "elapsed_seconds": elapsed,
-                            "message": f"Polling SNMP ({elapsed}s)..."
-                        })
-
-                current_counters = await snmp_task
-
-                if not current_counters:
-                    await traffic_manager.broadcast(olt_id, {
-                        "olt_id": olt_id,
-                        "timestamp": datetime.now().isoformat(),
-                        "traffic": [],
-                        "message": "No traffic data"
-                    })
-                    await asyncio.sleep(1.5)
-                    continue
-
+                snaps = db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt_id).all()
+                onus = {o.mac_address: o for o in db.query(ONU).filter(ONU.olt_id == olt_id).all()}
                 current_time = datetime.utcnow()
-
-                # Get previous snapshots for this OLT
-                prev_snapshots = {
-                    s.mac_address: s
-                    for s in db.query(TrafficSnapshot).filter(TrafficSnapshot.olt_id == olt_id).all()
-                }
-
-                # Get OLT name
-                olt = db.query(OLT).filter(OLT.id == olt_id).first()
-                olt_name = olt.name if olt else f"OLT-{olt_id}"
-
-                # Get Mikrotik traffic rates if configured
-                mk_rates = {}
-                if olt and getattr(olt, 'mk_enabled', False) and getattr(olt, 'mk_ip', None):
-                    try:
-                        from mikrotik_traffic import get_mikrotik_traffic
-                        onu_db_map = {}
-                        for onu in db.query(ONU).filter(ONU.olt_id == olt_id).all():
-                            onu_db_map[(onu.pon_port, onu.onu_id)] = onu.mac_address
-                        mk_rates = await loop.run_in_executor(
-                            thread_executor,
-                            lambda: get_mikrotik_traffic(
-                                mk_ip=olt.mk_ip,
-                                mk_user=olt.mk_username or 'admin',
-                                mk_pass=olt.mk_password or '',
-                                mk_port=olt.mk_port or 8728,
-                                olt_ip=olt.ip_address,
-                                snmp_community=olt.snmp_community or 'public',
-                                onu_db_map=onu_db_map,
-                            )
-                        )
-                    except Exception as exc:
-                        logger.warning(f"Mikrotik traffic (WS) failed: {exc}")
-
                 traffic_data = []
-
-                # No EMA smoothing — use exact instant rate.
-                # OLT counters update every ~30s so the rate is already a
-                # 30s average; smoothing just makes the display lag behind.
-
-                for key, counters in current_counters.items():
-                    rx_bytes = counters['rx_bytes']
-                    tx_bytes = counters['tx_bytes']
-                    pon_port = counters.get('pon_port', 0)
-                    onu_id = counters.get('onu_id', 0)
-
-                    # Handle both MAC and pon:onu key formats
-                    if ':' in key and len(key) < 10:  # pon:onu format
-                        onu_for_mac = db.query(ONU).filter(
-                            ONU.olt_id == olt_id,
-                            ONU.pon_port == pon_port,
-                            ONU.onu_id == onu_id
-                        ).first()
-                        mac = onu_for_mac.mac_address if onu_for_mac else None
-                        if not mac:
-                            continue
-                    else:
-                        mac = key
-
-                    rx_kbps = 0
-                    tx_kbps = 0
-
-                    # READ-ONLY: the background poll cycle (collect_traffic_history)
-                    # is the sole writer of TrafficSnapshot rows. This WS loop only
-                    # COMPUTES a live display rate from the latest snapshot and never
-                    # writes it back — this removes the dual-writer race that caused
-                    # jittery/oscillating rates when a dashboard was open during a poll.
-                    if mac in prev_snapshots:
-                        prev = prev_snapshots[mac]
-                        prev_rx = getattr(prev, 'last_rx_kbps', 0) or 0
-                        prev_tx = getattr(prev, 'last_tx_kbps', 0) or 0
-                        time_diff = (current_time - prev.timestamp).total_seconds()
-
-                        if time_diff <= 0 or time_diff > 300:
-                            # No usable window — show the poll's last known rate.
-                            rx_kbps = prev_rx
-                            tx_kbps = prev_tx
-                        else:
-                            rx_diff = rx_bytes - prev.rx_bytes
-                            tx_diff = tx_bytes - prev.tx_bytes
-                            if rx_diff < 0 or tx_diff < 0 or (rx_diff == 0 and tx_diff == 0):
-                                # Counter reset or not yet refreshed — hold last rate.
-                                rx_kbps = prev_rx
-                                tx_kbps = prev_tx
-                            else:
-                                instant_rx = (rx_diff * 8) / time_diff / 1000
-                                instant_tx = (tx_diff * 8) / time_diff / 1000
-                                MAX_VALID_KBPS = 1_500_000  # 1.5 Gbps per ONU
-                                if instant_rx > MAX_VALID_KBPS or instant_tx > MAX_VALID_KBPS:
-                                    rx_kbps = prev_rx  # implausible spike — hold
-                                    tx_kbps = prev_tx
-                                else:
-                                    rx_kbps = round(instant_rx, 2)
-                                    tx_kbps = round(instant_tx, 2)
-                    # else: no baseline yet -> rx_kbps/tx_kbps stay 0; the poll
-                    # cycle will create the snapshot on its next run.
-
-                    # Get ONU description from database
-                    onu = db.query(ONU).filter(
-                        ONU.olt_id == olt_id,
-                        ONU.mac_address == mac
-                    ).first()
-
+                for s in snaps:
+                    onu = onus.get(s.mac_address)
                     onu_online = bool(onu and onu.is_online)
-
-                    # Override with Mikrotik rates if available (more accurate) —
-                    # but never for an offline ONU.
-                    if onu_online and mac in mk_rates:
-                        rx_kbps = mk_rates[mac]['rx_kbps']
-                        tx_kbps = mk_rates[mac]['tx_kbps']
-
-                    # Offline ONUs must never show live traffic.
-                    if not onu_online:
-                        rx_kbps = 0
-                        tx_kbps = 0
-
+                    rx = (s.last_rx_kbps or 0) if onu_online else 0
+                    tx = (s.last_tx_kbps or 0) if onu_online else 0
                     traffic_data.append({
-                        "mac_address": mac,
-                        "pon_port": pon_port,
-                        "onu_id": onu_id,
+                        "mac_address": s.mac_address,
+                        "pon_port": onu.pon_port if onu else 0,
+                        "onu_id": onu.onu_id if onu else 0,
                         "description": onu.description if onu else None,
                         "is_online": onu_online,
-                        "rx_kbps": rx_kbps,
-                        "tx_kbps": tx_kbps,
-                        "rx_mbps": round(rx_kbps / 1000, 2),
-                        "tx_mbps": round(tx_kbps / 1000, 2)
+                        "rx_kbps": rx,
+                        "tx_kbps": tx,
+                        "rx_mbps": round(rx / 1000, 2),
+                        "tx_mbps": round(tx / 1000, 2),
                     })
-
-                db.commit()
-
-                # Sort: online first (by traffic descending), then offline at bottom
                 traffic_data.sort(key=lambda x: (not x.get('is_online', False), -(x['rx_kbps'] + x['tx_kbps'])))
-
-                # Calculate poll duration for live indicator
-                poll_ms = int((datetime.now() - poll_start).total_seconds() * 1000)
-
-                # Broadcast to all connected clients
                 await traffic_manager.broadcast(olt_id, {
                     "olt_id": olt_id,
                     "olt_name": olt_name,
                     "timestamp": current_time.isoformat(),
                     "onu_count": len(traffic_data),
-                    "poll_ms": poll_ms,  # Shows how fast the poll was
-                    "traffic": traffic_data
+                    "traffic": traffic_data,
                 })
-
             finally:
                 db.close()
-
-            # Wait 1.5 seconds before next poll (faster refresh)
-            await asyncio.sleep(1.5)
-
+            await asyncio.sleep(2)
         except asyncio.CancelledError:
             logger.info(f"Traffic polling loop cancelled for OLT {olt_id}")
             break
         except Exception as e:
             logger.error(f"Traffic polling error for OLT {olt_id}: {e}")
-            await asyncio.sleep(5)  # Wait longer on error
+            await asyncio.sleep(5)
 
     logger.info(f"Stopped traffic polling loop for OLT {olt_id}")
 
