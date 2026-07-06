@@ -2679,7 +2679,7 @@ def list_olts(user: User = Depends(require_auth), db: Session = Depends(get_db))
 
 
 @app.get("/api/olts/{olt_id}", response_model=OLTResponse)
-def get_olt(olt_id: int, db: Session = Depends(get_db)):
+def get_olt(olt_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
     """Get specific OLT by ID"""
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
     if not olt:
@@ -2941,7 +2941,7 @@ def delete_olt(olt_id: int, user: User = Depends(require_admin), db: Session = D
 
 
 @app.post("/api/olts/{olt_id}/poll", response_model=PollResult)
-async def poll_single_olt(olt_id: int, db: Session = Depends(get_db)):
+async def poll_single_olt(olt_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
     """Manually trigger poll for specific OLT using SNMP (fast ~2 seconds)"""
     from license_manager import license_manager
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
@@ -3314,7 +3314,7 @@ async def execute_olt_command(olt_id: int, request: ExecuteCommandRequest, user:
 # ============ ONU Endpoints ============
 
 @app.get("/api/olts/{olt_id}/onus", response_model=ONUListResponse)
-def list_onus_by_olt(olt_id: int, db: Session = Depends(get_db)):
+def list_onus_by_olt(olt_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
     """List ONUs for specific OLT"""
     olt = db.query(OLT).filter(OLT.id == olt_id).first()
     if not olt:
@@ -3462,6 +3462,7 @@ def list_all_onus(
 @app.get("/api/onus/search", response_model=ONUListResponse)
 def search_onus(
     q: str = Query(..., min_length=1, description="Search query"),
+    user: User = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
     """Search ONUs by customer name or MAC address"""
@@ -3522,7 +3523,7 @@ def search_onus(
 
 
 @app.get("/api/onus/{onu_id}", response_model=ONUResponse)
-def get_onu(onu_id: int, db: Session = Depends(get_db)):
+def get_onu(onu_id: int, user: User = Depends(require_auth), db: Session = Depends(get_db)):
     """Get specific ONU by ID"""
     result = db.query(ONU, OLT.name.label("olt_name")).join(OLT).filter(
         ONU.id == onu_id
@@ -5590,15 +5591,23 @@ async def get_build_publish_status(current_user: User = Depends(require_admin)):
 # ============ Settings API ============
 
 @app.get("/api/settings")
-def get_settings(db: Session = Depends(get_db)):
-    """Get all settings (public - for page name and refresh time)"""
+def get_settings(user: Optional[User] = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all settings (public - for page name and refresh time).
+
+    Non-sensitive settings stay readable pre-login (page name/refresh). Encrypted
+    secrets (whatsapp_secret, trap_community) are NEVER returned to non-admins.
+    """
     settings = db.query(Settings).all()
     # Keys that are stored encrypted
     sensitive_keys = ["whatsapp_secret", "trap_community"]
+    is_admin = bool(user and getattr(user, "role", None) in ("admin", "owner"))
     result = {}
     for s in settings:
-        # Decrypt sensitive values when reading
-        result[s.key] = decrypt_sensitive(s.value) if s.key in sensitive_keys else s.value
+        if s.key in sensitive_keys:
+            # Only admins get the decrypted secret; everyone else gets ""
+            result[s.key] = decrypt_sensitive(s.value) if is_admin else ""
+        else:
+            result[s.key] = s.value
     # Return defaults if not set
     if "system_name" not in result:
         result["system_name"] = "OLT Manager"
