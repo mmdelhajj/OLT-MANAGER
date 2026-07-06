@@ -3225,10 +3225,17 @@ async def get_olt_vlans(olt_id: int, user: User = Depends(require_admin), db: Se
     try:
         loop = asyncio.get_event_loop()
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
-        vlan_config = await loop.run_in_executor(thread_executor, connector.get_vlan_config)
+        get_vlan = getattr(connector, "get_vlan_config", None)
+        if not callable(get_vlan):
+            # VLAN read isn't implemented for this OLT — degrade gracefully
+            # instead of 500 so the dashboard doesn't error out.
+            return {"success": False, "vlans": [], "raw_config": "",
+                    "message": "VLAN configuration read is not supported for this OLT."}
+        vlan_config = await loop.run_in_executor(thread_executor, get_vlan)
         return {"success": True, "vlans": vlan_config.get('vlans', []), "raw_config": vlan_config.get('raw_config', '')}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning(f"get_olt_vlans failed for {olt.ip_address}: {e}")
+        return {"success": False, "vlans": [], "raw_config": "", "message": f"Could not read VLANs: {e}"}
 
 
 class SetONUVlanRequest(BaseModel):
@@ -3253,6 +3260,8 @@ async def set_onu_vlan(olt_id: int, request: SetONUVlanRequest, user: User = Dep
             lambda: connector.set_onu_vlan(request.pon_port, request.onu_id, request.vlan_id, request.mode)
         )
         return {"success": result, "message": f"VLAN {request.vlan_id} set for ONU {request.pon_port}:{request.onu_id} in {request.mode} mode"}
+    except AttributeError:
+        raise HTTPException(status_code=501, detail="Setting ONU VLAN is not implemented for this OLT yet.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3279,6 +3288,8 @@ async def set_port_status(olt_id: int, request: SetPortStatusRequest, user: User
         )
         status = "enabled" if request.enabled else "disabled"
         return {"success": result, "message": f"Port {request.port_type} {request.port_number} {status}"}
+    except AttributeError:
+        raise HTTPException(status_code=501, detail="Enabling/disabling a port is not implemented for this OLT yet.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3301,6 +3312,8 @@ async def reboot_olt(olt_id: int, user: User = Depends(require_admin), db: Sessi
         db.commit()
 
         return {"success": result, "message": f"OLT {olt.name} is rebooting. It will take 2-3 minutes to come back online."}
+    except AttributeError:
+        raise HTTPException(status_code=501, detail="OLT reboot is not implemented for this OLT yet.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3317,6 +3330,8 @@ async def save_olt_config(olt_id: int, user: User = Depends(require_admin), db: 
         connector = OLTConnector(olt.ip_address, olt.username, decrypt_sensitive(olt.password))
         result = await loop.run_in_executor(thread_executor, connector.save_config)
         return {"success": result, "message": "Configuration saved successfully"}
+    except AttributeError:
+        raise HTTPException(status_code=501, detail="Save-config is not implemented for this OLT yet.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
