@@ -1312,6 +1312,14 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                         (o.pon_port, o.onu_id): o
                         for o in db.query(ONU).filter(ONU.olt_id == olt.id).all()
                     }
+                    # Also index by MAC so an ONU that re-registers at a new
+                    # (pon,onu) position is MOVED, not duplicated. Prefer the
+                    # online / most-recently-seen row when duplicates still exist.
+                    existing_by_mac = {}
+                    for _o in existing_by_key.values():
+                        _cur = existing_by_mac.get(_o.mac_address)
+                        if _cur is None or (_o.is_online and not _cur.is_online):
+                            existing_by_mac[_o.mac_address] = _o
 
                     # Track which ONUs we've seen
                     seen_keys = set()
@@ -1372,9 +1380,28 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                         # Use ONLY web distance (no SNMP fallback)
                         final_distance = web_distance
 
-                        if key in existing_by_key:
+                        existing = existing_by_key.get(key)
+                        if existing is None:
+                            # Not at this (pon,onu) — but the same MAC may already
+                            # exist at another position (the ONU re-registered).
+                            # Move that row to the new position instead of creating
+                            # a duplicate.
+                            moved = existing_by_mac.get(onu_data.mac_address)
+                            if moved is not None:
+                                old_key = (moved.pon_port, moved.onu_id)
+                                seen_keys.discard(old_key)
+                                existing_by_key.pop(old_key, None)
+                                moved.pon_port = onu_data.pon_port
+                                moved.onu_id = onu_data.onu_id
+                                existing_by_key[key] = moved
+                                existing = moved
+                                logger.info(
+                                    f"ONU {onu_data.mac_address} moved "
+                                    f"{old_key} -> {key} (re-registered) on {olt.name}"
+                                )
+
+                        if existing is not None:
                             # Update existing ONU
-                            existing = existing_by_key[key]
                             was_online = existing.is_online
                             existing.mac_address = onu_data.mac_address
                             existing.is_online = is_online
@@ -1496,6 +1523,8 @@ async def poll_all_olts(db_session_factory, use_snmp: bool = True, tenant_id: Op
                                 last_seen=datetime.utcnow() if is_online else None
                             )
                             db.add(new_onu)
+                            existing_by_key[key] = new_onu
+                            existing_by_mac[onu_data.mac_address] = new_onu
                             current_onu_count += 1  # Track added ONUs
                             onu_limit_reached = current_onu_count >= max_onus
                             # Send new ONU registration notification
@@ -2282,6 +2311,45 @@ async def start_trap_receiver(db_session_factory):
         db.close()
 
 
+def dedupe_onus(db) -> int:
+    """Collapse duplicate ONU rows that share (olt_id, mac_address).
+
+    A MAC identifies exactly one physical ONU, but historically a re-registration
+    at a new (pon,onu) created a new row and orphaned the old one (which then
+    showed the online twin's MAC-keyed traffic). Keep the best row per (olt,mac)
+    — online preferred, then most-recently-seen — and delete the rest with their
+    now-bogus history. Idempotent: a no-op once the table is clean.
+    """
+    from sqlalchemy import func
+    from datetime import datetime as _dt
+    removed = 0
+    dup_groups = (
+        db.query(ONU.olt_id, ONU.mac_address)
+        .group_by(ONU.olt_id, ONU.mac_address)
+        .having(func.count() > 1)
+        .all()
+    )
+    for olt_id, mac in dup_groups:
+        rows = db.query(ONU).filter(ONU.olt_id == olt_id, ONU.mac_address == mac).all()
+        rows.sort(
+            key=lambda o: (
+                1 if o.is_online else 0,
+                o.last_seen or o.online_since or o.updated_at or _dt.min,
+            ),
+            reverse=True,
+        )
+        for loser in rows[1:]:
+            db.query(TrafficHistory).filter(
+                TrafficHistory.onu_db_id == loser.id
+            ).delete(synchronize_session=False)
+            db.delete(loser)
+            removed += 1
+    if removed:
+        db.commit()
+        logger.info(f"Deduped {removed} duplicate ONU rows (kept 1 per olt+MAC)")
+    return removed
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
@@ -2312,6 +2380,11 @@ async def lifespan(app: FastAPI):
         db = SessionLocal()
         try:
             create_default_admin(db)
+            # One-time (idempotent) cleanup of legacy duplicate ONU rows.
+            try:
+                dedupe_onus(db)
+            except Exception as _dedup_err:
+                logger.warning(f"ONU dedupe skipped: {_dedup_err}")
         finally:
             db.close()
     else:
