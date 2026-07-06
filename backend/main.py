@@ -1126,14 +1126,23 @@ async def collect_traffic_history(olt, db):
             for if_idx, rates in port_rates.items():
                 if if_idx in port_mapping:
                     port_type, port_num = port_mapping[if_idx]
+                    rx = rates['rx_kbps']
+                    tx = rates['tx_kbps']
+
+                    # Sanity guard: never persist an impossible port rate
+                    # (negative, or above the 10 Gbps uplink ceiling). A single
+                    # garbage sample otherwise blows up the graph scale and drags
+                    # the average negative.
+                    if rx < 0 or tx < 0 or rx > 10_000_000 or tx > 10_000_000:
+                        continue
 
                     # Save to PortTraffic table for per-port graphs
                     port_traffic = PortTraffic(
                         olt_id=olt.id,
                         port_type=port_type,
                         port_number=port_num,  # Use mapped port number
-                        rx_kbps=rates['rx_kbps'],
-                        tx_kbps=rates['tx_kbps'],
+                        rx_kbps=rx,
+                        tx_kbps=tx,
                         timestamp=current_time
                     )
                     db.add(port_traffic)
@@ -1145,8 +1154,8 @@ async def collect_traffic_history(olt, db):
                         olt_id=olt.id,
                         pon_port=None,
                         onu_db_id=None,
-                        rx_kbps=rates['rx_kbps'],
-                        tx_kbps=rates['tx_kbps'],
+                        rx_kbps=rx,
+                        tx_kbps=tx,
                         timestamp=current_time
                     )
                     db.add(uplink_history)
@@ -1711,6 +1720,16 @@ async def cleanup_old_data(db_session_factory, retention_days: int = 30):
         deleted_ports = db.query(PortTraffic).filter(
             PortTraffic.timestamp < cutoff_time
         ).delete(synchronize_session=False)
+
+        # Self-heal: scrub any impossible traffic samples (negative or above the
+        # 10 Gbps port ceiling) so one bad row can't wreck a graph's scale/avg.
+        _bad = "(rx_kbps < 0 OR tx_kbps < 0 OR rx_kbps > 10000000 OR tx_kbps > 10000000)"
+        try:
+            from sqlalchemy import text as _sql_text
+            db.execute(_sql_text(f"DELETE FROM port_traffic WHERE {_bad}"))
+            db.execute(_sql_text(f"DELETE FROM traffic_history WHERE {_bad}"))
+        except Exception as _e:
+            logger.warning(f"Impossible-rate scrub skipped: {_e}")
 
         db.commit()
 
@@ -6064,17 +6083,19 @@ def calculate_port_rates(olt_id: int, ip: str, current_counters: dict) -> dict:
         prev_time = prev.get('timestamp', 0)
         curr_time = current_counters.get(1, {}).get('timestamp', 0)
 
-        if curr_time > prev_time:
-            time_diff = curr_time - prev_time
-
+        time_diff = curr_time - prev_time
+        # Require a real poll interval. Sub-second gaps happen when two poll
+        # cycles overlap and share this global cache — dividing a byte delta by a
+        # near-zero time produced the absurd (multi-Tbps) / spiky port rates.
+        if time_diff >= 2:
             for if_idx, curr in current_counters.items():
-                if if_idx in prev:
+                if if_idx in prev and isinstance(prev.get(if_idx), dict):
                     prev_rx = prev[if_idx].get('rx_bytes', 0)
                     prev_tx = prev[if_idx].get('tx_bytes', 0)
                     curr_rx = curr.get('rx_bytes', 0)
                     curr_tx = curr.get('tx_bytes', 0)
 
-                    # Counter reset — discard sample
+                    # Counter reset/wrap — discard sample (prevents negatives)
                     if curr_rx < prev_rx or curr_tx < prev_tx:
                         continue
 
@@ -6082,8 +6103,8 @@ def calculate_port_rates(olt_id: int, ip: str, current_counters: dict) -> dict:
                     rx_kbps = ((curr_rx - prev_rx) * 8) / (1000 * time_diff)
                     tx_kbps = ((curr_tx - prev_tx) * 8) / (1000 * time_diff)
 
-                    # 10 Gbps cap for uplink ports
-                    if rx_kbps > 10_000_000 or tx_kbps > 10_000_000:
+                    # 10 Gbps cap for uplink ports (skip implausible spikes)
+                    if rx_kbps < 0 or tx_kbps < 0 or rx_kbps > 10_000_000 or tx_kbps > 10_000_000:
                         continue
 
                     rates[if_idx] = {
