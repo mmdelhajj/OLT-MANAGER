@@ -464,6 +464,10 @@ def ingest(
                     onu_tx_bias=onu_data.onu_tx_bias if onu_data.is_online else None,
                     online_since=current_time if onu_data.is_online else None,
                     last_seen=current_time if onu_data.is_online else None,
+                    # An ONU can first appear via the agent already offline
+                    # (e.g. discovered during a power outage); persist the
+                    # reported reason instead of leaving it blank.
+                    offline_reason=(onu_data.offline_reason or "Unknown") if not onu_data.is_online else None,
                 )
                 db.add(onu)
                 db.flush()
